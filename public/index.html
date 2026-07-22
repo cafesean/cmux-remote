@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0e14" />
+  <!-- iOS Home-Screen app: standalone chrome + icon; sw.js makes the shell boot without network -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="cmux" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <title>cmux-remote</title>
+  <style>
+    :root {
+      --bg: #0b0e14; --panel: #11151f; --panel2: #161b28; --line: #232a3a;
+      --fg: #dbe2f0; --dim: #8b95ab; --faint:#4c576b;
+      --accent: #4c8dff;   /* the ONE selected/mirrored thing + primary actions */
+      --ok: #35c07f;       /* running */
+      --warn: #e0a94c;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+      font-family: var(--sans); overscroll-behavior: none; }
+    body { display: flex; flex-direction: column; height: 100%; padding: env(safe-area-inset-top) 0 0; }
+
+    /* header: workspace dropdown (left) + actions (right) */
+    header { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      background: var(--panel); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+    .wschip { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
+      background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+      border-radius: 10px; padding: 5px 11px; text-align: left; }
+    .wschip[aria-expanded="true"] { border-color: var(--accent); }
+    .wschip .wlabels { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+    .wschip .whost { font-family: var(--mono); font-size: 10px; color: var(--faint);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wschip .wname { font-size: 15px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wschip .wcaret { margin-left: auto; color: var(--dim); font-size: 11px; flex: 0 0 auto; }
+    header button.icon { flex: 0 0 auto; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 10px; font-size: 14px; }
+    header button.icon.primary { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+    header button.icon:disabled { opacity: .55; }
+
+    /* workspace list popover — just workspaces + New workspace */
+    #wsMenu { position: fixed; z-index: 30; background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 12px; padding: 5px; min-width: 200px; max-width: 82vw; max-height: 70vh; overflow: auto;
+      box-shadow: 0 14px 34px rgba(0,0,0,.6); }
+    #wsMenu[hidden] { display: none; }
+    #wsMenu button { display: flex; width: 100%; align-items: center; gap: 10px; background: transparent;
+      border: none; color: var(--fg); font-size: 14px; font-weight: 600; padding: 10px 11px; border-radius: 8px; text-align: left; }
+    #wsMenu button:active { background: var(--panel); }
+    #wsMenu button.sel { color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    #wsMenu button .wsdot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+    #wsMenu button.run .wsdot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+    #wsMenu button .wsname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #wsMenu button .wsclose { flex: 0 0 auto; margin-left: auto; width: 24px; height: 24px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center; color: var(--dim); font-size: 17px; line-height: 1; }
+    #wsMenu button .wsclose:active { background: rgba(255,255,255,.12); color: var(--fg); }
+    #wsMenu .sep { height: 1px; background: var(--line); margin: 5px 6px; }
+    #wsMenu button.new { color: var(--accent); font-weight: 600; }
+
+    /* settings popover (gear) — font size + room for more */
+    #setMenu { position: fixed; z-index: 30; background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 12px; padding: 6px; min-width: 232px; max-width: 88vw;
+      box-shadow: 0 14px 34px rgba(0,0,0,.6); }
+    #setMenu[hidden] { display: none; }
+    #setMenu .settitle { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em;
+      font-weight: 700; padding: 6px 8px 4px; }
+    #setMenu .setrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px; }
+    #setMenu .setlabel { font-size: 14px; color: var(--fg); font-weight: 600; }
+    #setMenu .stepper { display: flex; align-items: center; gap: 6px; }
+    #setMenu .stepper button { background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 0; width: 40px; font-size: 15px; font-weight: 700; }
+    #setMenu .stepper button:active { background: var(--bg); border-color: var(--accent); }
+    #setMenu .setval { font-family: var(--mono); font-size: 13px; color: var(--dim); min-width: 46px; text-align: center; }
+    #setMenu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
+    #setMenu .setreset { width: 100%; background: transparent; color: var(--accent); border: none; font-size: 13px;
+      font-weight: 600; padding: 8px; text-align: left; border-radius: 8px; }
+    #setMenu .setreset:active { background: var(--panel); }
+
+    /* tab strip — tabs of the current workspace */
+    #tabs { display: flex; gap: 8px; padding: 8px 12px; overflow-x: auto; flex: 0 0 auto;
+      background: var(--panel); border-bottom: 1px solid var(--line); scrollbar-width: none; }
+    #tabs::-webkit-scrollbar { display: none; }
+    #tabs:empty::after { content: "no tabs"; color: var(--faint); font-size: 12px; padding: 4px 2px; }
+    .tab { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; cursor: pointer;
+      background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+      border-radius: 999px; padding: 6px 7px 6px 12px; font-size: 13px; white-space: nowrap; font-family: var(--mono); }
+    .tab.on { border-color: var(--accent); background: #17233d; box-shadow: inset 2px 0 0 var(--accent); }
+    .tab .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+    .tab.run .dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+    .tab .label { max-width: min(46vw, 360px); overflow: hidden; text-overflow: ellipsis; }
+    .tab.browser .btag { font-size: 10px; color: var(--dim); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
+    .tab.browser.on .btag { color: var(--accent); border-color: var(--accent); }
+    .tab .close { margin-left: 1px; width: 22px; height: 22px; border-radius: 50%; display: inline-flex;
+      align-items: center; justify-content: center; color: var(--dim); font-size: 16px; line-height: 1; }
+    .tab .close:active, .tab .close:hover { background: rgba(255,255,255,.10); color: var(--fg); }
+
+    /* terminal */
+    #wrap { flex: 1 1 auto; min-height: 0; width: 100%; max-width: 100vw; position: relative; overflow: hidden; }
+    #screen { position: absolute; inset: 0; width: 100%; max-width: 100%; height: 100%; margin: 0;
+      padding: 10px 12px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; touch-action: pan-y;
+      font-family: var(--mono); font-size: 10.5px; line-height: 1.28; white-space: pre-wrap;
+      color: var(--fg); background: var(--bg); -webkit-overflow-scrolling: touch; }
+    .trow { white-space: pre-wrap; overflow-wrap: anywhere; width: 100%; max-width: 100%; }
+    #status { position: absolute; top: 8px; left: 12px; font-size: 11px; color: var(--ok); font-weight: 600;
+      background: rgba(11,14,20,.78); padding: 3px 9px; border-radius: 999px; pointer-events: none; }
+    #status::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+      background: var(--ok); margin-right: 5px; vertical-align: middle; box-shadow: 0 0 6px var(--ok); }
+    #status.err { color: var(--warn); }
+    #status.err::before { background: var(--warn); box-shadow: none; }
+    #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: var(--dim); font-size: 14px; text-align: center; padding: 24px; }
+    /* jump-to-bottom chip (shown when scrolled off the tail) */
+    #jump { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--fg);
+      background: rgba(22,27,40,.95); border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px;
+      display: none; align-items: center; gap: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+    #jump.show { display: inline-flex; }
+
+    /* input dock */
+    footer { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line);
+      padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
+    .modeseg { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; font-size: 12px; font-family: var(--mono); }
+    .modeseg button { flex: 1; text-align: center; padding: 6px 0; border-radius: 7px; color: var(--dim); background: transparent; border: none; letter-spacing: .04em; }
+    .modeseg button.on { background: var(--accent); color: #fff; font-weight: 700; }
+    /* special-key dock: arrows as a d-pad (↑ sits above ↓ so rapid taps can't stray onto the other),
+       everything else in a wrapping group. Every key fires on pointerdown (see app.js) so a press
+       registers instantly; touch-action: manipulation kills the tap delay + double-tap zoom. */
+    .keys { display: flex; gap: 10px; align-items: flex-start; }
+    .keys[hidden] { display: none; }
+    .keys button { font-family: var(--mono); -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+    .dpad { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3, 42px); grid-template-rows: repeat(2, 36px); gap: 5px; }
+    .dpad button { background: var(--panel2); color: var(--accent); border: 1px solid var(--accent);
+      border-radius: 8px; font-size: 17px; display: flex; align-items: center; justify-content: center; padding: 0; }
+    .dpad button:active { background: #223; }
+    .dpad .up { grid-area: 1 / 2; } .dpad .left { grid-area: 2 / 1; }
+    .dpad .down { grid-area: 2 / 2; } .dpad .right { grid-area: 2 / 3; }
+    .special { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; }
+    .special button { background: var(--panel2); color: var(--fg);
+      border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font-size: 12px; }
+    .special button:active { background: #223; }
+    .row { display: flex; gap: 8px; align-items: flex-end; }
+    .row textarea { flex: 1; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 9px; padding: 7px 11px; font-size: 16px; line-height: 1.25; font-family: var(--mono);
+      min-width: 0; min-height: 38px; max-height: 120px; resize: none; overflow-y: auto; }
+    .row textarea:focus { outline: none; border-color: var(--accent); }
+    .row textarea.live { border-color: var(--accent); }
+    .row button.send { flex: 0 0 auto; height: 34px; background: var(--accent); color: #fff; border: none;
+      border-radius: 9px; padding: 0 14px; font-size: 14px; font-weight: 600; }
+    .row button.send:disabled { opacity: .5; }
+    .row button.send[hidden] { display: none; }
+    .row .kbtoggle { flex: 0 0 auto; height: 34px; background: var(--panel2); color: var(--dim); border: 1px solid var(--line);
+      border-radius: 9px; padding: 0 8px; display: flex; align-items: center; justify-content: center; }
+    .row .kbtoggle.on { border-color: var(--accent); color: var(--accent); }
+    .hint { font-size: 10.5px; color: var(--dim); font-family: var(--mono); padding: 0 2px; }
+
+    /* ---- browser mirror (a browser surface: refreshing screenshot + tap/scroll/type) ---- */
+    #browser { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; background: #000; }
+    #browser[hidden] { display: none; }
+    #bbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; flex: 0 0 auto;
+      background: var(--panel); border-bottom: 1px solid var(--line); }
+    #bbar .bnav { flex: 0 0 auto; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 9px; font-size: 14px; line-height: 1; }
+    #bbar .bnav:active { background: var(--bg); border-color: var(--accent); }
+    #bbar .bnav:disabled { opacity: .5; }
+    #bbar #burl { flex: 1 1 auto; min-width: 0; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 10px; font-size: 14px; font-family: var(--mono); }
+    #bbar #burl:focus { outline: none; border-color: var(--accent); }
+    #bview { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center;
+      overflow: hidden; touch-action: none; background: #000; }
+    #bshot { max-width: 100%; max-height: 100%; display: block; -webkit-user-select: none; user-select: none;
+      -webkit-user-drag: none; }
+    #bspin { position: absolute; color: var(--dim); font-size: 13px; font-family: var(--mono); pointer-events: none; }
+
+    /* footer swap: hide terminal controls, show browser controls, in browser mode */
+    body.mode-browser #modeSeg, body.mode-browser #keys, body.mode-browser .row, body.mode-browser #hint { display: none; }
+    #bfoot { display: none; flex-direction: column; gap: 8px; }
+    body.mode-browser #bfoot { display: flex; }
+    #bfoot .bkeys { display: flex; flex-wrap: wrap; gap: 6px; }
+    #bfoot .bkeys button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 9px 12px; font-size: 13px; font-family: var(--mono);
+      -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+    #bfoot .bkeys button:active { background: #223; border-color: var(--accent); }
+    #bfoot #btext { width: 100%; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 9px; padding: 9px 11px; font-size: 16px; font-family: var(--mono); }
+    #bfoot #btext:focus { outline: none; border-color: var(--accent); }
+
+    #gate { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      background: var(--bg); color: var(--dim); font-size: 15px; text-align: center; padding: 30px; z-index: 5; }
+    #gate a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <button class="wschip" id="wsChip" type="button" aria-haspopup="menu" aria-expanded="false">
+      <span class="wlabels"><span class="whost" id="hostLabel">—</span><span class="wname" id="wsLabel">—</span></span>
+      <span class="wcaret">▾</span>
+    </button>
+    <button class="icon primary" id="newTab" aria-label="New tab" title="New tab in this workspace">+ Tab</button>
+    <button class="icon" id="newBrowser" aria-label="New browser tab" title="New browser tab in this workspace">+🌐</button>
+    <button class="icon" id="settingsBtn" aria-haspopup="menu" aria-expanded="false" aria-label="Settings" title="Settings">⚙</button>
+    <button class="icon" id="refresh" aria-label="Refresh">⟳</button>
+  </header>
+
+  <div id="tabs"><!-- tab chips (tabs of the current workspace) --></div>
+
+  <div id="wrap">
+    <div id="screen"></div>
+    <div id="status" hidden></div>
+    <div id="empty">Pick a workspace to mirror its tabs.</div>
+    <button id="jump" type="button">↓ jump to bottom</button>
+    <div id="browser" hidden>
+      <div id="bbar">
+        <button id="bBack" class="bnav" type="button" aria-label="Back" title="Back">‹</button>
+        <button id="bFwd" class="bnav" type="button" aria-label="Forward" title="Forward">›</button>
+        <button id="bReload" class="bnav" type="button" aria-label="Reload" title="Reload">⟳</button>
+        <input id="burl" type="url" inputmode="url" enterkeyhint="go" autocomplete="off"
+               autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Enter URL…" />
+        <button id="bGo" class="bnav" type="button" aria-label="Go">Go</button>
+        <button id="bZoomOut" class="bnav" type="button" aria-label="Zoom out" title="Zoom out">A−</button>
+        <button id="bZoomIn" class="bnav" type="button" aria-label="Zoom in" title="Zoom in">A+</button>
+      </div>
+      <div id="bview"><img id="bshot" alt="remote browser" draggable="false" /><span id="bspin" hidden>loading…</span></div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="modeseg" id="modeSeg" role="tablist" aria-label="Input mode">
+      <button id="modeCompose" class="on" type="button" role="tab" aria-selected="true">Compose</button>
+      <button id="modeLive" type="button" role="tab" aria-selected="false">Live</button>
+    </div>
+    <div class="keys" id="keys" hidden>
+      <div class="dpad">
+        <button class="arrow up" data-key="up" aria-label="Up">↑</button>
+        <button class="arrow left" data-key="left" aria-label="Left">←</button>
+        <button class="arrow down" data-key="down" aria-label="Down">↓</button>
+        <button class="arrow right" data-key="right" aria-label="Right">→</button>
+      </div>
+      <div class="special">
+        <button data-key="escape">Esc</button>
+        <button data-key="tab">⇥</button>
+        <button data-key="shift+tab">⇧⇥</button>
+        <button data-key="ctrl+c">^C</button>
+        <button data-key="enter">⏎</button>
+        <button data-key="pageup">PgUp</button>
+        <button data-key="pagedown">PgDn</button>
+      </div>
+    </div>
+    <div class="row">
+      <button class="kbtoggle" id="kbToggle" type="button" aria-label="Special keys" aria-pressed="false"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg></button>
+      <textarea id="text" rows="1" placeholder="Type…  (Send to submit)" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+      <button class="send" id="send">Send</button>
+    </div>
+    <div class="hint" id="hint">Compose · type a message, tap Send</div>
+    <div id="bfoot">
+      <div class="bkeys">
+        <button data-bkey="escape" type="button">Esc</button>
+        <button data-bkey="tab" type="button">⇥</button>
+        <button data-bkey="up" type="button" aria-label="Up">↑</button>
+        <button data-bkey="down" type="button" aria-label="Down">↓</button>
+        <button data-bkey="left" type="button" aria-label="Left">←</button>
+        <button data-bkey="right" type="button" aria-label="Right">→</button>
+        <button data-bkey="backspace" type="button">⌫</button>
+        <button data-bkey="enter" type="button">⏎</button>
+      </div>
+      <input id="btext" placeholder="Tap a field, type here — syncs as you pause" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false" />
+    </div>
+  </footer>
+
+  <div id="wsMenu" hidden role="menu"></div>
+
+  <div id="setMenu" hidden role="menu" aria-label="Settings">
+    <div class="settitle">Settings</div>
+    <div class="setrow">
+      <span class="setlabel">Font size</span>
+      <div class="stepper">
+        <button id="fontDown" type="button" aria-label="Smaller font">A−</button>
+        <span class="setval" id="fontVal">100%</span>
+        <button id="fontUp" type="button" aria-label="Larger font">A+</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <button class="setreset" id="fontReset" type="button">Reset to fit width</button>
+  </div>
+
+  <div id="gate"></div>
+  <script src="/app.js?v=v3-browser-20260722e"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
+</body>
+</html>

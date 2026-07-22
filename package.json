@@ -1,0 +1,25 @@
+{
+  "name": "cmux-remote",
+  "version": "0.1.0",
+  "description": "View and drive your local cmux terminal and browser tabs from any browser or phone. Self-hostable, multi-machine, zero-dependency.",
+  "author": "Sean Liao",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "cmux-remote-bridge": "bridge.js",
+    "cmux-remote-server": "server.js"
+  },
+  "scripts": {
+    "bridge": "node bridge.js",
+    "server": "node server.js"
+  },
+  "keywords": [
+    "cmux",
+    "terminal",
+    "agents",
+    "remote"
+  ]
+}

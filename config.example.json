@@ -1,0 +1,19 @@
+{
+  "_comment": "Optional alternative to env vars. Copy to config.json (gitignored) and point CMUX_CONFIG=./config.json. Real URLs/secrets live here, never committed.",
+  "machines": [
+    {
+      "id": "my-mac",
+      "label": "My Mac",
+      "baseUrl": "http://192.0.2.1:8799",
+      "secret": "must-match-that-bridge-BRIDGE_SECRET"
+    },
+    {
+      "id": "laptop",
+      "label": "Laptop",
+      "baseUrl": "https://laptop.example.com",
+      "secret": "another-bridge-secret",
+      "accessId": "optional-cf-access-client-id",
+      "accessSecret": "optional-cf-access-client-secret"
+    }
+  ]
+}
