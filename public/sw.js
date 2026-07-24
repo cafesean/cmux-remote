@@ -1,9 +1,10 @@
-// cmux-remote service worker — instant boot for the iOS Home-Screen app.
-// Cache-first for the app shell (/ and /app.js): every launch boots from the SW cache with ZERO
-// network round trips (iOS kills backgrounded standalone apps, so every open is a cold relaunch —
-// over a tunnel that meant seconds of blank). A background revalidate refreshes the cache so the
-// NEXT launch picks up deploys. /api/* is never touched — grids/streams stay fully live.
-const CACHE = 'cmux-shell-v1';
+// cmux-remote service worker.
+// Shell `/` (index.html) is cache-first with background revalidate → instant boot (iOS kills backgrounded
+// standalone apps, so every open is a cold relaunch; over a tunnel that meant seconds of blank).
+// `/app.js` is NETWORK-FIRST so code changes land in a SINGLE reload — cache-first here made every deploy
+// "one launch behind" (the query ?v= is ignored by cache matching), which looked like changes not taking.
+// It falls back to cache only when offline. /api/* is never touched — grids/streams stay fully live.
+const CACHE = 'cmux-shell-v3';
 const SHELL = ['/', '/app.js'];
 
 self.addEventListener('install', (e) => {
@@ -18,20 +19,25 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+const putCache = (path, r) => { if (r && r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(path, copy)); } return r; };
+
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
   const path = url.pathname === '/index.html' ? '/' : url.pathname;
-  if (!SHELL.includes(path)) return;   // /api/*, sw.js itself, manifest, icons: straight to network
 
-  const refresh = fetch(new Request(path, { cache: 'no-cache' }))
-    .then((r) => {
-      if (r && r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(path, copy)); }
-      return r;
-    })
-    .catch(() => null);
+  // app.js: network-first → the freshest code every reload; cache is only the offline fallback.
+  if (path === '/app.js') {
+    e.respondWith(
+      fetch(new Request(path, { cache: 'no-store' }))
+        .then((r) => putCache(path, r))
+        .catch(() => caches.match(path).then((hit) => hit || new Response('offline', { status: 503 })))
+    );
+    return;
+  }
+  // shell '/': cache-first + background revalidate (instant boot; next launch picks up index.html changes).
+  if (path !== '/') return;   // manifest, icons, sw.js itself, /api/*: straight to network
+  const refresh = fetch(new Request('/', { cache: 'no-cache' })).then((r) => putCache('/', r)).catch(() => null);
   e.waitUntil(refresh.then(() => {}));
-  e.respondWith(
-    caches.match(path).then((hit) => hit || refresh.then((r) => r || new Response('offline', { status: 503 })))
-  );
+  e.respondWith(caches.match('/').then((hit) => hit || refresh.then((r) => r || new Response('offline', { status: 503 }))));
 });
