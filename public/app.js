@@ -922,6 +922,27 @@
   });
   window.addEventListener('pagehide', () => { flushGridCache(); stopPolling(); closeBrowserStream(); if (state.browser.urlTimer) { clearInterval(state.browser.urlTimer); state.browser.urlTimer = null; } });
 
+  // Dock the header + keep the composer above the keyboard, WITHOUT the bounce. body is position:fixed
+  // (index.html), so iOS can't pan the layout to reveal the focused input — the earlier bounce was our
+  // own scrollTo(0,0) fighting that pan every frame. Here we ONLY size the fixed shell to the visual
+  // viewport (rAF-coalesced): when the keyboard opens, vv.height shrinks → body shrinks → the footer
+  // (composer) rises above the keyboard and #screen loses the height, while header/tabs stay pinned to
+  // the top. No window scroll is touched, so nothing bounces. No-op where visualViewport is missing.
+  (() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    let raf = 0;
+    const fit = () => {
+      raf = 0;
+      document.body.style.height = vv.height + 'px';
+      document.body.style.top = (vv.offsetTop || 0) + 'px';   // track any offset iOS applies; NOT window.scrollTo
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(fit); };
+    vv.addEventListener('resize', on);
+    vv.addEventListener('scroll', on);
+    fit();
+  })();
+
   (async () => {
     updateFontVal();
     setMode('compose');
