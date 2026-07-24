@@ -791,7 +791,7 @@
       const rowEl = (e.target && e.target.closest) ? e.target.closest('.trow') : null;
       if (rowEl && tryMenuClick(rowEl)) return;                    // tapped a menu option → click it, don't pop keyboard
       if (elText.disabled) return;
-      try { elText.focus({ preventScroll: true }); } catch (_) { elText.focus(); }
+      elText.focus();   // plain focus (NOT preventScroll) so iOS slides the layout up, same as a direct tap
     };
     elScreen.addEventListener('pointerup', end);
     elScreen.addEventListener('pointercancel', () => { g = null; });
