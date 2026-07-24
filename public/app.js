@@ -687,6 +687,44 @@
     try { await jpost('/api/cmux/key', { machine: state.machine, surface: state.tab.id, key }); }
     catch (_) { setStatus('key failed', true); }
   }
+  // Press a short sequence of keys in order (each is one cmux round trip). Used to "click" a menu
+  // option: walk the highlight to the tapped row with arrows, then Enter. Menus are tiny → a few hops.
+  async function pressKeys(keys) { for (const k of keys) { await doKey(k); } }
+
+  // ---- tap-to-click a Claude-Code selection menu ------------------------------
+  // cmux emits a render-GRID (metadata), not a raw byte stream, and Claude's Ink TUI enables no xterm
+  // mouse tracking — so a real mouse click can't be delivered to the terminal. Instead we treat a tap
+  // on an option row as a click by moving the highlight there with arrow keys (the grid rows map 1:1 to
+  // .trow nodes, so item order = arrow steps) and pressing Enter. Gated tightly: it fires ONLY when the
+  // screen shows a numbered list AND one row carries a cursor marker (❯…), so ordinary numbered output
+  // in Claude's prose never triggers stray keypresses.
+  const MENU_MARKERS = '❯▶►▸➤»‣';                                  // cursor pointers only (not check/radio glyphs)
+  const MENU_ITEM_RE = new RegExp('^\\s*[' + MENU_MARKERS + ']?\\s*\\d+[.)]\\s+\\S');
+  const firstGlyph = (s) => { const t = (s || '').replace(/^\s+/, ''); return t ? t[0] : ''; };
+  const isMarked = (s) => MENU_MARKERS.indexOf(firstGlyph(s)) >= 0;
+  // If `rowEl` is an option row of a live selection menu, move the highlight to it + confirm.
+  // Returns true if it handled the tap (so the caller doesn't also focus the composer).
+  function tryMenuClick(rowEl) {
+    if (!state.tab || state.tabType !== 'terminal') return false;
+    const rows = Array.prototype.slice.call(elScreen.childNodes);
+    const tapIdx = rows.indexOf(rowEl);
+    if (tapIdx < 0) return false;
+    const items = []; let markedItem = -1;                          // option rows (grid indices) + which is selected
+    rows.forEach((el, i) => {
+      const txt = el.textContent || '';
+      if (MENU_ITEM_RE.test(txt)) { if (markedItem < 0 && isMarked(txt)) markedItem = items.length; items.push(i); }
+    });
+    if (markedItem < 0) return false;                               // no live cursor marker → not an interactive menu
+    const tapItem = items.indexOf(tapIdx);
+    if (tapItem < 0) return false;                                  // tapped a non-option row → fall through to focus
+    const delta = tapItem - markedItem;
+    const keys = [];
+    for (let n = 0; n < Math.abs(delta); n++) keys.push(delta > 0 ? 'down' : 'up');
+    keys.push('enter');                                            // delta 0 (tapped the highlighted row) → just confirm
+    setStatus('select…');
+    pressKeys(keys);
+    return true;
+  }
 
   // ---- mode ----
   function setMode(mode) {
@@ -730,6 +768,34 @@
     const atBottom = elScreen.scrollHeight - elScreen.scrollTop - elScreen.clientHeight < 40;
     state.followTail = atBottom; updateJump(); closeWsMenu();
   }, { passive: true });
+
+  // Tap vs scroll on the terminal screen. A real tap (small move, quick) either CLICKS a menu option
+  // (tryMenuClick) or, failing that, focuses the composer — so after scrolling/reading you can just tap
+  // the screen and start typing instead of hunting for the input box. A scroll fires pointercancel (iOS)
+  // or moves past the threshold, so it never steals focus. No pointer capture → native scrolling is
+  // untouched. Focus MUST be called synchronously in the gesture or iOS won't raise the keyboard.
+  (() => {
+    let g = null;
+    elScreen.addEventListener('pointerdown', (e) => {
+      if (state.tabType !== 'terminal') { g = null; return; }
+      g = { sx: e.clientX, sy: e.clientY, t: Date.now(), max: 0 };
+    });
+    elScreen.addEventListener('pointermove', (e) => {
+      if (!g) return;
+      g.max = Math.max(g.max, Math.abs(e.clientX - g.sx), Math.abs(e.clientY - g.sy));
+    }, { passive: true });
+    const end = (e) => {
+      const gg = g; g = null;
+      if (!gg || state.tabType !== 'terminal' || !state.tab) return;
+      if (gg.max >= 8 || Date.now() - gg.t >= 500) return;         // a scroll or a long-press (text select), not a tap
+      const rowEl = (e.target && e.target.closest) ? e.target.closest('.trow') : null;
+      if (rowEl && tryMenuClick(rowEl)) return;                    // tapped a menu option → click it, don't pop keyboard
+      if (elText.disabled) return;
+      try { elText.focus({ preventScroll: true }); } catch (_) { elText.focus(); }
+    };
+    elScreen.addEventListener('pointerup', end);
+    elScreen.addEventListener('pointercancel', () => { g = null; });
+  })();
 
   // Live mode: forward each inserted char / enter / backspace straight to the terminal.
   elText.addEventListener('beforeinput', (e) => {

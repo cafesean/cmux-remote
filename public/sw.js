@@ -3,7 +3,7 @@
 // network round trips (iOS kills backgrounded standalone apps, so every open is a cold relaunch —
 // over a tunnel that meant seconds of blank). A background revalidate refreshes the cache so the
 // NEXT launch picks up deploys. /api/* is never touched — grids/streams stay fully live.
-const CACHE = 'cmux-shell-v1';
+const CACHE = 'cmux-shell-v2';
 const SHELL = ['/', '/app.js'];
 
 self.addEventListener('install', (e) => {
