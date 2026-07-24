@@ -769,11 +769,12 @@
     state.followTail = atBottom; updateJump(); closeWsMenu();
   }, { passive: true });
 
-  // Tap vs scroll on the terminal screen. A real tap (small move, quick) either CLICKS a menu option
-  // (tryMenuClick) or, failing that, focuses the composer — so after scrolling/reading you can just tap
-  // the screen and start typing instead of hunting for the input box. A scroll fires pointercancel (iOS)
-  // or moves past the threshold, so it never steals focus. No pointer capture → native scrolling is
-  // untouched. Focus MUST be called synchronously in the gesture or iOS won't raise the keyboard.
+  // Tap a Claude-Code selection-menu option on the terminal screen to "click" it (tryMenuClick moves the
+  // highlight there + Enter). A real tap only — a scroll (fires pointercancel on iOS, or moves past the
+  // threshold) or a long-press (text select) is ignored. No pointer capture → native scrolling untouched.
+  // NOTE: this deliberately does NOT focus the composer on a plain tap. Programmatically focusing the
+  // input from a screen tap made iOS bounce the layout (keyboard up→down, several taps to stick) — tap
+  // the input box directly to type instead.
   (() => {
     let g = null;
     elScreen.addEventListener('pointerdown', (e) => {
@@ -789,9 +790,7 @@
       if (!gg || state.tabType !== 'terminal' || !state.tab) return;
       if (gg.max >= 8 || Date.now() - gg.t >= 500) return;         // a scroll or a long-press (text select), not a tap
       const rowEl = (e.target && e.target.closest) ? e.target.closest('.trow') : null;
-      if (rowEl && tryMenuClick(rowEl)) return;                    // tapped a menu option → click it, don't pop keyboard
-      if (elText.disabled) return;
-      elText.focus();   // plain focus (NOT preventScroll) so iOS slides the layout up, same as a direct tap
+      if (rowEl) tryMenuClick(rowEl);                              // menu option → click it; otherwise do nothing (no focus-steal)
     };
     elScreen.addEventListener('pointerup', end);
     elScreen.addEventListener('pointercancel', () => { g = null; });
