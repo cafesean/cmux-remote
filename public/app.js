@@ -931,11 +931,15 @@
   (() => {
     const vv = window.visualViewport;
     if (!vv) return;
+    // Establish the fixed shell here in JS too (not just CSS) — index.html is cache-first in the SW, so
+    // its position:fixed rule can be a reload behind while this (network-first app.js) is already fresh.
+    const bs = document.body.style;
+    bs.position = 'fixed'; bs.left = '0'; bs.right = '0';
     let raf = 0;
     const fit = () => {
       raf = 0;
-      document.body.style.height = vv.height + 'px';
-      document.body.style.top = (vv.offsetTop || 0) + 'px';   // track any offset iOS applies; NOT window.scrollTo
+      bs.height = vv.height + 'px';
+      bs.top = (vv.offsetTop || 0) + 'px';   // track any offset iOS applies; NOT window.scrollTo
     };
     const on = () => { if (!raf) raf = requestAnimationFrame(fit); };
     vv.addEventListener('resize', on);
