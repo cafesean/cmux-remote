@@ -923,27 +923,6 @@
   });
   window.addEventListener('pagehide', () => { flushGridCache(); stopPolling(); closeBrowserStream(); if (state.browser.urlTimer) { clearInterval(state.browser.urlTimer); state.browser.urlTimer = null; } });
 
-  // Keep the whole app inside the VISUAL viewport when the iOS keyboard opens. By default iOS scrolls
-  // the layout viewport up to reveal a low-sitting focused input — which shoves the header/tab strip off
-  // the top. Instead we pin the body to the visible height and reset any page scroll: the header + tabs
-  // stay docked at the top, the composer sits right above the keyboard, and #screen shrinks between them
-  // (the terminal is scrollable, so no content is lost). No-op where visualViewport is unavailable.
-  (() => {
-    const vv = window.visualViewport;
-    if (!vv) return;
-    let raf = 0;
-    const apply = () => {
-      raf = 0;
-      document.body.style.height = vv.height + 'px';
-      if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);   // undo iOS's focus scroll
-      if (state.followTail && state.tabType === 'terminal') elScreen.scrollTop = elScreen.scrollHeight;
-    };
-    const onChange = () => { if (!raf) raf = requestAnimationFrame(apply); };
-    vv.addEventListener('resize', onChange);
-    vv.addEventListener('scroll', onChange);
-    apply();
-  })();
-
   (async () => {
     updateFontVal();
     setMode('compose');
