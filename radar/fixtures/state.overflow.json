@@ -1,0 +1,1325 @@
+{
+  "v": 1,
+  "generatedAt": "2026-07-31T03:24:36.000Z",
+  "collectorId": "machine-a",
+  "machines": [
+    {
+      "id": "machine-a",
+      "bridge": "ok",
+      "lastSeenAt": "2026-07-31T03:24:36.000Z"
+    }
+  ],
+  "sources": {
+    "git": {
+      "status": "ok",
+      "observedAt": "2026-07-31T03:24:36.000Z"
+    },
+    "sessions": {
+      "status": "ok",
+      "observedAt": "2026-07-31T03:24:36.000Z"
+    },
+    "deploy": {
+      "status": "stale",
+      "observedAt": "2026-07-31T03:24:36.000Z",
+      "error": "1/2 deploy probes degraded: app-web.dev: env VERCEL_TOKEN_MAIN is unset"
+    },
+    "jira": {
+      "status": "ok",
+      "observedAt": "2026-07-31T03:24:36.000Z"
+    },
+    "specs": {
+      "status": "ok",
+      "observedAt": "2026-07-31T03:24:36.000Z"
+    },
+    "config": {
+      "status": "ok",
+      "observedAt": "2026-07-31T03:24:36.000Z"
+    }
+  },
+  "counts": {
+    "blocked": 0,
+    "decisions": 0,
+    "mergeable": 1,
+    "orphans": 131,
+    "staleWorktrees": 0
+  },
+  "repos": {},
+  "epics": [
+    {
+      "key": "app-connectors",
+      "aliases": [],
+      "title": null,
+      "jira": null,
+      "ladder": {
+        "spec": "done",
+        "pushed": "done",
+        "mergedDevelop": "current",
+        "deployedDev": "todo",
+        "prod": "todo",
+        "flags": "unknown"
+      },
+      "zone": "dormant",
+      "signals": [
+        "unmerged-develop"
+      ],
+      "phrase": "1 branch unmerged",
+      "lastActivityAt": "2026-07-20T10:00:00.000Z",
+      "repos": [
+        "app-web"
+      ],
+      "flag": null,
+      "branchCount": 1
+    },
+    {
+      "key": "p5-radar",
+      "aliases": [],
+      "title": null,
+      "jira": null,
+      "ladder": {
+        "spec": "done",
+        "pushed": "current",
+        "mergedDevelop": "todo",
+        "deployedDev": "todo",
+        "prod": "todo",
+        "flags": "unknown"
+      },
+      "zone": "active",
+      "signals": [
+        "recent-commit",
+        "unpushed-commits",
+        "unmerged-develop"
+      ],
+      "phrase": "building · 30 commits unpushed",
+      "lastActivityAt": "2026-07-31T02:00:00.000Z",
+      "repos": [
+        "cmux-remote"
+      ],
+      "flag": null,
+      "branchCount": 1
+    },
+    {
+      "key": "PROJ-108",
+      "aliases": [],
+      "title": null,
+      "jira": null,
+      "ladder": {
+        "spec": "unknown",
+        "pushed": "current",
+        "mergedDevelop": "todo",
+        "deployedDev": "unknown",
+        "prod": "todo",
+        "flags": "unknown"
+      },
+      "zone": "active",
+      "signals": [
+        "recent-commit",
+        "unpushed-commits"
+      ],
+      "phrase": "building · 25 commits unpushed",
+      "lastActivityAt": "2026-07-30T09:00:00.000Z",
+      "repos": [
+        "app-web"
+      ],
+      "flag": null,
+      "branchCount": 1
+    }
+  ],
+  "sessions": [],
+  "attention": [
+    {
+      "type": "mergeable",
+      "epic": "app-connectors",
+      "note": null,
+      "actions": [
+        {
+          "kind": "context"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "cmux-remote",
+      "branch": "backup/pre-reset-20260723",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "cmux-remote",
+      "branch": "feature/p3-browser-mirror",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "cmux-remote",
+      "branch": "feature/p4-fs-browse",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "cmux-remote",
+      "branch": "feature/p4-fs-download",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "admin",
+      "branch": "fix/inbox-owner-org",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "docs",
+      "branch": "chore/bump-deps",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p10-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p11-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p12-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p13-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p14-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p15-channel",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p16-pricing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p17-images",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p18-chokepoint",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p19-inbox",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p20-boards",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p21-runner",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p22-desktop",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p23-uploads",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p24-workflows",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p25-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p26-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p27-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p28-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p29-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p30-channel",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p31-pricing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p32-images",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p33-chokepoint",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p34-inbox",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p35-boards",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p36-runner",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p37-desktop",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p38-uploads",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p39-workflows",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p40-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p41-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p42-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p43-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p44-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p45-channel",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p46-pricing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p47-images",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p48-chokepoint",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p49-inbox",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p50-boards",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p51-runner",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p52-desktop",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p53-uploads",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p54-workflows",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p55-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p56-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p57-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p58-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p59-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p60-channel",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p61-pricing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p62-images",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p63-chokepoint",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p64-inbox",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p65-boards",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p66-runner",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p67-desktop",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p68-uploads",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p69-workflows",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p70-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p71-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p72-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p73-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p74-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p75-channel",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p76-pricing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p77-images",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p78-chokepoint",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p79-inbox",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p80-boards",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p81-runner",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p82-desktop",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p83-uploads",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p84-workflows",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p85-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p86-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p87-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p88-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p89-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p90-channel",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p91-pricing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p92-images",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p93-chokepoint",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p94-inbox",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p95-boards",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p96-runner",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p97-desktop",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p98-uploads",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p99-workflows",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p100-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p101-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p102-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p103-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p104-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p105-channel",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p106-pricing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p107-images",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p108-chokepoint",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p109-inbox",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p110-boards",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p111-runner",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p112-desktop",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p113-uploads",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p114-workflows",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p115-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p116-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p117-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p118-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p119-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p120-channel",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p121-pricing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p122-images",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p123-chokepoint",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p124-inbox",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p125-boards",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p126-runner",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p127-desktop",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p128-uploads",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p129-workflows",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p130-search",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p131-billing",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p132-radar",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p133-memory",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "spec-orphan",
+      "specFolder": "p134-editor",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    }
+  ]
+}

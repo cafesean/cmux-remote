@@ -1,0 +1,269 @@
+{
+ "name": "zsh-menu-single-2",
+ "meta": {
+  "source": "scratch-scenario",
+  "scenario": "zsh-menu-single",
+  "step": "moved-down"
+ },
+ "grid": {
+  "columns": 98,
+  "rows": 34,
+  "active_screen": "primary",
+  "cursor": {
+   "blinking": true,
+   "column": 73,
+   "row": 0,
+   "style": "bar",
+   "visible": true
+  },
+  "styles": [
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 0,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#1A1A1A",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 1,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#0869CB",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#1A1A1A",
+    "id": 2,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#0869CB",
+    "id": 3,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#26A439",
+    "id": 4,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 5,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": true
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": true,
+    "faint": false,
+    "foreground": "#CC372E",
+    "id": 6,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   }
+  ],
+  "row_spans": [
+   {
+    "cell_width": 14,
+    "column": 0,
+    "row": 0,
+    "style_id": 1,
+    "text": " demouser@127 "
+   },
+   {
+    "cell_width": 4,
+    "column": 14,
+    "row": 0,
+    "style_id": 2,
+    "text": " ~ "
+   },
+   {
+    "cell_width": 1,
+    "column": 18,
+    "row": 0,
+    "style_id": 3,
+    "text": ""
+   },
+   {
+    "cell_width": 1,
+    "column": 19,
+    "row": 0,
+    "style_id": 0,
+    "text": " "
+   },
+   {
+    "cell_width": 2,
+    "column": 20,
+    "row": 0,
+    "style_id": 4,
+    "text": "ls"
+   },
+   {
+    "cell_width": 1,
+    "column": 22,
+    "row": 0,
+    "style_id": 0,
+    "text": " "
+   },
+   {
+    "cell_width": 50,
+    "column": 23,
+    "row": 0,
+    "style_id": 5,
+    "text": "/Users/demouser/Docs/_context/cmux-remote/_specs/p"
+   },
+   {
+    "cell_width": 12,
+    "column": 0,
+    "row": 1,
+    "style_id": 6,
+    "text": "p1-mirror-v2"
+   },
+   {
+    "cell_width": 25,
+    "column": 12,
+    "row": 1,
+    "style_id": 0,
+    "text": "/                        "
+   },
+   {
+    "cell_width": 8,
+    "column": 37,
+    "row": 1,
+    "style_id": 6,
+    "text": "p5-radar"
+   },
+   {
+    "cell_width": 27,
+    "column": 45,
+    "row": 1,
+    "style_id": 0,
+    "text": "/                          "
+   },
+   {
+    "cell_width": 13,
+    "column": 0,
+    "row": 2,
+    "style_id": 6,
+    "text": "p2-menu-chips"
+   },
+   {
+    "cell_width": 24,
+    "column": 13,
+    "row": 2,
+    "style_id": 0,
+    "text": "/                       "
+   },
+   {
+    "cell_width": 10,
+    "column": 37,
+    "row": 2,
+    "style_id": 6,
+    "text": "p6-handoff"
+   },
+   {
+    "cell_width": 25,
+    "column": 47,
+    "row": 2,
+    "style_id": 0,
+    "text": "/                        "
+   },
+   {
+    "cell_width": 17,
+    "column": 0,
+    "row": 3,
+    "style_id": 6,
+    "text": "p3-browser-mirror"
+   },
+   {
+    "cell_width": 20,
+    "column": 17,
+    "row": 3,
+    "style_id": 0,
+    "text": "/                   "
+   },
+   {
+    "cell_width": 34,
+    "column": 37,
+    "row": 3,
+    "style_id": 6,
+    "text": "p7-autocomplete-and-source-control"
+   },
+   {
+    "cell_width": 1,
+    "column": 71,
+    "row": 3,
+    "style_id": 0,
+    "text": "/"
+   },
+   {
+    "cell_width": 12,
+    "column": 0,
+    "row": 4,
+    "style_id": 6,
+    "text": "p4-fs-browse"
+   },
+   {
+    "cell_width": 60,
+    "column": 12,
+    "row": 4,
+    "style_id": 0,
+    "text": "/                                                           "
+   }
+  ]
+ }
+}

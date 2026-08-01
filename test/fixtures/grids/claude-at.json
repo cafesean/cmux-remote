@@ -1,0 +1,626 @@
+{
+ "name": "claude-at",
+ "meta": {
+  "source": "scratch-scenario",
+  "scenario": "claude-at",
+  "step": "at-picker"
+ },
+ "grid": {
+  "columns": 98,
+  "rows": 34,
+  "active_screen": "primary",
+  "cursor": {
+   "blinking": true,
+   "column": 3,
+   "row": 10,
+   "style": "block",
+   "visible": true
+  },
+  "styles": [
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 0,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#1A1A1A",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 1,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#0869CB",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#1A1A1A",
+    "id": 2,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#0869CB",
+    "id": 3,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#26A439",
+    "id": 4,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#D77757",
+    "id": 5,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": true,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 6,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#999999",
+    "id": 7,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFC107",
+    "id": 8,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#888888",
+    "id": 9,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#B1B9F9",
+    "id": 10,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   }
+  ],
+  "row_spans": [
+   {
+    "cell_width": 42,
+    "column": 0,
+    "row": 0,
+    "style_id": 0,
+    "text": "Last login: Sat Aug  1 16:33:15 on ttys000"
+   },
+   {
+    "cell_width": 6,
+    "column": 0,
+    "row": 1,
+    "style_id": 0,
+    "text": "claude"
+   },
+   {
+    "cell_width": 14,
+    "column": 0,
+    "row": 2,
+    "style_id": 1,
+    "text": " demouser@127 "
+   },
+   {
+    "cell_width": 4,
+    "column": 14,
+    "row": 2,
+    "style_id": 2,
+    "text": " ~ "
+   },
+   {
+    "cell_width": 1,
+    "column": 18,
+    "row": 2,
+    "style_id": 3,
+    "text": ""
+   },
+   {
+    "cell_width": 1,
+    "column": 19,
+    "row": 2,
+    "style_id": 0,
+    "text": " "
+   },
+   {
+    "cell_width": 6,
+    "column": 20,
+    "row": 2,
+    "style_id": 4,
+    "text": "claude"
+   },
+   {
+    "cell_width": 8,
+    "column": 0,
+    "row": 3,
+    "style_id": 5,
+    "text": " ▐▛███▜▌"
+   },
+   {
+    "cell_width": 6,
+    "column": 11,
+    "row": 3,
+    "style_id": 6,
+    "text": "Claude"
+   },
+   {
+    "cell_width": 4,
+    "column": 18,
+    "row": 3,
+    "style_id": 6,
+    "text": "Code"
+   },
+   {
+    "cell_width": 8,
+    "column": 23,
+    "row": 3,
+    "style_id": 7,
+    "text": "v2.1.220"
+   },
+   {
+    "cell_width": 9,
+    "column": 0,
+    "row": 4,
+    "style_id": 5,
+    "text": "▝▜█████▛▘"
+   },
+   {
+    "cell_width": 4,
+    "column": 11,
+    "row": 4,
+    "style_id": 7,
+    "text": "Opus"
+   },
+   {
+    "cell_width": 1,
+    "column": 16,
+    "row": 4,
+    "style_id": 7,
+    "text": "5"
+   },
+   {
+    "cell_width": 3,
+    "column": 18,
+    "row": 4,
+    "style_id": 7,
+    "text": "(1M"
+   },
+   {
+    "cell_width": 8,
+    "column": 22,
+    "row": 4,
+    "style_id": 7,
+    "text": "context)"
+   },
+   {
+    "cell_width": 4,
+    "column": 31,
+    "row": 4,
+    "style_id": 7,
+    "text": "with"
+   },
+   {
+    "cell_width": 5,
+    "column": 36,
+    "row": 4,
+    "style_id": 7,
+    "text": "xhigh"
+   },
+   {
+    "cell_width": 6,
+    "column": 42,
+    "row": 4,
+    "style_id": 7,
+    "text": "effort"
+   },
+   {
+    "cell_width": 1,
+    "column": 49,
+    "row": 4,
+    "style_id": 7,
+    "text": "·"
+   },
+   {
+    "cell_width": 6,
+    "column": 51,
+    "row": 4,
+    "style_id": 7,
+    "text": "Claude"
+   },
+   {
+    "cell_width": 3,
+    "column": 58,
+    "row": 4,
+    "style_id": 7,
+    "text": "Max"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 5,
+    "style_id": 5,
+    "text": " "
+   },
+   {
+    "cell_width": 2,
+    "column": 2,
+    "row": 5,
+    "style_id": 5,
+    "text": "▘▘"
+   },
+   {
+    "cell_width": 2,
+    "column": 5,
+    "row": 5,
+    "style_id": 5,
+    "text": "▝▝"
+   },
+   {
+    "cell_width": 15,
+    "column": 11,
+    "row": 5,
+    "style_id": 7,
+    "text": "/Users/demouser"
+   },
+   {
+    "cell_width": 1,
+    "column": 1,
+    "row": 7,
+    "style_id": 8,
+    "text": "⚠"
+   },
+   {
+    "cell_width": 33,
+    "column": 3,
+    "row": 7,
+    "style_id": 8,
+    "text": "1 MCP server needs authentication"
+   },
+   {
+    "cell_width": 11,
+    "column": 36,
+    "row": 7,
+    "style_id": 7,
+    "text": " · run /mcp"
+   },
+   {
+    "cell_width": 98,
+    "column": 0,
+    "row": 9,
+    "style_id": 9,
+    "text": "──────────────────────────────────────────────────────────────────────────────────────────────────"
+   },
+   {
+    "cell_width": 3,
+    "column": 0,
+    "row": 10,
+    "style_id": 0,
+    "text": "❯ @"
+   },
+   {
+    "cell_width": 98,
+    "column": 0,
+    "row": 11,
+    "style_id": 9,
+    "text": "──────────────────────────────────────────────────────────────────────────────────────────────────"
+   },
+   {
+    "cell_width": 18,
+    "column": 0,
+    "row": 12,
+    "style_id": 10,
+    "text": "+ untitled folder/"
+   },
+   {
+    "cell_width": 10,
+    "column": 0,
+    "row": 13,
+    "style_id": 7,
+    "text": "+ .quokka/"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 14,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 19,
+    "column": 2,
+    "row": 14,
+    "style_id": 7,
+    "text": ".claude.json.backup"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 15,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 8,
+    "column": 2,
+    "row": 15,
+    "style_id": 7,
+    "text": ".config/"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 16,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 6,
+    "column": 2,
+    "row": 16,
+    "style_id": 7,
+    "text": "Music/"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 17,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 13,
+    "column": 2,
+    "row": 17,
+    "style_id": 7,
+    "text": ".serverlessrc"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 18,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 8,
+    "column": 2,
+    "row": 18,
+    "style_id": 7,
+    "text": ".cursor/"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 19,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 13,
+    "column": 2,
+    "row": 19,
+    "style_id": 7,
+    "text": ".rest-client/"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 20,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 16,
+    "column": 2,
+    "row": 20,
+    "style_id": 7,
+    "text": "user@example.org"
+   },
+   {
+    "cell_width": 1,
+    "column": 19,
+    "row": 20,
+    "style_id": 7,
+    "text": "-"
+   },
+   {
+    "cell_width": 6,
+    "column": 21,
+    "row": 20,
+    "style_id": 7,
+    "text": "Google"
+   },
+   {
+    "cell_width": 5,
+    "column": 28,
+    "row": 20,
+    "style_id": 7,
+    "text": "Drive"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 21,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 16,
+    "column": 2,
+    "row": 21,
+    "style_id": 7,
+    "text": ".zprofile.pysave"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 22,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 6,
+    "column": 2,
+    "row": 22,
+    "style_id": 7,
+    "text": ".expo/"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 23,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 11,
+    "column": 2,
+    "row": 23,
+    "style_id": 7,
+    "text": ".gitkraken/"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 24,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 18,
+    "column": 2,
+    "row": 24,
+    "style_id": 7,
+    "text": ".zcompdump-MacBook"
+   },
+   {
+    "cell_width": 25,
+    "column": 21,
+    "row": 24,
+    "style_id": 7,
+    "text": "Pro-1.0.demoo.local.26331"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 25,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 8,
+    "column": 2,
+    "row": 25,
+    "style_id": 7,
+    "text": ".condarc"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 26,
+    "style_id": 7,
+    "text": "+"
+   },
+   {
+    "cell_width": 8,
+    "column": 2,
+    "row": 26,
+    "style_id": 7,
+    "text": ".docker/"
+   }
+  ]
+ }
+}

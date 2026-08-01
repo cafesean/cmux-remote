@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0e14" />
+  <meta name="color-scheme" content="dark" />
+  <!-- iOS Home-Screen app: standalone chrome + icon; sw.js makes the shell boot without network -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="cmux" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <title>cmux-remote</title>
+  <style>
+    :root {
+      --bg: #0b0e14; --panel: #11151f; --panel2: #161b28; --line: #232a3a;
+      --fg: #dbe2f0; --dim: #8b95ab; --faint:#4c576b;
+      --accent: #4c8dff;   /* the ONE selected/mirrored thing + primary actions */
+      --ok: #35c07f;       /* running */
+      --warn: #e0a94c;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    }
+    /* Tell the UA this is a dark page. Without it Safari renders every control it still owns —
+       buttons, inputs, scrollbars, prompt() dialogs — in LIGHT chrome, which is why a button that
+       had not been given an explicit background came out as a pale chip on iOS while looking
+       correct in Chromium. */
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    /* and stop relying on that: no button keeps the UA's own look */
+    button { appearance: none; -webkit-appearance: none; font: inherit; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+      font-family: var(--sans); overscroll-behavior: none; }
+    /* Fixed shell: the app can't scroll, so iOS never pans the layout to reveal the focused input —
+       header/tabs stay docked at top and app.js sizes body to the visual-viewport height so the composer
+       rides above the keyboard (see the visualViewport fit in app.js). */
+    body { position: fixed; top: 0; left: 0; right: 0; display: flex; flex-direction: column; height: 100%;
+      padding: env(safe-area-inset-top) 0 0; }
+
+    /* header: workspace dropdown (left) + actions (right) */
+    header { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      background: var(--panel); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+    .wschip { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
+      background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+      border-radius: 10px; padding: 5px 11px; text-align: left; }
+    .wschip[aria-expanded="true"] { border-color: var(--accent); }
+    .wschip .wlabels { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+    .wschip .whost { font-family: var(--mono); font-size: 10px; color: var(--faint);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wschip .wname { font-size: 15px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wschip .wcaret { margin-left: auto; color: var(--dim); font-size: 11px; flex: 0 0 auto; }
+    header button.icon { flex: 0 0 auto; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 10px; font-size: 14px; }
+    header button.icon.primary { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+    header button.icon:disabled { opacity: .55; }
+
+    /* workspace list popover — just workspaces + New workspace */
+    #wsMenu { position: fixed; z-index: 30; background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 12px; padding: 5px; min-width: 200px; max-width: 82vw; max-height: 70vh; overflow: auto;
+      box-shadow: 0 14px 34px rgba(0,0,0,.6); }
+    #wsMenu[hidden] { display: none; }
+    #wsMenu button { display: flex; width: 100%; align-items: center; gap: 10px; background: transparent;
+      border: none; color: var(--fg); font-size: 14px; font-weight: 600; padding: 10px 11px; border-radius: 8px; text-align: left; }
+    #wsMenu button:active { background: var(--panel); }
+    #wsMenu button.sel { color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    #wsMenu button .wsdot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+    #wsMenu button.run .wsdot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+    #wsMenu button .wsname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #wsMenu button .wsclose { flex: 0 0 auto; margin-left: auto; width: 24px; height: 24px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center; color: var(--dim); font-size: 17px; line-height: 1; }
+    #wsMenu button .wsclose:active { background: rgba(255,255,255,.12); color: var(--fg); }
+    #wsMenu .sep { height: 1px; background: var(--line); margin: 5px 6px; }
+    #wsMenu button.new { color: var(--accent); font-weight: 600; }
+
+    /* settings popover (gear) — font size + room for more; the split popover shares its styling */
+    #setMenu, #splitMenu { position: fixed; z-index: 30; background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 12px; padding: 6px; min-width: 232px; max-width: 88vw;
+      box-shadow: 0 14px 34px rgba(0,0,0,.6); }
+    #setMenu[hidden], #splitMenu[hidden] { display: none; }
+    #splitMenu .settitle { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em;
+      font-weight: 700; padding: 6px 8px 4px; }
+    #splitMenu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
+    #splitMenu .setnote { padding: 2px 8px 6px; font-size: 11px; line-height: 1.35; color: var(--dim); max-width: 240px; }
+    #splitMenu .setreset { width: 100%; background: transparent; color: var(--accent); border: none; font-size: 13px;
+      font-weight: 600; padding: 9px 8px; text-align: left; border-radius: 8px; }
+    #splitMenu .setreset:active { background: var(--panel); }
+    #splitMenu .setreset.danger { color: var(--warn); }
+    /* the tab strip is the ONE-PANE switcher; split view gets per-pane headers instead */
+    body:not(.solo) #tabs { display: none; }
+    header button.icon[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+    /* direction picker laid out as the split it makes: ← above/below/beside the pane you're in */
+    #splitMenu .dirgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 2px 6px 6px; }
+    #splitMenu .dirgrid button { background: var(--panel); color: var(--accent); border: 1px solid var(--accent);
+      border-radius: 8px; padding: 9px 0; font-size: 15px; touch-action: manipulation; }
+    #splitMenu .dirgrid button:active { background: #223; }
+    #splitMenu .dirgrid .up { grid-area: 1 / 2; }
+    #splitMenu .dirgrid .left { grid-area: 2 / 1; }
+    #splitMenu .dirgrid .down { grid-area: 2 / 2; }
+    #splitMenu .dirgrid .right { grid-area: 2 / 3; }
+    #setMenu .settitle { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em;
+      font-weight: 700; padding: 6px 8px 4px; }
+    #setMenu .setrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px; }
+    #setMenu .setlabel { font-size: 14px; color: var(--fg); font-weight: 600; }
+    #setMenu .stepper { display: flex; align-items: center; gap: 6px; }
+    #setMenu .stepper button { background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 0; width: 40px; font-size: 15px; font-weight: 700; }
+    #setMenu .stepper button:active { background: var(--bg); border-color: var(--accent); }
+    #setMenu .setval { font-family: var(--mono); font-size: 13px; color: var(--dim); min-width: 46px; text-align: center; }
+    #setMenu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
+    #setMenu .setreset { width: 100%; background: transparent; color: var(--accent); border: none; font-size: 13px;
+      font-weight: 600; padding: 8px; text-align: left; border-radius: 8px; }
+    #setMenu .setreset:active { background: var(--panel); }
+
+    /* tab strip — tabs of the current workspace */
+    #tabs { display: flex; gap: 8px; padding: 8px 12px; overflow-x: auto; flex: 0 0 auto;
+      background: var(--panel); border-bottom: 1px solid var(--line); scrollbar-width: none; }
+    #tabs::-webkit-scrollbar { display: none; }
+    #tabs:empty::after { content: "no tabs"; color: var(--faint); font-size: 12px; padding: 4px 2px; }
+    .tab { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; cursor: pointer;
+      background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+      border-radius: 999px; padding: 6px 7px 6px 12px; font-size: 13px; white-space: nowrap; font-family: var(--mono); }
+    .tab.on { border-color: var(--accent); background: #17233d; box-shadow: inset 2px 0 0 var(--accent); }
+    /* mirrored in another pane right now — visible, but not the tab the composer is driving */
+    .tab.vis { border-color: var(--faint); box-shadow: inset 2px 0 0 var(--faint); }
+    .tab .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+    .tab.run .dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+    .tab .label { max-width: min(46vw, 360px); overflow: hidden; text-overflow: ellipsis; }
+    /* Files toggle: square icon button, pinned first in the strip */
+    .tab.files { padding: 6px 10px; font-size: 15px; line-height: 1; }
+    .tab.files.on { border-color: var(--accent); background: #17233d; }
+    /* the strip's own new-tab affordances (one-pane view only — split view uses the pane ⊞ menus) */
+    .tab.add { padding: 6px 11px; font-size: 14px; line-height: 1; color: var(--accent); }
+    .tab.browser .btag { font-size: 10px; color: var(--dim); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
+    .tab.browser.on .btag { color: var(--accent); border-color: var(--accent); }
+    .tab .close { margin-left: 1px; width: 22px; height: 22px; border-radius: 50%; display: inline-flex;
+      align-items: center; justify-content: center; color: var(--dim); font-size: 16px; line-height: 1; }
+    .tab .close:active, .tab .close:hover { background: rgba(255,255,255,.10); color: var(--fg); }
+
+    /* terminal — one .pane box per cmux pane, positioned from the layout fractions the bridge sends.
+       Absolute % boxes reproduce ANY split tree (including nested ones) without modelling the tree. */
+    #wrap { flex: 1 1 auto; min-height: 0; width: 100%; max-width: 100vw; position: relative; overflow: hidden; }
+    #panes { position: absolute; inset: 0; }
+    .pane { position: absolute; display: flex; flex-direction: column; overflow: hidden;
+      background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+    /* one pane = the whole mirror (phone, or a single-pane workspace): no chrome, no wasted pixels */
+    .pane.solo { border: none; border-radius: 0; }
+    .pane.solo .phead { display: none; }
+    /* p7: every pane owns a footer. It holds the composer when this pane has it, and a tap-to-take
+       bar when it does not — so the box you type into is always the pane you are looking at. */
+    .pfoot { flex: 0 0 auto; min-width: 0; }
+    .pcomposebar { width: 100%; text-align: left; background: var(--panel2); color: var(--faint);
+      border: none; border-top: 1px solid var(--line); padding: 7px 9px; font: inherit; font-size: 12px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pcomposebar.hasdraft { color: var(--dim); font-style: italic; }
+    .pfoot footer { position: static; }
+    /* The live field advertises itself: an outline you can see at a glance beats a label you must read. */
+    textarea#text.live { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 10px -2px var(--accent); }
+    .livetoggle.on { color: var(--accent); border-color: var(--accent); }
+    /* 🕳️ `[hidden]` LOSES to any explicit `display`. `.modeseg { display:flex }` kept the removed
+       mode switch on screen even with el.hidden = true — the same trap that once left a download
+       button visible on a FIFO. Anything given an explicit display needs its own [hidden] rule. */
+    .modeseg[hidden] { display: none; }
+    .row .kbtoggle[hidden] { display: none; }
+    /* The ＋ sheet: attach a file, or paste an image. One control, two actions — hiding the whole
+       control where the clipboard API is missing would take file attachment down with it. */
+    .plusmenu { position: absolute; z-index: 60; background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; padding: 4px; display: flex; flex-direction: column; gap: 2px; min-width: 170px;
+      box-shadow: 0 10px 26px rgba(0,0,0,.5); }
+    .plusmenu[hidden] { display: none; }
+    .plusmenu button { background: none; border: none; color: var(--fg); font: inherit; font-size: 13px;
+      text-align: left; padding: 9px 10px; border-radius: 7px; }
+    .plusmenu button:active { background: var(--panel2); }
+    /* One chip bar, two sources. Chips are big touch targets — the whole point is not having to
+       aim at a terminal row on a phone. The source is on the chip, not just the bar, so a tap can
+       never be dispatched by the other source's handler. */
+    .chipbar { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; padding: 3px 2px 1px; }
+    .chipbar[hidden] { display: none; }
+    .chipbar::-webkit-scrollbar { display: none; }
+    /* Small: this is a hint strip, not a toolbar. It sits above the composer on a phone, so every
+       pixel it takes is a pixel of terminal. Still a real touch target via the vertical padding. */
+    .mchip { flex: 0 0 auto; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      background: var(--panel2); color: var(--dim); border: 1px solid var(--line); border-radius: 999px;
+      padding: 4px 9px; font: inherit; font-size: 11px; line-height: 1.5; font-family: var(--mono); }
+    .mchip.marked { border-color: var(--accent); color: var(--accent); }
+    /* Keyboard selection (← →). Filled rather than outlined, so it reads differently from `marked`,
+       which means "this is what the terminal currently has highlighted". */
+    .mchip.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .mchip:active { background: var(--line); }
+    .chipbar[data-source="live"] { border-left: 2px solid var(--accent); }
+    .pane.focus { border-color: var(--accent); }
+    .phead { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; min-width: 0;
+      padding: 4px 8px; background: var(--panel); border-bottom: 1px solid var(--line);
+      font-size: 11px; font-family: var(--mono); color: var(--dim); touch-action: manipulation; }
+    .pane.focus .phead { background: #17233d; color: var(--fg); }
+    .phead .pdot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+    .phead .pdot.run { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+    .phead .pname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .phead .pchips { flex: 0 0 auto; display: flex; gap: 4px; max-width: 55%; overflow-x: auto; scrollbar-width: none; }
+    .phead .pchips::-webkit-scrollbar { display: none; }
+    .phead .pchip { flex: 0 0 auto; background: var(--panel2); color: var(--dim); border: 1px solid var(--line);
+      border-radius: 999px; padding: 1px 7px; font-size: 10px; font-family: var(--mono); white-space: nowrap; }
+    .phead .pchip.on { color: var(--accent); border-color: var(--accent); }
+    /* per-pane actions, cmux-style: this pane's split menu and a direct kill for the pane */
+    .phead .pacts { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; margin-left: 2px; }
+    .phead .pact { background: transparent; color: var(--dim); border: none; border-radius: 6px;
+      padding: 2px 6px; font-size: 12px; line-height: 1; touch-action: manipulation; }
+    .phead .pact:active { background: var(--panel2); color: var(--fg); }
+    .pane.focus .phead .pact { color: var(--fg); }
+    .phead .pact.kill:active { background: rgba(224,169,76,.22); color: var(--warn); }
+    .pscreen { flex: 1 1 auto; min-height: 0; width: 100%; max-width: 100%; margin: 0;
+      padding: 10px 12px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; touch-action: pan-y;
+      font-family: var(--mono); font-size: 10.5px; line-height: 1.28; white-space: pre-wrap;
+      color: var(--fg); background: var(--bg); -webkit-overflow-scrolling: touch; }
+    /* dividers: a thin visible line with a fat invisible grab area, so a finger can hit it without
+       the split itself wasting screen. touch-action:none is scoped HERE — the panes keep pan-y. */
+    .phandle { position: absolute; z-index: 4; touch-action: none; }
+    .phandle::after { content: ''; position: absolute; background: var(--line); border-radius: 2px; }
+    .phandle.x { width: 18px; margin-left: -9px; cursor: col-resize; }
+    .phandle.x::after { left: 8px; top: 0; bottom: 0; width: 2px; }
+    .phandle.y { height: 18px; margin-top: -9px; cursor: row-resize; }
+    .phandle.y::after { top: 8px; left: 0; right: 0; height: 2px; }
+    .phandle.drag::after, .phandle:hover::after { background: var(--accent); }
+    /* ---- drag a pane to rearrange it -----------------------------------------------------------
+       The header band is the grip: it is the only part of a pane that isn't the terminal, so grabbing
+       it can take touch-action:none without costing the terminal its pan-y scroll. */
+    .phead { cursor: grab; touch-action: none; }
+    .phead .pgrip { flex: 0 0 auto; color: var(--faint); font-size: 12px; line-height: 1; letter-spacing: -1px; }
+    .pane.lifted { opacity: .5; }
+    .pane.lifted .phead { cursor: grabbing; }
+    /* the drop indicator: one box that moves to whichever pane the finger is over, sized to the half /
+       edge-strip the drop would actually fill, so what you see is what cmux will do */
+    #dropZone { position: absolute; z-index: 6; pointer-events: none; border-radius: 8px;
+      border: 2px solid var(--accent); background: rgba(96,165,250,.18); transition: all .07s linear; }
+    #dropZone[hidden] { display: none; }
+    #dropZone .dzlabel { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+      font-size: 11px; font-family: var(--mono); color: var(--accent); background: rgba(11,14,20,.85);
+      padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+    #dragGhost { position: fixed; z-index: 40; pointer-events: none; font-size: 11px; font-family: var(--mono);
+      color: var(--fg); background: var(--panel2); border: 1px solid var(--accent); border-radius: 6px;
+      padding: 3px 9px; max-width: 55vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      transform: translate(-50%, -140%); opacity: .95; }
+    #dragGhost[hidden] { display: none; }
+    /* file drop: dragging an image in from the desktop/phone lands it ON THE MAC and types the path */
+    #fileDrop { position: absolute; inset: 0; z-index: 8; display: flex; align-items: center; justify-content: center;
+      background: rgba(11,14,20,.82); backdrop-filter: blur(2px); }
+    #fileDrop[hidden] { display: none; }
+    #fileDrop .fdbox { border: 2px dashed var(--accent); border-radius: 14px; padding: 26px 34px; text-align: center;
+      background: rgba(22,27,40,.9); }
+    #fileDrop .fdicon { font-size: 30px; line-height: 1; }
+    #fileDrop .fdtext { margin-top: 8px; font-size: 13px; color: var(--fg); font-weight: 600; }
+    .trow { white-space: pre-wrap; overflow-wrap: anywhere; width: 100%; max-width: 100%; }
+    /* bottom-left, not top-left: panes now have their own header band up there, and the pill used to
+       sit right on top of the focused pane's title */
+    #status { position: absolute; bottom: 8px; left: 12px; z-index: 5; font-size: 11px; color: var(--ok); font-weight: 600;
+      background: rgba(11,14,20,.78); padding: 3px 9px; border-radius: 999px; pointer-events: none; }
+    #status::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+      background: var(--ok); margin-right: 5px; vertical-align: middle; box-shadow: 0 0 6px var(--ok); }
+    #status.err { color: var(--warn); }
+    #status.err::before { background: var(--warn); box-shadow: none; }
+    #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: var(--dim); font-size: 14px; text-align: center; padding: 24px; }
+    /* jump-to-bottom chip (shown when scrolled off the tail) */
+    #jump { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--fg);
+      background: rgba(22,27,40,.95); border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px;
+      display: none; align-items: center; gap: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+    #jump.show { display: inline-flex; }
+
+    /* input dock */
+    footer { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line);
+      padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
+    .modeseg { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; font-size: 12px; font-family: var(--mono); }
+    .modeseg button { flex: 1; text-align: center; padding: 6px 0; border-radius: 7px; color: var(--dim); background: transparent; border: none; letter-spacing: .04em; }
+    .modeseg button.on { background: var(--accent); color: #fff; font-weight: 700; }
+    /* special-key dock: arrows as a d-pad (↑ sits above ↓ so rapid taps can't stray onto the other),
+       everything else in a wrapping group. Every key fires on pointerdown (see app.js) so a press
+       registers instantly; touch-action: manipulation kills the tap delay + double-tap zoom. */
+    .keys { display: flex; gap: 10px; align-items: flex-start; }
+    .keys[hidden] { display: none; }
+    .keys button { font-family: var(--mono); -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+    .dpad { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3, 42px); grid-template-rows: repeat(2, 36px); gap: 5px; }
+    .dpad button { background: var(--panel2); color: var(--accent); border: 1px solid var(--accent);
+      border-radius: 8px; font-size: 17px; display: flex; align-items: center; justify-content: center; padding: 0; }
+    .dpad button:active { background: #223; }
+    .dpad .up { grid-area: 1 / 2; } .dpad .left { grid-area: 2 / 1; }
+    .dpad .down { grid-area: 2 / 2; } .dpad .right { grid-area: 2 / 3; }
+    .special { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; }
+    .special button { background: var(--panel2); color: var(--fg);
+      border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font-size: 12px; }
+    .special button:active { background: #223; }
+    .row { display: flex; gap: 8px; align-items: flex-end; }
+    .row textarea { flex: 1; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 9px; padding: 7px 11px; font-size: 16px; line-height: 1.25; font-family: var(--mono);
+      min-width: 0; min-height: 38px; max-height: 120px; resize: none; overflow-y: auto; }
+    .row textarea:focus { outline: none; border-color: var(--accent); }
+    .row textarea.live { border-color: var(--accent); }
+    .row button.send { flex: 0 0 auto; height: 34px; background: var(--accent); color: #fff; border: none;
+      border-radius: 9px; padding: 0 14px; font-size: 14px; font-weight: 600; }
+    .row button.send:disabled { opacity: .5; }
+    .row button.send[hidden] { display: none; }
+    .row .kbtoggle { flex: 0 0 auto; height: 34px; background: var(--panel2); color: var(--dim); border: 1px solid var(--line);
+      border-radius: 9px; padding: 0 8px; display: flex; align-items: center; justify-content: center; }
+    .row .kbtoggle.on { border-color: var(--accent); color: var(--accent); }
+    .hint { font-size: 10.5px; color: var(--dim); font-family: var(--mono); padding: 0 2px; }
+
+    /* ---- browser mirror (a browser surface: refreshing screenshot + tap/scroll/type) ---- */
+    #browser { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; background: #000; }
+    #browser[hidden] { display: none; }
+    #bbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; flex: 0 0 auto;
+      background: var(--panel); border-bottom: 1px solid var(--line); }
+    #bbar .bnav { flex: 0 0 auto; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 9px; font-size: 14px; line-height: 1; }
+    #bbar .bnav:active { background: var(--bg); border-color: var(--accent); }
+    #bbar .bnav:disabled { opacity: .5; }
+    #bbar #burl { flex: 1 1 auto; min-width: 0; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 10px; font-size: 14px; font-family: var(--mono); }
+    #bbar #burl:focus { outline: none; border-color: var(--accent); }
+    #bview { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center;
+      overflow: hidden; touch-action: none; background: #000; }
+    #bshot { max-width: 100%; max-height: 100%; display: block; -webkit-user-select: none; user-select: none;
+      -webkit-user-drag: none; }
+    #bspin { position: absolute; color: var(--dim); font-size: 13px; font-family: var(--mono); pointer-events: none; }
+
+    /* ---- files mode (p4): browse the machine's filesystem, read-only ---- */
+    #files, #fviewer { position: absolute; inset: 0; display: none; flex-direction: column;
+      background: var(--bg); z-index: 3; }
+    body.mode-files #files { display: flex; }
+    body.mode-fview #fviewer { display: flex; }
+    /* the whole footer is input for a terminal/browser — files mode has nothing to type into */
+    body.mode-files footer, body.mode-fview footer { display: none; }
+
+    #fbar { display: flex; align-items: center; gap: 8px; padding: 0 10px 0 0;
+      border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+    #fdot { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; font-size: 11px;
+      font-family: var(--mono); color: var(--dim); touch-action: manipulation; }
+    #fdot input { width: 15px; height: 15px; accent-color: var(--accent); }
+    #fcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 7px 10px;
+      font-size: 12px; font-family: var(--mono); color: var(--dim);
+      flex: 1 1 auto; min-width: 0; }
+    #fcrumb span { color: var(--fg); opacity: .8; touch-action: manipulation; }
+    #fcrumb span:not(:last-child):after { content: '/'; color: var(--dim); margin: 0 3px; opacity: .6; }
+    #flist { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .frow { display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+      border-bottom: 1px solid var(--line); font-size: 14px; touch-action: manipulation; }
+    .frow:active { background: var(--panel2); }
+    .frow .fname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .frow .fmeta { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-family: var(--mono); }
+    .frow.dir .fname { font-weight: 600; }
+    .fhead { padding: 10px 12px 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--dim); }
+    #ffoot { flex: 0 0 auto; padding: 10px; text-align: center; font-size: 11px; color: var(--dim);
+      font-family: var(--mono); }
+
+    .fvhead { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+      border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+    #fvtitle { flex: 1 1 auto; font-size: 13px; font-family: var(--mono);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fvbtn { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 6px 11px; font-size: 12px; touch-action: manipulation; }
+    .fvbtn:active { background: #223; border-color: var(--accent); }
+    .fvbtn.fvicon { padding: 4px 9px; display: inline-flex; align-items: center; }
+    /* An explicit `display` outranks the UA stylesheet's [hidden] rule, so hiding this button from
+       JS silently stops working without this line. */
+    .fvbtn.fvicon[hidden] { display: none; }
+    /* #status sits at the top of #wrap, which the files/viewer panes cover at z-index 3 — so in
+       those modes it has to be lifted and moved out from under the viewer head, or the only
+       feedback Copy and Download have is painted behind an opaque pane. */
+    body.mode-files #status, body.mode-fview #status {
+      top: auto; bottom: 12px; left: 12px; z-index: 4; border: 1px solid var(--line); }
+    #fvbody { flex: 1 1 auto; overflow: auto; -webkit-overflow-scrolling: touch; padding: 12px;
+      font-size: 13px; line-height: 1.55; }
+    #fvbody img { max-width: 100%; height: auto; }
+    #fvbody pre { white-space: pre-wrap; word-break: break-word; font-family: var(--mono);
+      font-size: 12px; margin: 0; }
+    #fvbody table { border-collapse: collapse; width: 100%; font-size: 12px; display: block;
+      overflow-x: auto; }
+    #fvbody th, #fvbody td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; }
+    #fvbody code { font-family: var(--mono); font-size: 12px; }
+    #fvbody h1, #fvbody h2, #fvbody h3 { margin: 14px 0 6px; line-height: 1.25; }
+    #fvbody a { color: var(--accent); }
+
+    /* footer swap: hide terminal controls, show browser controls, in browser mode */
+    body.mode-browser #modeSeg, body.mode-browser #keys, body.mode-browser .row, body.mode-browser #hint { display: none; }
+    #bfoot { display: none; flex-direction: column; gap: 8px; }
+    body.mode-browser #bfoot { display: flex; }
+    #bfoot .bkeys { display: flex; flex-wrap: wrap; gap: 6px; }
+    #bfoot .bkeys button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 9px 12px; font-size: 13px; font-family: var(--mono);
+      -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+    #bfoot .bkeys button:active { background: #223; border-color: var(--accent); }
+    #bfoot #btext { width: 100%; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 9px; padding: 9px 11px; font-size: 16px; font-family: var(--mono); }
+    #bfoot #btext:focus { outline: none; border-color: var(--accent); }
+
+    #gate { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      background: var(--bg); color: var(--dim); font-size: 15px; text-align: center; padding: 30px; z-index: 5; }
+    #gate a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <button class="wschip" id="wsChip" type="button" aria-haspopup="menu" aria-expanded="false">
+      <span class="wlabels"><span class="whost" id="hostLabel">—</span><span class="wname" id="wsLabel">—</span></span>
+      <span class="wcaret">▾</span>
+    </button>
+    <button class="icon" id="filesBtn" aria-pressed="false" aria-label="Browse files" title="Browse files">📁</button>
+    <!-- Radar (p5). Lives in the toolbar beside Files, NOT in the tab strip: the strip is
+         one-pane-only now, and radar is not workspace-scoped. Removed at boot if radar.js
+         did not mount, so a missing/broken radar leaves no dead control behind. -->
+    <button class="icon" id="gitBtn" aria-pressed="false" aria-label="Source control" title="Source control">⎇</button>
+    <button class="icon" id="radarBtn" aria-pressed="false" aria-label="Radar" title="Radar">◎</button>
+    <button class="icon" id="settingsBtn" aria-haspopup="menu" aria-expanded="false" aria-label="Settings" title="Settings">⚙</button>
+    <button class="icon" id="refresh" aria-label="Refresh">⟳</button>
+  </header>
+
+  <!-- The tab strip belongs to the ONE-PANE view only. In split view every pane carries its own
+       header — title, its tabs, and its own ⊞ menu — so a second global strip is duplicate chrome.
+       On a phone the mirror is always one pane at a time, and then the strip IS the switcher. -->
+  <div id="tabs"><!-- tab chips (tabs of the current workspace) --></div>
+
+  <div id="wrap">
+    <div id="panes"></div>
+    <div id="dropZone" hidden><span class="dzlabel"></span></div>
+    <div id="dragGhost" hidden></div>
+    <div id="fileDrop" hidden><div class="fdbox"><div class="fdicon">📎</div><div class="fdtext">Drop to put it on the Mac</div></div></div>
+    <div id="status" hidden></div>
+    <div id="empty">Pick a workspace to mirror its tabs.</div>
+    <button id="jump" type="button">↓ jump to bottom</button>
+    <div id="browser" hidden>
+      <div id="bbar">
+        <button id="bBack" class="bnav" type="button" aria-label="Back" title="Back">‹</button>
+        <button id="bFwd" class="bnav" type="button" aria-label="Forward" title="Forward">›</button>
+        <button id="bReload" class="bnav" type="button" aria-label="Reload" title="Reload">⟳</button>
+        <input id="burl" type="url" inputmode="url" enterkeyhint="go" autocomplete="off"
+               autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Enter URL…" />
+        <button id="bGo" class="bnav" type="button" aria-label="Go">Go</button>
+        <button id="bZoomOut" class="bnav" type="button" aria-label="Zoom out" title="Zoom out">A−</button>
+        <button id="bZoomIn" class="bnav" type="button" aria-label="Zoom in" title="Zoom in">A+</button>
+      </div>
+      <div id="bview"><img id="bshot" alt="remote browser" draggable="false" /><span id="bspin" hidden>loading…</span></div>
+    </div>
+    <div id="files">
+      <div id="fbar">
+        <div id="fcrumb"></div>
+        <label id="fdot" title="Show dotfiles">
+          <input type="checkbox" id="fdotcb" checked /><span>.files</span>
+        </label>
+      </div>
+      <div id="flist"></div>
+      <div id="ffoot"></div>
+    </div>
+    <div id="fviewer">
+      <div class="fvhead">
+        <button id="fvback" class="fvbtn" type="button" aria-label="Back">‹</button>
+        <span id="fvtitle"></span>
+        <button id="fvtoggle" class="fvbtn" type="button" hidden>Raw</button>
+        <button id="fvcopy" class="fvbtn" type="button">Copy</button>
+        <button id="fvdl" class="fvbtn fvicon" type="button" aria-label="Download" title="Download">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11"/><path d="M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 20h15"/></svg>
+        </button>
+      </div>
+      <div id="fvbody"></div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="modeseg" id="modeSeg" role="tablist" aria-label="Input mode">
+      <button id="modeCompose" class="on" type="button" role="tab" aria-selected="true">Compose</button>
+      <button id="modeLive" type="button" role="tab" aria-selected="false">Live</button>
+    </div>
+    <div class="keys" id="keys" hidden>
+      <div class="dpad">
+        <button class="arrow up" data-key="up" aria-label="Up">↑</button>
+        <button class="arrow left" data-key="left" aria-label="Left">←</button>
+        <button class="arrow down" data-key="down" aria-label="Down">↓</button>
+        <button class="arrow right" data-key="right" aria-label="Right">→</button>
+      </div>
+      <div class="special">
+        <button data-key="escape">Esc</button>
+        <button data-key="tab">⇥</button>
+        <button data-key="shift+tab">⇧⇥</button>
+        <button data-key="ctrl+c">^C</button>
+        <button data-key="enter">⏎</button>
+        <button data-key="pageup">PgUp</button>
+        <button data-key="pagedown">PgDn</button>
+      </div>
+    </div>
+    <div class="row">
+      <button class="kbtoggle" id="attachBtn" type="button" aria-label="Attach a file" title="Attach a file — it lands on the Mac and its path goes in the box">📎</button>
+      <input id="attachInput" type="file" multiple hidden />
+      <button class="kbtoggle" id="pasteBtn" type="button" aria-label="Paste an image from the clipboard" title="Paste an image from the clipboard">📋</button>
+      <button class="kbtoggle" id="kbToggle" type="button" aria-label="Special keys" aria-pressed="false"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg></button>
+      <textarea id="text" rows="1" placeholder="Type…  (Send to submit)" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+      <button class="send" id="send">Send</button>
+    </div>
+    <div class="hint" id="hint">Compose · type a message, tap Send</div>
+    <div id="bfoot">
+      <div class="bkeys">
+        <button data-bkey="escape" type="button">Esc</button>
+        <button data-bkey="tab" type="button">⇥</button>
+        <button data-bkey="up" type="button" aria-label="Up">↑</button>
+        <button data-bkey="down" type="button" aria-label="Down">↓</button>
+        <button data-bkey="left" type="button" aria-label="Left">←</button>
+        <button data-bkey="right" type="button" aria-label="Right">→</button>
+        <button data-bkey="backspace" type="button">⌫</button>
+        <button data-bkey="enter" type="button">⏎</button>
+      </div>
+      <input id="btext" placeholder="Tap a field, type here — syncs as you pause" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false" />
+    </div>
+  </footer>
+
+  <div id="wsMenu" hidden role="menu"></div>
+
+  <!-- One menu, opened FROM a pane's ⊞ button and acting on that pane (cmux puts its split controls
+       on the pane, so the mirror does too). -->
+  <div id="splitMenu" hidden role="menu" aria-label="Pane">
+    <div class="settitle" id="splitMenuTitle">Split this pane</div>
+    <div class="dirgrid">
+      <button data-split="up" type="button" class="up">↑</button>
+      <button data-split="left" type="button" class="left">←</button>
+      <button data-split="down" type="button" class="down">↓</button>
+      <button data-split="right" type="button" class="right">→</button>
+    </div>
+    <div class="sep"></div>
+    <button class="setreset" id="paneNewTab" type="button">+ Terminal tab here</button>
+    <button class="setreset" id="paneNewBrowser" type="button">+ Browser tab here</button>
+    <div class="sep"></div>
+    <button class="setreset" id="equalize" type="button">Even out the splits</button>
+    <button class="setreset danger" id="paneClose" type="button">Close this pane</button>
+    <div class="sep"></div>
+    <div class="setnote">Drag a pane by its title bar to move it — drop on a pane's edge to sit beside
+      it, or on its middle to join it as a tab.</div>
+  </div>
+
+  <div id="setMenu" hidden role="menu" aria-label="Settings">
+    <div class="settitle">Settings</div>
+    <div class="setrow">
+      <span class="setlabel">Split view</span>
+      <div class="stepper"><button id="splitToggle" type="button" style="width:auto;padding:6px 12px">Auto</button></div>
+    </div>
+    <div class="sep"></div>
+    <div class="setrow">
+      <span class="setlabel">Font size</span>
+      <div class="stepper">
+        <button id="fontDown" type="button" aria-label="Smaller font">A−</button>
+        <span class="setval" id="fontVal">100%</span>
+        <button id="fontUp" type="button" aria-label="Larger font">A+</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <button class="setreset" id="fontReset" type="button">Reset to fit width</button>
+  </div>
+
+  <div id="gate"></div>
+  <!-- Radar (p5, S-007). Loaded BEFORE app.js so the chip exists on first paint, and entirely
+       self-contained (own style, own DOM, own timer). If it 404s or throws, window.cmuxRadar is
+       simply absent, app.js renders no chip, and the terminal mirror is untouched. -->
+  <!-- p7 live-menu detector. Pure, dual-export (browser + node --test), and loaded BEFORE app.js so
+       window.cmuxMenuParse exists when the first grid frame lands. If it 404s, app.js finds no
+       parser and the chip bar simply never populates — the mirror is unaffected. -->
+  <script src="/menuparse.js?v=v1-p7-20260801a"></script>
+  <script src="/git.js?v=v1-p7-20260801a"></script>
+  <script src="/radar.js?v=v1-p5radar-20260731a"></script>
+  <script src="/app.js?v=v16-p7-20260801b"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
+</body>
+</html>

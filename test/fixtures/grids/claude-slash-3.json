@@ -1,0 +1,1116 @@
+{
+ "name": "claude-slash-3",
+ "meta": {
+  "source": "scratch-scenario",
+  "scenario": "claude-slash",
+  "step": "slash-menu-moved"
+ },
+ "grid": {
+  "columns": 98,
+  "rows": 34,
+  "active_screen": "primary",
+  "cursor": {
+   "blinking": true,
+   "column": 3,
+   "row": 10,
+   "style": "block",
+   "visible": true
+  },
+  "styles": [
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 0,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": true,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 1,
+    "inverse": true,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#1A1A1A",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 2,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#0869CB",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#1A1A1A",
+    "id": 3,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#0869CB",
+    "id": 4,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#26A439",
+    "id": 5,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#D77757",
+    "id": 6,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": true,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 7,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#999999",
+    "id": 8,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFC107",
+    "id": 9,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#888888",
+    "id": 10,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#B1B9F9",
+    "id": 11,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   }
+  ],
+  "row_spans": [
+   {
+    "cell_width": 42,
+    "column": 0,
+    "row": 0,
+    "style_id": 0,
+    "text": "Last login: Sat Aug  1 16:32:29 on ttys000"
+   },
+   {
+    "cell_width": 6,
+    "column": 0,
+    "row": 1,
+    "style_id": 0,
+    "text": "claude"
+   },
+   {
+    "cell_width": 1,
+    "column": 6,
+    "row": 1,
+    "style_id": 1,
+    "text": "%"
+   },
+   {
+    "cell_width": 91,
+    "column": 7,
+    "row": 1,
+    "style_id": 0,
+    "text": "                                                                                           "
+   },
+   {
+    "cell_width": 14,
+    "column": 0,
+    "row": 2,
+    "style_id": 2,
+    "text": " demouser@127 "
+   },
+   {
+    "cell_width": 4,
+    "column": 14,
+    "row": 2,
+    "style_id": 3,
+    "text": " ~ "
+   },
+   {
+    "cell_width": 1,
+    "column": 18,
+    "row": 2,
+    "style_id": 4,
+    "text": ""
+   },
+   {
+    "cell_width": 1,
+    "column": 19,
+    "row": 2,
+    "style_id": 0,
+    "text": " "
+   },
+   {
+    "cell_width": 6,
+    "column": 20,
+    "row": 2,
+    "style_id": 5,
+    "text": "claude"
+   },
+   {
+    "cell_width": 6,
+    "column": 26,
+    "row": 2,
+    "style_id": 0,
+    "text": "      "
+   },
+   {
+    "cell_width": 8,
+    "column": 0,
+    "row": 3,
+    "style_id": 6,
+    "text": " ▐▛███▜▌"
+   },
+   {
+    "cell_width": 6,
+    "column": 11,
+    "row": 3,
+    "style_id": 7,
+    "text": "Claude"
+   },
+   {
+    "cell_width": 4,
+    "column": 18,
+    "row": 3,
+    "style_id": 7,
+    "text": "Code"
+   },
+   {
+    "cell_width": 8,
+    "column": 23,
+    "row": 3,
+    "style_id": 8,
+    "text": "v2.1.220"
+   },
+   {
+    "cell_width": 9,
+    "column": 0,
+    "row": 4,
+    "style_id": 6,
+    "text": "▝▜█████▛▘"
+   },
+   {
+    "cell_width": 4,
+    "column": 11,
+    "row": 4,
+    "style_id": 8,
+    "text": "Opus"
+   },
+   {
+    "cell_width": 1,
+    "column": 16,
+    "row": 4,
+    "style_id": 8,
+    "text": "5"
+   },
+   {
+    "cell_width": 3,
+    "column": 18,
+    "row": 4,
+    "style_id": 8,
+    "text": "(1M"
+   },
+   {
+    "cell_width": 8,
+    "column": 22,
+    "row": 4,
+    "style_id": 8,
+    "text": "context)"
+   },
+   {
+    "cell_width": 4,
+    "column": 31,
+    "row": 4,
+    "style_id": 8,
+    "text": "with"
+   },
+   {
+    "cell_width": 5,
+    "column": 36,
+    "row": 4,
+    "style_id": 8,
+    "text": "xhigh"
+   },
+   {
+    "cell_width": 6,
+    "column": 42,
+    "row": 4,
+    "style_id": 8,
+    "text": "effort"
+   },
+   {
+    "cell_width": 1,
+    "column": 49,
+    "row": 4,
+    "style_id": 8,
+    "text": "·"
+   },
+   {
+    "cell_width": 6,
+    "column": 51,
+    "row": 4,
+    "style_id": 8,
+    "text": "Claude"
+   },
+   {
+    "cell_width": 3,
+    "column": 58,
+    "row": 4,
+    "style_id": 8,
+    "text": "Max"
+   },
+   {
+    "cell_width": 1,
+    "column": 0,
+    "row": 5,
+    "style_id": 6,
+    "text": " "
+   },
+   {
+    "cell_width": 2,
+    "column": 2,
+    "row": 5,
+    "style_id": 6,
+    "text": "▘▘"
+   },
+   {
+    "cell_width": 2,
+    "column": 5,
+    "row": 5,
+    "style_id": 6,
+    "text": "▝▝"
+   },
+   {
+    "cell_width": 15,
+    "column": 11,
+    "row": 5,
+    "style_id": 8,
+    "text": "/Users/demouser"
+   },
+   {
+    "cell_width": 1,
+    "column": 1,
+    "row": 7,
+    "style_id": 9,
+    "text": "⚠"
+   },
+   {
+    "cell_width": 33,
+    "column": 3,
+    "row": 7,
+    "style_id": 9,
+    "text": "1 MCP server needs authentication"
+   },
+   {
+    "cell_width": 11,
+    "column": 36,
+    "row": 7,
+    "style_id": 8,
+    "text": " · run /mcp"
+   },
+   {
+    "cell_width": 98,
+    "column": 0,
+    "row": 9,
+    "style_id": 10,
+    "text": "──────────────────────────────────────────────────────────────────────────────────────────────────"
+   },
+   {
+    "cell_width": 3,
+    "column": 0,
+    "row": 10,
+    "style_id": 0,
+    "text": "❯ /"
+   },
+   {
+    "cell_width": 98,
+    "column": 0,
+    "row": 11,
+    "style_id": 10,
+    "text": "──────────────────────────────────────────────────────────────────────────────────────────────────"
+   },
+   {
+    "cell_width": 87,
+    "column": 0,
+    "row": 12,
+    "style_id": 8,
+    "text": "/claude-mem-pro:recall                 (claude-mem-pro) Find what was done, decided, or"
+   },
+   {
+    "cell_width": 1,
+    "column": 87,
+    "row": 12,
+    "style_id": 0,
+    "text": " "
+   },
+   {
+    "cell_width": 16,
+    "column": 2,
+    "row": 13,
+    "style_id": 0,
+    "text": "                "
+   },
+   {
+    "cell_width": 55,
+    "column": 39,
+    "row": 13,
+    "style_id": 8,
+    "text": "learned in past work by searching the project's durabl…"
+   },
+   {
+    "cell_width": 90,
+    "column": 0,
+    "row": 14,
+    "style_id": 11,
+    "text": "/superpowers:brainstorming             (superpowers) You MUST use this before any creative"
+   },
+   {
+    "cell_width": 55,
+    "column": 39,
+    "row": 15,
+    "style_id": 11,
+    "text": "work - creating features, building components, adding …"
+   },
+   {
+    "cell_width": 26,
+    "column": 0,
+    "row": 16,
+    "style_id": 8,
+    "text": "/dev-workflow:codex-review"
+   },
+   {
+    "cell_width": 14,
+    "column": 39,
+    "row": 16,
+    "style_id": 8,
+    "text": "(dev-workflow)"
+   },
+   {
+    "cell_width": 6,
+    "column": 54,
+    "row": 16,
+    "style_id": 8,
+    "text": "Launch"
+   },
+   {
+    "cell_width": 5,
+    "column": 61,
+    "row": 16,
+    "style_id": 8,
+    "text": "Codex"
+   },
+   {
+    "cell_width": 7,
+    "column": 67,
+    "row": 16,
+    "style_id": 8,
+    "text": "(GPT-5)"
+   },
+   {
+    "cell_width": 2,
+    "column": 75,
+    "row": 16,
+    "style_id": 8,
+    "text": "to"
+   },
+   {
+    "cell_width": 6,
+    "column": 78,
+    "row": 16,
+    "style_id": 8,
+    "text": "review"
+   },
+   {
+    "cell_width": 4,
+    "column": 85,
+    "row": 16,
+    "style_id": 8,
+    "text": "spec"
+   },
+   {
+    "cell_width": 9,
+    "column": 39,
+    "row": 17,
+    "style_id": 8,
+    "text": "documents"
+   },
+   {
+    "cell_width": 2,
+    "column": 49,
+    "row": 17,
+    "style_id": 8,
+    "text": "or"
+   },
+   {
+    "cell_width": 9,
+    "column": 52,
+    "row": 17,
+    "style_id": 8,
+    "text": "re-review"
+   },
+   {
+    "cell_width": 8,
+    "column": 62,
+    "row": 17,
+    "style_id": 8,
+    "text": "Claude's"
+   },
+   {
+    "cell_width": 8,
+    "column": 71,
+    "row": 17,
+    "style_id": 8,
+    "text": "feedback"
+   },
+   {
+    "cell_width": 10,
+    "column": 80,
+    "row": 17,
+    "style_id": 8,
+    "text": "responses."
+   },
+   {
+    "cell_width": 3,
+    "column": 91,
+    "row": 17,
+    "style_id": 8,
+    "text": "Us…"
+   },
+   {
+    "cell_width": 27,
+    "column": 0,
+    "row": 18,
+    "style_id": 8,
+    "text": "/sysadmin:server-management"
+   },
+   {
+    "cell_width": 10,
+    "column": 39,
+    "row": 18,
+    "style_id": 8,
+    "text": "(sysadmin)"
+   },
+   {
+    "cell_width": 3,
+    "column": 50,
+    "row": 18,
+    "style_id": 8,
+    "text": "Use"
+   },
+   {
+    "cell_width": 4,
+    "column": 54,
+    "row": 18,
+    "style_id": 8,
+    "text": "when"
+   },
+   {
+    "cell_width": 8,
+    "column": 59,
+    "row": 18,
+    "style_id": 8,
+    "text": "managing"
+   },
+   {
+    "cell_width": 6,
+    "column": 68,
+    "row": 18,
+    "style_id": 8,
+    "text": "remote"
+   },
+   {
+    "cell_width": 8,
+    "column": 75,
+    "row": 18,
+    "style_id": 8,
+    "text": "servers,"
+   },
+   {
+    "cell_width": 6,
+    "column": 84,
+    "row": 18,
+    "style_id": 8,
+    "text": "Docker"
+   },
+   {
+    "cell_width": 11,
+    "column": 39,
+    "row": 19,
+    "style_id": 8,
+    "text": "containers,"
+   },
+   {
+    "cell_width": 8,
+    "column": 51,
+    "row": 19,
+    "style_id": 8,
+    "text": "deploys,"
+   },
+   {
+    "cell_width": 7,
+    "column": 60,
+    "row": 19,
+    "style_id": 8,
+    "text": "reverse"
+   },
+   {
+    "cell_width": 6,
+    "column": 68,
+    "row": 19,
+    "style_id": 8,
+    "text": "proxy,"
+   },
+   {
+    "cell_width": 14,
+    "column": 75,
+    "row": 19,
+    "style_id": 8,
+    "text": "infrastructure"
+   },
+   {
+    "cell_width": 4,
+    "column": 90,
+    "row": 19,
+    "style_id": 8,
+    "text": "(Ve…"
+   },
+   {
+    "cell_width": 31,
+    "column": 0,
+    "row": 20,
+    "style_id": 8,
+    "text": "/agents:session-from-transcript"
+   },
+   {
+    "cell_width": 8,
+    "column": 39,
+    "row": 20,
+    "style_id": 8,
+    "text": "(agents)"
+   },
+   {
+    "cell_width": 3,
+    "column": 48,
+    "row": 20,
+    "style_id": 8,
+    "text": "Use"
+   },
+   {
+    "cell_width": 4,
+    "column": 52,
+    "row": 20,
+    "style_id": 8,
+    "text": "when"
+   },
+   {
+    "cell_width": 14,
+    "column": 57,
+    "row": 20,
+    "style_id": 8,
+    "text": "reconstructing"
+   },
+   {
+    "cell_width": 1,
+    "column": 72,
+    "row": 20,
+    "style_id": 8,
+    "text": "a"
+   },
+   {
+    "cell_width": 4,
+    "column": 74,
+    "row": 20,
+    "style_id": 8,
+    "text": "past"
+   },
+   {
+    "cell_width": 6,
+    "column": 79,
+    "row": 20,
+    "style_id": 8,
+    "text": "Claude"
+   },
+   {
+    "cell_width": 4,
+    "column": 86,
+    "row": 20,
+    "style_id": 8,
+    "text": "Code"
+   },
+   {
+    "cell_width": 7,
+    "column": 39,
+    "row": 21,
+    "style_id": 8,
+    "text": "session"
+   },
+   {
+    "cell_width": 4,
+    "column": 47,
+    "row": 21,
+    "style_id": 8,
+    "text": "from"
+   },
+   {
+    "cell_width": 3,
+    "column": 52,
+    "row": 21,
+    "style_id": 8,
+    "text": "its"
+   },
+   {
+    "cell_width": 3,
+    "column": 56,
+    "row": 21,
+    "style_id": 8,
+    "text": "raw"
+   },
+   {
+    "cell_width": 6,
+    "column": 60,
+    "row": 21,
+    "style_id": 8,
+    "text": ".jsonl"
+   },
+   {
+    "cell_width": 10,
+    "column": 67,
+    "row": 21,
+    "style_id": 8,
+    "text": "transcript"
+   },
+   {
+    "cell_width": 3,
+    "column": 78,
+    "row": 21,
+    "style_id": 8,
+    "text": "off"
+   },
+   {
+    "cell_width": 5,
+    "column": 82,
+    "row": 21,
+    "style_id": 8,
+    "text": "disk."
+   },
+   {
+    "cell_width": 2,
+    "column": 88,
+    "row": 21,
+    "style_id": 8,
+    "text": "By"
+   },
+   {
+    "cell_width": 3,
+    "column": 91,
+    "row": 21,
+    "style_id": 8,
+    "text": "DE…"
+   },
+   {
+    "cell_width": 8,
+    "column": 0,
+    "row": 22,
+    "style_id": 8,
+    "text": "/add-dir"
+   },
+   {
+    "cell_width": 3,
+    "column": 39,
+    "row": 22,
+    "style_id": 8,
+    "text": "Add"
+   },
+   {
+    "cell_width": 1,
+    "column": 43,
+    "row": 22,
+    "style_id": 8,
+    "text": "a"
+   },
+   {
+    "cell_width": 3,
+    "column": 45,
+    "row": 22,
+    "style_id": 8,
+    "text": "new"
+   },
+   {
+    "cell_width": 7,
+    "column": 49,
+    "row": 22,
+    "style_id": 8,
+    "text": "working"
+   },
+   {
+    "cell_width": 9,
+    "column": 57,
+    "row": 22,
+    "style_id": 8,
+    "text": "directory"
+   },
+   {
+    "cell_width": 8,
+    "column": 0,
+    "row": 23,
+    "style_id": 8,
+    "text": "/advisor"
+   },
+   {
+    "cell_width": 3,
+    "column": 39,
+    "row": 23,
+    "style_id": 8,
+    "text": "Let"
+   },
+   {
+    "cell_width": 6,
+    "column": 43,
+    "row": 23,
+    "style_id": 8,
+    "text": "Claude"
+   },
+   {
+    "cell_width": 7,
+    "column": 50,
+    "row": 23,
+    "style_id": 8,
+    "text": "consult"
+   },
+   {
+    "cell_width": 1,
+    "column": 58,
+    "row": 23,
+    "style_id": 8,
+    "text": "a"
+   },
+   {
+    "cell_width": 8,
+    "column": 60,
+    "row": 23,
+    "style_id": 8,
+    "text": "stronger"
+   },
+   {
+    "cell_width": 5,
+    "column": 69,
+    "row": 23,
+    "style_id": 8,
+    "text": "model"
+   },
+   {
+    "cell_width": 2,
+    "column": 75,
+    "row": 23,
+    "style_id": 8,
+    "text": "at"
+   },
+   {
+    "cell_width": 3,
+    "column": 78,
+    "row": 23,
+    "style_id": 8,
+    "text": "key"
+   },
+   {
+    "cell_width": 7,
+    "column": 82,
+    "row": 23,
+    "style_id": 8,
+    "text": "moments"
+   },
+   {
+    "cell_width": 7,
+    "column": 0,
+    "row": 24,
+    "style_id": 8,
+    "text": "/agents"
+   },
+   {
+    "cell_width": 9,
+    "column": 39,
+    "row": 24,
+    "style_id": 8,
+    "text": "(removed)"
+   },
+   {
+    "cell_width": 3,
+    "column": 49,
+    "row": 24,
+    "style_id": 8,
+    "text": "Ask"
+   },
+   {
+    "cell_width": 6,
+    "column": 53,
+    "row": 24,
+    "style_id": 8,
+    "text": "Claude"
+   },
+   {
+    "cell_width": 2,
+    "column": 60,
+    "row": 24,
+    "style_id": 8,
+    "text": "to"
+   },
+   {
+    "cell_width": 13,
+    "column": 63,
+    "row": 24,
+    "style_id": 8,
+    "text": "create/manage"
+   },
+   {
+    "cell_width": 10,
+    "column": 77,
+    "row": 24,
+    "style_id": 8,
+    "text": "subagents,"
+   },
+   {
+    "cell_width": 2,
+    "column": 88,
+    "row": 24,
+    "style_id": 8,
+    "text": "or"
+   },
+   {
+    "cell_width": 4,
+    "column": 39,
+    "row": 25,
+    "style_id": 8,
+    "text": "edit"
+   },
+   {
+    "cell_width": 15,
+    "column": 44,
+    "row": 25,
+    "style_id": 8,
+    "text": ".claude/agents/"
+   },
+   {
+    "cell_width": 10,
+    "column": 0,
+    "row": 26,
+    "style_id": 8,
+    "text": "/artifacts"
+   },
+   {
+    "cell_width": 6,
+    "column": 39,
+    "row": 26,
+    "style_id": 8,
+    "text": "Browse"
+   },
+   {
+    "cell_width": 4,
+    "column": 46,
+    "row": 26,
+    "style_id": 8,
+    "text": "your"
+   },
+   {
+    "cell_width": 9,
+    "column": 51,
+    "row": 26,
+    "style_id": 8,
+    "text": "published"
+   },
+   {
+    "cell_width": 3,
+    "column": 61,
+    "row": 26,
+    "style_id": 8,
+    "text": "and"
+   },
+   {
+    "cell_width": 6,
+    "column": 65,
+    "row": 26,
+    "style_id": 8,
+    "text": "shared"
+   },
+   {
+    "cell_width": 9,
+    "column": 72,
+    "row": 26,
+    "style_id": 8,
+    "text": "artifacts"
+   },
+   {
+    "cell_width": 11,
+    "column": 0,
+    "row": 27,
+    "style_id": 8,
+    "text": "/autofix-pr"
+   },
+   {
+    "cell_width": 7,
+    "column": 39,
+    "row": 27,
+    "style_id": 8,
+    "text": "Monitor"
+   },
+   {
+    "cell_width": 3,
+    "column": 47,
+    "row": 27,
+    "style_id": 8,
+    "text": "and"
+   },
+   {
+    "cell_width": 7,
+    "column": 51,
+    "row": 27,
+    "style_id": 8,
+    "text": "autofix"
+   },
+   {
+    "cell_width": 3,
+    "column": 59,
+    "row": 27,
+    "style_id": 8,
+    "text": "any"
+   },
+   {
+    "cell_width": 6,
+    "column": 63,
+    "row": 27,
+    "style_id": 8,
+    "text": "issues"
+   },
+   {
+    "cell_width": 4,
+    "column": 70,
+    "row": 27,
+    "style_id": 8,
+    "text": "with"
+   },
+   {
+    "cell_width": 3,
+    "column": 75,
+    "row": 27,
+    "style_id": 8,
+    "text": "the"
+   },
+   {
+    "cell_width": 7,
+    "column": 79,
+    "row": 27,
+    "style_id": 8,
+    "text": "current"
+   },
+   {
+    "cell_width": 2,
+    "column": 87,
+    "row": 27,
+    "style_id": 8,
+    "text": "PR"
+   }
+  ]
+ }
+}

@@ -1,0 +1,578 @@
+{
+  "v": 1,
+  "generatedAt": "2026-07-30T14:32:11.000Z",
+  "collectorId": "machine-a",
+  "machines": [
+    {
+      "id": "machine-a",
+      "bridge": "ok",
+      "lastSeenAt": "2026-07-30T14:32:11.000Z"
+    },
+    {
+      "id": "machine-b",
+      "bridge": "offline",
+      "lastSeenAt": "2026-07-30T13:32:11.000Z"
+    }
+  ],
+  "sources": {
+    "git": {
+      "status": "ok",
+      "observedAt": "2026-07-30T14:32:11.000Z"
+    },
+    "sessions": {
+      "status": "ok",
+      "observedAt": "2026-07-30T14:32:11.000Z"
+    },
+    "deploy": {
+      "status": "ok",
+      "observedAt": "2026-07-30T14:32:11.000Z"
+    },
+    "jira": {
+      "status": "disabled"
+    },
+    "specs": {
+      "status": "disabled"
+    },
+    "config": {
+      "status": "ok",
+      "observedAt": "2026-07-30T14:32:11.000Z"
+    }
+  },
+  "counts": {
+    "blocked": 1,
+    "decisions": 2,
+    "mergeable": 1,
+    "orphans": 4,
+    "staleWorktrees": 1
+  },
+  "repos": {
+    "app-api": {
+      "path": "/path/to/workspace/app-api",
+      "defaultBranches": {
+        "develop": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "main": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "branches": [
+        {
+          "name": "develop",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": null,
+          "epicVia": "orphan",
+          "isDefault": true,
+          "unpushed": 0,
+          "noRemote": false,
+          "mergedIntoDevelop": true,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-07-29T14:32:11.000Z",
+          "worktree": null
+        },
+        {
+          "name": "feature/PROJ-108-searchindex",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": "PROJ-108",
+          "epicVia": "issue-key",
+          "isDefault": false,
+          "unpushed": 4,
+          "noRemote": false,
+          "mergedIntoDevelop": false,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-07-28T14:32:11.000Z",
+          "worktree": null
+        },
+        {
+          "name": "feature/p51-cache-layer",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": "PROJ-98",
+          "epicVia": "alias",
+          "isDefault": false,
+          "unpushed": 6,
+          "noRemote": false,
+          "mergedIntoDevelop": false,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-06-22T14:32:11.000Z",
+          "worktree": null
+        },
+        {
+          "name": "chore/delete-dormant-helpers",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": null,
+          "epicVia": "orphan",
+          "isDefault": false,
+          "unpushed": 0,
+          "noRemote": false,
+          "mergedIntoDevelop": true,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-06-05T14:32:11.000Z",
+          "worktree": null
+        }
+      ],
+      "worktrees": [
+        {
+          "path": "/path/to/workspace/app-api",
+          "branch": "develop",
+          "head": "0000000000000000000000000000000000000000",
+          "isMain": true,
+          "bare": false,
+          "locked": false,
+          "prunable": false,
+          "dirty": {
+            "staged": 0,
+            "unstaged": 0,
+            "untracked": 0
+          },
+          "dirtyError": null,
+          "stale": false,
+          "staleReason": null,
+          "cleanupCommand": null
+        }
+      ],
+      "deploy": {
+        "dev": {
+          "status": "ok",
+          "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "behindDevelop": 0,
+          "ruleViolation": false,
+          "probedAt": "2026-07-30T14:32:11.000Z",
+          "epicBranchAncestry": {}
+        },
+        "prod": {
+          "status": "ok",
+          "sha": "ffffffffffffffffffffffffffffffffffffffff",
+          "behindMain": 3,
+          "ruleViolation": true,
+          "note": "deployed SHA is not an ancestor of origin/main",
+          "probedAt": "2026-07-30T14:32:11.000Z"
+        }
+      },
+      "fetch": {
+        "status": "ok",
+        "error": null
+      }
+    },
+    "app-web": {
+      "path": "/path/to/workspace/app-web",
+      "defaultBranches": {
+        "develop": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "main": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "branches": [
+        {
+          "name": "develop",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": null,
+          "epicVia": "orphan",
+          "isDefault": true,
+          "unpushed": 0,
+          "noRemote": false,
+          "mergedIntoDevelop": true,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-07-29T14:32:11.000Z",
+          "worktree": null
+        },
+        {
+          "name": "feature/PROJ-108-searchindex",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": "PROJ-108",
+          "epicVia": "issue-key",
+          "isDefault": false,
+          "unpushed": 9,
+          "noRemote": false,
+          "mergedIntoDevelop": false,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-07-29T14:32:11.000Z",
+          "worktree": "/path/to/workspace/app-web/.claude/worktrees/searchindex"
+        },
+        {
+          "name": "feature/p51-cache-layer",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": "PROJ-98",
+          "epicVia": "alias",
+          "isDefault": false,
+          "unpushed": 0,
+          "noRemote": false,
+          "mergedIntoDevelop": true,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-06-20T14:32:11.000Z",
+          "worktree": "/path/to/workspace/app-web/.claude/worktrees/p51"
+        },
+        {
+          "name": "fix-tooltip-jitter",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": null,
+          "epicVia": "orphan",
+          "isDefault": false,
+          "unpushed": 1,
+          "noRemote": false,
+          "mergedIntoDevelop": false,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-07-09T14:32:11.000Z",
+          "worktree": null
+        },
+        {
+          "name": "feature/BETA-147-story-002",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": "BETA-147",
+          "epicVia": "issue-key",
+          "isDefault": false,
+          "unpushed": 0,
+          "noRemote": false,
+          "mergedIntoDevelop": false,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-07-05T14:32:11.000Z",
+          "worktree": null
+        },
+        {
+          "name": "feat/set-dark-mode-globally",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": null,
+          "epicVia": "orphan",
+          "isDefault": false,
+          "unpushed": 2,
+          "noRemote": false,
+          "mergedIntoDevelop": false,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-06-27T14:32:11.000Z",
+          "worktree": null
+        },
+        {
+          "name": "refactor/sdk-beta-release",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": null,
+          "epicVia": "orphan",
+          "isDefault": false,
+          "unpushed": 0,
+          "noRemote": false,
+          "mergedIntoDevelop": false,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-06-12T14:32:11.000Z",
+          "worktree": null
+        }
+      ],
+      "worktrees": [
+        {
+          "path": "/path/to/workspace/app-web",
+          "branch": "develop",
+          "head": "0000000000000000000000000000000000000000",
+          "isMain": true,
+          "bare": false,
+          "locked": false,
+          "prunable": false,
+          "dirty": {
+            "staged": 0,
+            "unstaged": 0,
+            "untracked": 0
+          },
+          "dirtyError": null,
+          "stale": false,
+          "staleReason": null,
+          "cleanupCommand": null
+        },
+        {
+          "path": "/path/to/workspace/app-web/.claude/worktrees/searchindex",
+          "branch": "feature/PROJ-108-searchindex",
+          "head": "0000000000000000000000000000000000000000",
+          "isMain": false,
+          "bare": false,
+          "locked": false,
+          "prunable": false,
+          "dirty": {
+            "staged": 0,
+            "unstaged": 3,
+            "untracked": 1
+          },
+          "dirtyError": null,
+          "stale": false,
+          "staleReason": null,
+          "cleanupCommand": null
+        },
+        {
+          "path": "/path/to/workspace/app-web/.claude/worktrees/p51",
+          "branch": "feature/p51-cache-layer",
+          "head": "0000000000000000000000000000000000000000",
+          "isMain": false,
+          "bare": false,
+          "locked": false,
+          "prunable": false,
+          "dirty": {
+            "staged": 0,
+            "unstaged": 0,
+            "untracked": 0
+          },
+          "dirtyError": null,
+          "stale": true,
+          "staleReason": "merged",
+          "cleanupCommand": "/usr/bin/git -C '/path/to/workspace/app-web' worktree remove '/path/to/workspace/app-web/.claude/worktrees/p51'"
+        },
+        {
+          "path": "/path/to/workspace/app-web/.claude/worktrees/scratch",
+          "branch": null,
+          "head": "cccccccccccccccccccccccccccccccccccccccc",
+          "isMain": false,
+          "bare": false,
+          "locked": false,
+          "prunable": false,
+          "dirty": {
+            "staged": 0,
+            "unstaged": 0,
+            "untracked": 0
+          },
+          "dirtyError": null,
+          "stale": false,
+          "staleReason": null,
+          "cleanupCommand": null
+        }
+      ],
+      "deploy": {
+        "dev": {
+          "status": "ok",
+          "sha": "dddddddddddddddddddddddddddddddddddddddd",
+          "behindDevelop": 42,
+          "ruleViolation": false,
+          "probedAt": "2026-07-30T14:32:11.000Z",
+          "epicBranchAncestry": {
+            "feature/p51-cache-layer": true
+          }
+        },
+        "prod": {
+          "status": "empty",
+          "sha": null,
+          "behindMain": null,
+          "ruleViolation": false,
+          "probedAt": "2026-07-30T14:32:11.000Z"
+        }
+      },
+      "fetch": {
+        "status": "ok",
+        "error": null
+      }
+    }
+  },
+  "epics": [
+    {
+      "key": "PROJ-108",
+      "aliases": [
+        "p59",
+        "searchindex"
+      ],
+      "title": "Search indexing",
+      "jira": null,
+      "ladder": {
+        "spec": "done",
+        "pushed": "current",
+        "mergedDevelop": "todo",
+        "deployedDev": "todo",
+        "prod": "violation",
+        "flags": "todo"
+      },
+      "zone": "active",
+      "signals": [
+        "session-blocked",
+        "decision-open",
+        "recent-commit",
+        "unpushed-commits",
+        "dirty-worktree",
+        "unmerged-develop"
+      ],
+      "phrase": "blocked · permission_prompt · 13 commits unpushed",
+      "lastActivityAt": "2026-07-30T14:17:11.000Z",
+      "repos": [
+        "app-api",
+        "app-web"
+      ],
+      "flag": {
+        "state": "off",
+        "assertedAt": "2026-07-28T14:32:11.000Z",
+        "stale": false
+      },
+      "branchCount": 2
+    },
+    {
+      "key": "BETA-147",
+      "aliases": [],
+      "title": null,
+      "jira": null,
+      "ladder": {
+        "spec": "done",
+        "pushed": "done",
+        "mergedDevelop": "current",
+        "deployedDev": "todo",
+        "prod": "unknown",
+        "flags": "unknown"
+      },
+      "zone": "dormant",
+      "signals": [
+        "unmerged-develop"
+      ],
+      "phrase": "1 branch unmerged",
+      "lastActivityAt": "2026-07-05T14:32:11.000Z",
+      "repos": [
+        "app-web"
+      ],
+      "flag": null,
+      "branchCount": 1
+    },
+    {
+      "key": "PROJ-98",
+      "aliases": [
+        "p51"
+      ],
+      "title": null,
+      "jira": null,
+      "ladder": {
+        "spec": "done",
+        "pushed": "current",
+        "mergedDevelop": "todo",
+        "deployedDev": "todo",
+        "prod": "violation",
+        "flags": "unknown"
+      },
+      "zone": "dormant",
+      "signals": [
+        "unpushed-commits",
+        "unmerged-develop"
+      ],
+      "phrase": "6 commits unpushed",
+      "lastActivityAt": "2026-06-22T14:32:11.000Z",
+      "repos": [
+        "app-api",
+        "app-web"
+      ],
+      "flag": null,
+      "branchCount": 2
+    }
+  ],
+  "sessions": [
+    {
+      "key": {
+        "machine": "machine-b",
+        "sessionId": "9c7fd9a7-298a-47b3-b51f-b0ea70d84190"
+      },
+      "transcriptPath": "$HOME/.claude/projects/x/9c7fd9a7.jsonl",
+      "surface": {
+        "workspace": "workspace",
+        "tabRef": "w1/t3",
+        "tabUuid": "f2b0a1c4-0000-4000-8000-000000000001"
+      },
+      "repo": "app-web",
+      "worktree": null,
+      "epic": "PROJ-108",
+      "status": "blocked",
+      "blockedSince": "2026-07-30T14:17:11.000Z",
+      "notificationType": "permission_prompt",
+      "lastSubmitAt": "2026-07-30T13:47:11.000Z",
+      "lastEventAt": "2026-07-30T14:17:11.000Z",
+      "cacheExpiresAt": "2026-07-30T14:47:11.000Z",
+      "cacheApprox": true
+    }
+  ],
+  "attention": [
+    {
+      "type": "blocked",
+      "sessionKey": {
+        "machine": "machine-b",
+        "sessionId": "9c7fd9a7-298a-47b3-b51f-b0ea70d84190"
+      },
+      "epic": "PROJ-108",
+      "deadline": "2026-07-30T14:47:11.000Z",
+      "actions": [
+        {
+          "kind": "jump",
+          "machine": "machine-b",
+          "tabRef": "w1/t3",
+          "tabUuid": "f2b0a1c4-0000-4000-8000-000000000001"
+        }
+      ]
+    },
+    {
+      "type": "rule-violation",
+      "repo": "app-api",
+      "env": "prod",
+      "note": "deployed SHA is not an ancestor of origin/main",
+      "actions": [
+        {
+          "kind": "context"
+        }
+      ]
+    },
+    {
+      "type": "decision",
+      "id": "site-org2-provider-row",
+      "epic": "PROJ-108",
+      "title": "Provision the prod config row before the fix lands",
+      "since": "2026-07-14T14:32:11.000Z",
+      "actions": [
+        {
+          "kind": "context"
+        },
+        {
+          "kind": "close"
+        }
+      ]
+    },
+    {
+      "type": "decision",
+      "id": "radar-push-consumer-owner",
+      "epic": null,
+      "title": "Who owns the push consumer",
+      "since": "2026-07-27T14:32:11.000Z",
+      "actions": [
+        {
+          "kind": "context"
+        },
+        {
+          "kind": "close"
+        }
+      ]
+    },
+    {
+      "type": "mergeable",
+      "epic": "BETA-147",
+      "note": null,
+      "actions": [
+        {
+          "kind": "context"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "app-api",
+      "branch": "chore/delete-dormant-helpers",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "app-web",
+      "branch": "feat/set-dark-mode-globally",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "app-web",
+      "branch": "fix-tooltip-jitter",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    },
+    {
+      "type": "orphan",
+      "repo": "app-web",
+      "branch": "refactor/sdk-beta-release",
+      "actions": [
+        {
+          "kind": "tag"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,394 @@
+'use strict';
+// mod-jira (S-008) — the third opinion about what is happening, and the one most likely to be wrong.
+//
+// TWO QUERIES, NOT ONE (spec §M4, a Codex round-2 fix). This is the whole story of the module:
+//
+//   Q1  project in (PROJ,ALPHA,BETA) AND issuetype = Epic AND statusCategory != Done
+//       Open epics. Feeds the Jira-In-Progress activity signal, which is what lets an epic that
+//       exists ONLY in Jira — no branch, no session — still show up on the board.
+//
+//   Q2  key in (<every epic key git and the alias map currently know about>)
+//       The same epics, regardless of status. Q1 cannot see a Done epic by construction, so with
+//       Q1 alone the "Jira says done, git is still moving" drift direction is UNDETECTABLE. Q2
+//       exists for exactly that direction and for no other reason. Deleting it silently removes
+//       half the drift detector while every test that only checks Q1 keeps passing.
+//
+// MAP BY statusCategory, NEVER BY DISPLAY NAME. On a real instance the in-flight epics are spread
+// across "In Progress", "Ready for Code Review" and "Ready for Test" — three names, one category
+// (`indeterminate`). Matching on names would silently drop two thirds of them, and would break
+// again the next time somebody renames a workflow step.
+//
+// DRIFT IS A DIGEST, NEVER AN INTERRUPT (spec §M4, binding). Jira being out of date is a fact worth
+// knowing weekly and never worth stopping for. This module writes drift onto the epic it describes
+// (`epic.jira.drift`) and returns a digest list; it creates no attention item, and derive.js has no
+// code path that could turn one into an interrupt.
+//
+// A FAILURE IS A SOURCE ERROR, NOT AN EMPTY BOARD, and the two queries fail differently. Q1 dying
+// returns a NULL fragment, which makes the collector carry the last-good epic facts forward
+// unchanged while `sources.jira` carries this scan's fresh error — an empty result would silently
+// retire every Jira-only epic from the board and look like progress. Q2 dying is survivable: Q1's
+// answer is still true, so the fragment publishes and the source degrades to `stale` naming the
+// capability that was lost.
+const { getJson } = require('./http');
+const store = require('./store');
+
+// No hardcoded host. `jira.baseUrl` in config.json is required; absent it, the source reports
+// `disabled` rather than guessing an organisation's Jira. Unknown beats a wrong default.
+const DEFAULT_BASE_URL = process.env.JIRA_BASE_URL || '';
+// No default project keys: an org's Jira project codes are its own. Absent config, the module
+// queries nothing rather than guessing keys that belong to someone else.
+const DEFAULT_PROJECTS = [];
+const DEFAULT_TOKEN_REF = 'JIRA_API_TOKEN';
+const PAGE_SIZE = 100;
+// A guard against a server that never advances startAt. 50 pages x 100 = 5000 epics; the real
+// number is 63. Hitting this cap is a bug report, not a routine outcome.
+const MAX_PAGES = 50;
+// Q2's JQL is built from a key list, so it is chunked rather than allowed to grow unbounded.
+const KEY_CHUNK = 100;
+
+// Only real Jira keys may enter a `key in (...)` clause. p-numerals ("p59") are alias tokens, not
+// issue keys — putting one in the JQL makes Jira reject the WHOLE query with a 400, which would
+// take Q2 down and, with it, the Jira-Done drift direction. This regex is the gate.
+const ISSUE_KEY_RE = /^[A-Z][A-Z0-9]*-\d+$/;
+
+const RECENT_COMMIT_MS = 14 * 24 * 60 * 60 * 1000;
+const GIT_QUIET_MS = 30 * 24 * 60 * 60 * 1000;
+
+// The three categories the Jira API guarantees. Anything else is treated as unknown rather than
+// coerced into one of these.
+const CATEGORIES = ['new', 'indeterminate', 'done'];
+
+// ---- config ---------------------------------------------------------------------------------------
+
+// Read straight from the config FILE rather than the normalized config object: normalizeConfig()
+// builds its result key by key and drops sections it does not know about, so a `jira` block added
+// there would have to be threaded through P1 code this story does not own. Reading the file again
+// costs one small read per scan and keeps the P4 modules self-contained.
+async function loadJiraConfig(configPath) {
+  if (!configPath) return { cfg: null, error: null };
+  const read = await store.readJson(configPath, null);
+  if (!read.ok) return { cfg: null, error: read.error };
+  const raw = read.value && typeof read.value === 'object' ? read.value.jira : null;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { cfg: null, error: null };
+
+  const projects = Array.isArray(raw.projects)
+    ? raw.projects.filter((p) => typeof p === 'string' && /^[A-Z][A-Z0-9]*$/.test(p.trim())).map((p) => p.trim())
+    : DEFAULT_PROJECTS.slice();
+  if (projects.length === 0) return { cfg: null, error: 'jira.projects is empty' };
+
+  // No borrowed host. Without an explicit baseUrl (or JIRA_BASE_URL) the module is DISABLED with a
+  // stated reason rather than issuing requests at an empty or guessed origin.
+  const baseUrl = (typeof raw.baseUrl === 'string' && raw.baseUrl.trim() ? raw.baseUrl.trim() : DEFAULT_BASE_URL).replace(/\/+$/, '');
+  if (!baseUrl) return { cfg: null, error: 'jira.baseUrl is not set (and JIRA_BASE_URL is unset)' };
+
+  return {
+    cfg: {
+      baseUrl,
+      tokenRef: typeof raw.tokenRef === 'string' && raw.tokenRef.trim() ? raw.tokenRef.trim() : DEFAULT_TOKEN_REF,
+      projects,
+    },
+    error: null,
+  };
+}
+
+// ---- JQL ------------------------------------------------------------------------------------------
+
+// Q1. `statusCategory != Done` is the category, not a status name — that is the whole point.
+const openEpicsJql = (projects) =>
+  `project in (${projects.join(',')}) AND issuetype = Epic AND statusCategory != Done ORDER BY key`;
+
+// Q2. Regardless of status: this is the only way a Done epic can be observed at all.
+const keysJql = (keys) => `key in (${keys.join(',')}) ORDER BY key`;
+
+// Every epic key currently mapped from git or the alias map, filtered to things Jira could
+// actually resolve. Decisions and specs contribute too — anything radar has already decided is an
+// epic is something whose Jira status we want, whether or not Jira thinks it is open.
+function knownEpicKeys(input) {
+  const keys = new Set();
+  const add = (k) => { if (typeof k === 'string' && ISSUE_KEY_RE.test(k.trim())) keys.add(k.trim()); };
+
+  const repos = (input.fragments && input.fragments.git && input.fragments.git.repos) || {};
+  for (const id of Object.keys(repos)) {
+    for (const b of (repos[id].branches || [])) if (b && !b.isDefault) add(b.epic);
+  }
+  const aliasEpics = (input.aliases && input.aliases.epics && typeof input.aliases.epics === 'object') ? input.aliases.epics : {};
+  for (const k of Object.keys(aliasEpics)) add(k);
+  const overrides = (input.aliases && input.aliases.branchOverrides && typeof input.aliases.branchOverrides === 'object') ? input.aliases.branchOverrides : {};
+  for (const k of Object.keys(overrides)) add(overrides[k]);
+  for (const d of (Array.isArray(input.decisions) ? input.decisions : [])) if (d && !d.closedAt) add(d.epic);
+  const specEpics = (input.fragments && input.fragments.specs && input.fragments.specs.epics) || {};
+  for (const k of Object.keys(specEpics)) add(k);
+
+  return Array.from(keys).sort();
+}
+
+const chunk = (arr, size) => {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+};
+
+// ---- the search loop ---------------------------------------------------------------------------------
+
+// Paginates one JQL query. Returns {issues} or {error}. The JQL is URL-encoded exactly once, here,
+// so no caller can forget.
+async function searchAll(jql, ctx) {
+  const issues = [];
+  let startAt = 0;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const url = `${ctx.baseUrl}/rest/api/2/search`
+      + `?jql=${encodeURIComponent(jql)}`
+      + `&startAt=${startAt}&maxResults=${PAGE_SIZE}`
+      + '&fields=summary,status,project,updated';
+
+    const r = await getJson(url, { authorization: `Bearer ${ctx.token}`, accept: 'application/json' }, ctx.timeoutMs, ctx.fetchImpl);
+
+    if (r.kind === 'stale') return { error: `jira: ${r.error}` };
+    if (r.status === 401 || r.status === 403) return { error: `jira ${r.status} unauthorized (token from ${ctx.tokenRef})` };
+    if (r.status === 429) return { error: 'jira 429 rate limited' };
+    if (!r.ok) {
+      const errorMessages = (r.body && Array.isArray(r.body.errorMessages)) ? r.body.errorMessages : [];
+      const msgs = errorMessages.join('; ');
+      return { error: `jira ${r.status}${msgs ? `: ${msgs.slice(0, 160)}` : ''}`, status: r.status, errorMessages };
+    }
+
+    const body = r.body || {};
+    const batch = Array.isArray(body.issues) ? body.issues : [];
+    for (const i of batch) issues.push(i);
+
+    const total = Number(body.total);
+    startAt += batch.length;
+    // Stop on an empty page as well as on the total — a server that keeps returning nothing while
+    // claiming a larger total must not spin this loop to MAX_PAGES every scan.
+    if (batch.length === 0) break;
+    if (Number.isFinite(total) && startAt >= total) break;
+  }
+
+  return { issues };
+}
+
+// A key that git knows about but Jira does not (deleted issue, a typo in a branch name, an epic
+// that was only ever planned) makes Jira reject the ENTIRE `key in (...)` clause with a 400 and
+// name the offenders. Verified against a real Jira Data Center instance: two branch-derived keys,
+// PROJ-75 and PROJ-76, are 404 there, and their presence took the whole of Q2 down.
+//
+// This is not a hypothetical: without this parse, Q2 fails permanently on the real repo set, and
+// the Jira-Done drift direction — the entire reason Q2 exists — silently never fires again.
+const MISSING_KEY_RE = /An issue with key '([^']+)' does not exist/g;
+
+function missingKeysFromErrors(errorMessages) {
+  const out = new Set();
+  for (const m of (errorMessages || [])) {
+    MISSING_KEY_RE.lastIndex = 0;
+    let hit;
+    while ((hit = MISSING_KEY_RE.exec(String(m))) !== null) out.add(hit[1]);
+  }
+  return Array.from(out);
+}
+
+// Runs a `key in (...)` query, dropping keys Jira says do not exist and retrying. Bounded: each
+// round must remove at least one key, so it terminates.
+async function searchKeysResilient(keys, ctx, warnings) {
+  let remaining = keys.slice();
+  for (let round = 0; round < 4 && remaining.length; round++) {
+    const r = await searchAll(keysJql(remaining), ctx);
+    if (!r.error) return { issues: r.issues };
+    if (r.status !== 400) return { error: r.error };
+    const missing = missingKeysFromErrors(r.errorMessages).filter((k) => remaining.indexOf(k) !== -1);
+    if (missing.length === 0) return { error: r.error };
+    warnings.push(`jira: ${missing.length} epic key${missing.length === 1 ? '' : 's'} referenced by git do not exist in Jira and were dropped from the status query: ${missing.join(', ')}`);
+    remaining = remaining.filter((k) => missing.indexOf(k) === -1);
+  }
+  return { issues: [] };
+}
+
+// ---- mapping -------------------------------------------------------------------------------------------
+
+function mapIssue(issue) {
+  const f = issue.fields || {};
+  const status = f.status || {};
+  const cat = status.statusCategory || {};
+  const key = typeof cat.key === 'string' ? cat.key.toLowerCase() : null;
+  return {
+    key: issue.key,
+    project: (f.project && f.project.key) || (String(issue.key).split('-')[0] || null),
+    // The display name is carried for RENDERING only. Nothing branches on it.
+    status: typeof status.name === 'string' ? status.name : null,
+    statusCategory: CATEGORIES.indexOf(key) === -1 ? null : key,
+    summary: typeof f.summary === 'string' ? f.summary : null,
+    updatedAt: typeof f.updated === 'string' ? new Date(f.updated).toISOString() : null,
+    drift: null,
+  };
+}
+
+// ---- drift ------------------------------------------------------------------------------------------------
+
+// What git says about one epic, reduced to the three facts drift needs.
+function gitSignalsFor(key, gitFragment) {
+  const repos = (gitFragment && gitFragment.repos) || {};
+  let branches = 0;
+  let unpushed = 0;
+  let unmerged = 0;
+  let newestCommitAt = null;
+  for (const id of Object.keys(repos)) {
+    for (const b of (repos[id].branches || [])) {
+      if (!b || b.isDefault || b.epic !== key) continue;
+      branches++;
+      unpushed += Number(b.unpushed) || 0;
+      if (b.mergedIntoDevelop === false) unmerged++;
+      if (b.lastCommitAt && (!newestCommitAt || Date.parse(b.lastCommitAt) > Date.parse(newestCommitAt))) newestCommitAt = b.lastCommitAt;
+    }
+  }
+  return { branches, unpushed, unmerged, newestCommitAt };
+}
+
+// Both directions, per spec §M4. Returns null when there is nothing to say.
+//
+// Direction A is only observable because of Q2: a Done epic never appears in Q1's result set.
+function detectDrift(epic, git, now) {
+  const recent = git.newestCommitAt && (now - Date.parse(git.newestCommitAt)) <= RECENT_COMMIT_MS;
+
+  if (epic.statusCategory === 'done') {
+    const reasons = [];
+    if (git.unpushed > 0) reasons.push(`${git.unpushed} unpushed commit${git.unpushed === 1 ? '' : 's'}`);
+    if (git.unmerged > 0) reasons.push(`${git.unmerged} unmerged branch${git.unmerged === 1 ? '' : 'es'}`);
+    if (recent) reasons.push('a commit in the last 14 days');
+    if (reasons.length) {
+      return {
+        direction: 'jira-done-git-live',
+        note: `Jira says ${epic.status || 'Done'} but git still shows ${reasons.join(' and ')}`,
+        detectedAt: new Date(now).toISOString(),
+      };
+    }
+    return null;
+  }
+
+  if (epic.statusCategory === 'indeterminate' && git.branches > 0 && git.newestCommitAt) {
+    const idleMs = now - Date.parse(git.newestCommitAt);
+    if (idleMs > GIT_QUIET_MS) {
+      const days = Math.floor(idleMs / 86400000);
+      return {
+        direction: 'jira-inprogress-git-quiet',
+        note: `Jira says ${epic.status || 'In Progress'} but no epic-branch commit for ${days} days`,
+        detectedAt: new Date(now).toISOString(),
+      };
+    }
+  }
+
+  // An In-Progress epic with ZERO branches IS drift (changed 2026-07-31 — see derive.js's header).
+  //
+  // It used to be exempt, on the reasoning that ">30 days quiet" is unmeasurable without a git
+  // clock and a freshly created epic is the common case. That reasoning held only while
+  // `jira-in-progress` was an ACTIVITY signal, which is what put ten of these on the real board as
+  // ACTIVE epics with no commits and no date. Jira is no longer an activity signal, so the honest
+  // statement about such an epic is exactly this one: Jira asserts work is happening and git can
+  // see none. No time threshold is applied — none is measurable, and none is needed to say that.
+  if (epic.statusCategory === 'indeterminate' && git.branches === 0) {
+    return {
+      direction: 'jira-inprogress-no-git',
+      note: `Jira says ${epic.status || 'In Progress'} but no branch anywhere carries this epic`,
+      detectedAt: new Date(now).toISOString(),
+    };
+  }
+
+  return null;
+}
+
+// ---- module entry -------------------------------------------------------------------------------------------
+
+async function collectJira(opts) {
+  const now = opts.now == null ? Date.now() : opts.now;
+  const observedAt = new Date(now).toISOString();
+  const configPath = opts.configPath || (opts.paths && opts.paths.config) || null;
+
+  const loaded = opts.jiraConfig !== undefined
+    ? { cfg: opts.jiraConfig, error: null }
+    : await loadJiraConfig(configPath);
+
+  if (loaded.error) return { fragment: null, source: { status: 'error', observedAt, error: loaded.error }, warnings: [loaded.error] };
+  if (!loaded.cfg) return { fragment: { epics: {}, drift: [] }, source: { status: 'disabled' }, warnings: [] };
+
+  const cfg = loaded.cfg;
+  const env = opts.env || process.env;
+  const token = env[cfg.tokenRef];
+  if (!token) {
+    const error = `env ${cfg.tokenRef} is unset`;
+    return { fragment: null, source: { status: 'error', observedAt, error }, warnings: [error] };
+  }
+
+  const ctx = {
+    baseUrl: cfg.baseUrl,
+    token,
+    tokenRef: cfg.tokenRef,
+    timeoutMs: (opts.config && opts.config.timeouts && opts.config.timeouts.deployMs) || 15000,
+    fetchImpl: opts.fetchImpl || null,
+  };
+
+  const warnings = [];
+  const epics = {};
+
+  const absorb = (issues, fromKeyQuery) => {
+    for (const issue of issues) {
+      if (!issue || typeof issue.key !== 'string') continue;
+      const mapped = mapIssue(issue);
+      if (mapped.statusCategory === null) warnings.push(`${mapped.key}: unrecognised statusCategory, treated as unknown`);
+      // Q2 wins on conflict: it is the query that can see every status, including Done.
+      if (!epics[mapped.key] || fromKeyQuery) epics[mapped.key] = mapped;
+    }
+  };
+
+  // Q1 — open epics. THIS one failing takes the module down to a source error with a null fragment:
+  // without the epic universe, a partial result is indistinguishable from "those epics were closed",
+  // and publishing it would silently retire live work from the board.
+  const q1 = await searchAll(openEpicsJql(cfg.projects), ctx);
+  if (q1.error) return { fragment: null, source: { status: 'error', observedAt, error: q1.error }, warnings: warnings.concat(q1.error) };
+  absorb(q1.issues, false);
+
+  // Q2 — the git-known keys, regardless of status. Skipped only when there is genuinely nothing to
+  // ask about; an empty `key in ()` is invalid JQL and would 400 the scan.
+  const known = knownEpicKeys(opts);
+  let q2Failed = null;
+  for (const part of chunk(known, KEY_CHUNK)) {
+    const r = await searchKeysResilient(part, ctx, warnings);
+    // Q2 failing is NOT fatal — Q1's answer is still true. But it is not silent either: the
+    // Jira-Done drift direction is blind for this scan, so the source degrades to `stale` and says
+    // exactly which capability was lost.
+    if (r.error) { q2Failed = r.error; continue; }
+    absorb(r.issues, true);
+  }
+
+  // ---- drift, both directions, onto the epic it describes.
+  const gitFragment = (opts.fragments && opts.fragments.git) || { repos: {} };
+  const drift = [];
+  for (const key of Object.keys(epics)) {
+    const d = detectDrift(epics[key], gitSignalsFor(key, gitFragment), now);
+    if (!d) continue;
+    epics[key].drift = d;
+    drift.push(Object.assign({ epic: key }, d));
+  }
+  drift.sort((a, b) => (a.epic < b.epic ? -1 : a.epic > b.epic ? 1 : 0));
+
+  const source = q2Failed
+    ? { status: 'stale', observedAt, error: `known-epic status query failed (${q2Failed}) — Jira-Done drift is undetectable this scan` }
+    : { status: 'ok', observedAt };
+  if (q2Failed) warnings.push(source.error);
+
+  return { fragment: { epics, drift }, source, warnings };
+}
+
+module.exports = {
+  collectJira,
+  loadJiraConfig,
+  openEpicsJql,
+  keysJql,
+  knownEpicKeys,
+  searchAll,
+  searchKeysResilient,
+  missingKeysFromErrors,
+  mapIssue,
+  detectDrift,
+  gitSignalsFor,
+  chunk,
+  DEFAULT_BASE_URL, DEFAULT_PROJECTS, DEFAULT_TOKEN_REF, ISSUE_KEY_RE, PAGE_SIZE, CATEGORIES,
+};

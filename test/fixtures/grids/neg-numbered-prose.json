@@ -1,0 +1,143 @@
+{
+ "name": "neg-numbered-prose",
+ "meta": {
+  "source": "scratch-scenario",
+  "scenario": "neg-numbered-prose",
+  "step": "after"
+ },
+ "grid": {
+  "columns": 98,
+  "rows": 34,
+  "active_screen": "primary",
+  "cursor": {
+   "blinking": true,
+   "column": 20,
+   "row": 5,
+   "style": "bar",
+   "visible": true
+  },
+  "styles": [
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 0,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#1A1A1A",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 1,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#0869CB",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#1A1A1A",
+    "id": 2,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#0869CB",
+    "id": 3,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   }
+  ],
+  "row_spans": [
+   {
+    "cell_width": 19,
+    "column": 0,
+    "row": 0,
+    "style_id": 0,
+    "text": "Here are the steps:"
+   },
+   {
+    "cell_width": 14,
+    "column": 0,
+    "row": 1,
+    "style_id": 0,
+    "text": "1. first thing"
+   },
+   {
+    "cell_width": 15,
+    "column": 0,
+    "row": 2,
+    "style_id": 0,
+    "text": "2. second thing"
+   },
+   {
+    "cell_width": 14,
+    "column": 0,
+    "row": 3,
+    "style_id": 0,
+    "text": "3. third thing"
+   },
+   {
+    "cell_width": 23,
+    "column": 0,
+    "row": 4,
+    "style_id": 0,
+    "text": "and some trailing prose"
+   },
+   {
+    "cell_width": 14,
+    "column": 0,
+    "row": 5,
+    "style_id": 1,
+    "text": " demouser@127 "
+   },
+   {
+    "cell_width": 4,
+    "column": 14,
+    "row": 5,
+    "style_id": 2,
+    "text": " ~ "
+   },
+   {
+    "cell_width": 1,
+    "column": 18,
+    "row": 5,
+    "style_id": 3,
+    "text": ""
+   },
+   {
+    "cell_width": 1,
+    "column": 19,
+    "row": 5,
+    "style_id": 0,
+    "text": " "
+   }
+  ]
+ }
+}

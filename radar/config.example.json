@@ -1,0 +1,44 @@
+{
+  "_comment": "Copy to ~/.radar/config.json and edit. This is an explicit ALLOWLIST — radar never discovers repos by walking the disk. Secrets are NEVER stored here: tokenRef/leaderTokenRef name an environment variable, they do not hold its value.",
+  "configVersion": 1,
+  "role": "leader",
+  "collectorId": null,
+  "leaderBaseUrl": null,
+  "leaderTokenRef": null,
+  "scanIntervalMin": 10,
+  "sessionSweepSec": 60,
+  "timeouts": { "gitFetchSec": 20, "bridgeMs": 8000, "deployMs": 10000 },
+
+  "_bridges_comment": "S-004: machines whose Claude sessions radar folds in. `local: true` reads that machine's ~/.radar/events off disk instead of over HTTP. `secretRef` names the env var holding its BRIDGE_SECRET. OMIT `bridges` entirely and radar probes nothing over HTTP — it reads only this machine's own event log. See radar/HOOK-INSTALL.md.",
+  "bridges": [
+    { "id": "example-max", "baseUrl": "http://127.0.0.1:8799", "secretRef": "BRIDGE_SECRET", "local": true },
+    { "id": "example-mini", "baseUrl": "http://example-mini.local:8799", "secretRef": "BRIDGE_SECRET_MINI" }
+  ],
+
+  "_comment_jira": "OPTIONAL (mod-jira, S-008). Omit the block entirely and sources.jira reports `disabled`. tokenRef NAMES an env var holding a Jira Data Center personal access token; the value is never stored here. Two JQL queries run per scan: open epics in `projects`, and the status of every epic key git already knows about regardless of status — the second is what makes Jira-Done-but-git-live drift detectable.",
+  "jira": { "baseUrl": "https://jira.example.com", "tokenRef": "JIRA_API_TOKEN", "projects": ["PROJ", "ALPHA", "BETA"] },
+
+  "_comment_specs": "OPTIONAL (mod-specs, S-009). `{}` is enough and takes the default root. Scans <root>/*/_specs/p*/ , skipping symlinks. A folder is `draft`; a specs.md carrying a GO verdict is `done`. story_list.json statuses are never read — they demonstrably lie.",
+  "specs": { "root": "/Users/you/Docs/_context" },
+
+  "repos": [
+    {
+      "id": "example-web",
+      "path": "/absolute/path/to/example-web",
+      "defaultBranches": ["develop", "main"],
+      "_comment_gitBranch": "`gitBranch` is OPTIONAL and only matters when dev and prod are the SAME Vercel project split by branch (app-web: main->production->app.example.com, develop->preview->app-dev.example.com). A `preview` target is multi-branch — every feature branch builds into it — so without this key the probe answers with whatever built last on ANY branch. It appends `&meta-githubCommitRef=<branch>`. Omit it when dev and prod are separate projects (site, admin, docs); absent means UNFILTERED, never a defaulted `develop`. Left unset on a non-production target, radar checks the returned deployment's branch and reports `branchMismatch` with ancestry unknown rather than guessing.",
+      "deploy": {
+        "dev": { "kind": "vercel", "vercelTeamId": "team_REPLACE", "projectId": "prj_REPLACE", "target": "preview", "gitBranch": "develop", "tokenRef": "VERCEL_TOKEN_EXAMPLE" },
+        "prod": { "kind": "vercel", "vercelTeamId": "team_REPLACE", "projectId": "prj_REPLACE", "target": "production", "tokenRef": "VERCEL_TOKEN_EXAMPLE" }
+      }
+    },
+    {
+      "id": "example-api",
+      "path": "/absolute/path/to/example-api",
+      "defaultBranches": ["develop", "main"],
+      "deploy": {
+        "dev": { "kind": "ssh-docker", "host": "203.0.113.10", "container": "example-api" }
+      }
+    }
+  ]
+}

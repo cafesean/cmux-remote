@@ -1,0 +1,47 @@
+{
+  "v": 1,
+  "generatedAt": "2026-07-30T14:32:11.000Z",
+  "collectorId": "machine-a",
+  "machines": [
+    {
+      "id": "machine-a",
+      "bridge": "unknown",
+      "lastSeenAt": null
+    }
+  ],
+  "sources": {
+    "git": {
+      "status": "error",
+      "observedAt": "2026-07-30T14:32:11.000Z",
+      "error": "no repos configured"
+    },
+    "sessions": {
+      "status": "disabled"
+    },
+    "deploy": {
+      "status": "disabled"
+    },
+    "jira": {
+      "status": "disabled"
+    },
+    "specs": {
+      "status": "disabled"
+    },
+    "config": {
+      "status": "error",
+      "observedAt": "2026-07-30T14:32:11.000Z",
+      "error": "config missing: $HOME/.radar/config.json"
+    }
+  },
+  "counts": {
+    "blocked": 0,
+    "decisions": 0,
+    "mergeable": 0,
+    "orphans": 0,
+    "staleWorktrees": 0
+  },
+  "repos": {},
+  "epics": [],
+  "sessions": [],
+  "attention": []
+}

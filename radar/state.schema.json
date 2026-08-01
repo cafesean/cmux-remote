@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmux-remote/radar/state.v1.schema.json",
+  "title": "radar state.json v1",
+  "description": "The versioned snapshot contract. Consumers (radar CLI, /api/radar/state, the Radar tab, external brief consumers) read ONLY this shape. Additive changes keep v:1; any removal or retype bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "generatedAt", "collectorId", "machines", "sources", "counts", "repos", "epics", "sessions", "attention"],
+  "properties": {
+    "v": { "const": 1 },
+    "generatedAt": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T" },
+    "collectorId": { "type": "string", "minLength": 1 },
+    "machines": { "type": "array", "items": { "$ref": "#/$defs/machine" } },
+    "sources": {
+      "type": "object",
+      "description": "Metadata is ALWAYS fresh, even when the data fragment was carried forward from the last good scan (spec §3).",
+      "required": ["git", "sessions", "deploy", "jira", "specs", "config"],
+      "additionalProperties": { "$ref": "#/$defs/source" }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocked", "decisions", "mergeable", "orphans", "staleWorktrees"],
+      "properties": {
+        "blocked": { "type": "integer", "minimum": 0 },
+        "decisions": { "type": "integer", "minimum": 0 },
+        "mergeable": { "type": "integer", "minimum": 0 },
+        "orphans": { "type": "integer", "minimum": 0 },
+        "staleWorktrees": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "repos": { "type": "object", "additionalProperties": { "$ref": "#/$defs/repo" } },
+    "epics": { "type": "array", "items": { "$ref": "#/$defs/epic" } },
+    "sessions": { "type": "array", "items": { "$ref": "#/$defs/session" } },
+    "attention": { "type": "array", "items": { "$ref": "#/$defs/attention" } },
+    "jiraDrift": {
+      "type": "array",
+      "description": "Weekly digest material (spec §M4). NEVER an interrupt and never an attention item — a Jira status that git cannot corroborate belongs here, not on the board.",
+      "items": { "$ref": "#/$defs/jiraDriftItem" }
+    }
+  },
+  "$defs": {
+    "nullableString": { "type": ["string", "null"] },
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "bridge", "lastSeenAt"],
+      "properties": {
+        "id": { "type": "string" },
+        "bridge": { "enum": ["ok", "offline", "unknown"] },
+        "lastSeenAt": { "$ref": "#/$defs/nullableString" },
+        "eventsStatus": {
+          "enum": ["ok", "offline", "unknown"],
+          "description": "S-004: hook-event availability, INDEPENDENT of the bridge. The leader reads its own events off disk, so its bridge can be down while its events are current."
+        },
+        "stale": {
+          "type": "boolean",
+          "description": "S-004: this machine's session facts are carried forward from the last good sweep, not re-observed."
+        },
+        "statusTruncated": {
+          "type": "boolean",
+          "description": "S-004a: the bridge's 60-tab list-status cap bit. Tabs past it carry status `unknown` and are still listed — a missing status is never a green."
+        },
+        "error": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["ok", "stale", "error", "disabled"] },
+        "observedAt": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "dirty": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["staged", "unstaged", "untracked"],
+      "properties": {
+        "staged": { "type": "integer", "minimum": 0 },
+        "unstaged": { "type": "integer", "minimum": 0 },
+        "untracked": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha", "epic", "epicVia", "isDefault", "unpushed", "noRemote", "mergedIntoDevelop", "mergedIntoMain", "lastCommitAt", "worktree"],
+      "properties": {
+        "name": { "type": "string" },
+        "sha": { "type": "string" },
+        "epic": { "$ref": "#/$defs/nullableString" },
+        "epicVia": { "enum": ["issue-key", "alias", "override", "orphan"] },
+        "isDefault": { "type": "boolean" },
+        "unpushed": { "type": ["integer", "null"], "minimum": 0, "description": "rev-list --count <branch> --not --remotes. null = the count could not be taken (unknown, never 0)." },
+        "noRemote": { "type": "boolean", "description": "true = the branch has no configured upstream. Does NOT change the unpushed algorithm." },
+        "mergedIntoDevelop": { "type": ["boolean", "null"] },
+        "mergedIntoMain": { "type": ["boolean", "null"] },
+        "lastCommitAt": { "$ref": "#/$defs/nullableString" },
+        "worktree": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "branch", "head", "isMain", "bare", "locked", "prunable", "dirty", "dirtyError", "stale", "staleReason", "cleanupCommand"],
+      "properties": {
+        "path": { "type": "string" },
+        "branch": { "$ref": "#/$defs/nullableString", "description": "null for a detached HEAD worktree." },
+        "head": { "$ref": "#/$defs/nullableString" },
+        "isMain": { "type": "boolean" },
+        "bare": { "type": "boolean" },
+        "locked": { "type": "boolean" },
+        "prunable": { "type": "boolean" },
+        "dirty": { "$ref": "#/$defs/dirty" },
+        "dirtyError": { "$ref": "#/$defs/nullableString" },
+        "stale": { "type": "boolean" },
+        "staleReason": { "type": ["string", "null"], "enum": ["merged", "epic-closed", "idle-30d", null] },
+        "cleanupCommand": { "$ref": "#/$defs/nullableString", "description": "A command STRING for a human to run. Radar never executes it and never removes a branch." }
+      }
+    },
+    "deployEnv": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["ok", "empty", "unauthorized", "stale", "unknown"], "description": "empty NEVER renders as in-sync." },
+        "sha": { "$ref": "#/$defs/nullableString" },
+        "ruleViolation": { "type": ["boolean", "null"] },
+        "probedAt": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "repo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "defaultBranches", "branches", "worktrees", "deploy", "fetch"],
+      "properties": {
+        "path": { "type": "string" },
+        "defaultBranches": { "type": "object", "additionalProperties": { "$ref": "#/$defs/nullableString" } },
+        "branches": { "type": "array", "items": { "$ref": "#/$defs/branch" } },
+        "worktrees": { "type": "array", "items": { "$ref": "#/$defs/worktree" } },
+        "deploy": {
+          "type": ["object", "null"],
+          "properties": { "dev": { "$ref": "#/$defs/deployEnv" }, "prod": { "$ref": "#/$defs/deployEnv" } }
+        },
+        "fetch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "error"],
+          "properties": { "status": { "enum": ["ok", "stale", "skipped"] }, "error": { "$ref": "#/$defs/nullableString" } }
+        }
+      }
+    },
+    "ladderCell": { "enum": ["done", "current", "todo", "unknown", "violation"] },
+    "epic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "aliases", "title", "jira", "ladder", "zone", "signals", "phrase", "lastActivityAt", "repos", "flag", "branchCount"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "title": { "$ref": "#/$defs/nullableString" },
+        "jira": { "type": ["object", "null"] },
+        "ladder": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["spec", "pushed", "mergedDevelop", "deployedDev", "prod", "flags"],
+          "properties": {
+            "spec": { "$ref": "#/$defs/ladderCell" },
+            "pushed": { "$ref": "#/$defs/ladderCell", "description": "Named `pushed`, never `built`: the cell may only claim what git proves." },
+            "mergedDevelop": { "$ref": "#/$defs/ladderCell" },
+            "deployedDev": { "$ref": "#/$defs/ladderCell" },
+            "prod": { "$ref": "#/$defs/ladderCell" },
+            "flags": { "$ref": "#/$defs/ladderCell" }
+          }
+        },
+        "zone": { "enum": ["active", "dormant"], "description": "gone epics are absent from epics[] entirely." },
+        "signals": {
+          "type": "array",
+          "items": { "enum": ["session-blocked", "session-live", "decision-open", "jira-in-progress", "recent-commit", "unpushed-commits", "dirty-worktree", "unmerged-develop", "merged-not-deployed", "deployed-flag-off"] }
+        },
+        "phrase": { "type": "string" },
+        "lastActivityAt": { "type": "string" },
+        "repos": { "type": "array", "items": { "type": "string" } },
+        "flag": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["state", "assertedAt", "stale"],
+          "properties": {
+            "state": { "enum": ["on", "off", "n/a"] },
+            "assertedAt": { "$ref": "#/$defs/nullableString" },
+            "stale": { "type": "boolean" }
+          }
+        },
+        "branchCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "session": {
+      "type": "object",
+      "required": ["key", "status"],
+      "properties": {
+        "key": {
+          "type": "object",
+          "required": ["machine", "sessionId"],
+          "properties": { "machine": { "type": "string" }, "sessionId": { "type": "string" } }
+        },
+        "status": { "enum": ["running", "idle", "blocked"], "description": "idle = live, never finished." },
+        "epic": { "$ref": "#/$defs/nullableString" },
+        "repo": { "$ref": "#/$defs/nullableString" },
+        "surface": { "type": ["object", "null"] },
+        "notificationType": { "$ref": "#/$defs/nullableString" },
+        "cacheExpiresAt": { "$ref": "#/$defs/nullableString" },
+        "cacheApprox": { "type": "boolean" },
+        "surfaceReason": {
+          "$ref": "#/$defs/nullableString",
+          "description": "Why the surface join produced null, from a fixed vocabulary (no-cwd, shared-cwd, no-workspace-for-cwd, ambiguous-workspace, no-terminal-tab, ambiguous-tabs:<n>, no-tab-uuid, tree-unavailable, recorded-tab-gone). Null when a surface WAS resolved — including the exact case, where the session recorded its own cmux surface id and the tree confirmed it."
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": { "kind": { "enum": ["jump", "context", "close", "tag", "runbook", "expand"] } }
+    },
+    "jiraDriftItem": {
+      "type": "object",
+      "required": ["epic", "direction", "note"],
+      "properties": {
+        "epic": { "type": "string" },
+        "direction": { "enum": ["jira-done-git-live", "jira-inprogress-git-quiet", "jira-inprogress-no-git"] },
+        "note": { "type": "string" },
+        "detectedAt": { "type": "string" }
+      }
+    },
+    "attention": {
+      "type": "object",
+      "required": ["type", "actions"],
+      "properties": {
+        "type": { "enum": ["blocked", "rule-violation", "decision", "mergeable", "orphan", "orphan-group", "spec-orphan", "spec-orphan-group"] },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/action" } }
+      },
+      "oneOf": [
+        { "properties": { "type": { "const": "blocked" } }, "required": ["type", "sessionKey", "deadline"] },
+        { "properties": { "type": { "const": "rule-violation" } }, "required": ["type", "repo", "env", "note"] },
+        { "properties": { "type": { "const": "decision" } }, "required": ["type", "id", "title", "since"] },
+        { "properties": { "type": { "const": "mergeable" } }, "required": ["type", "epic", "note"] },
+        { "properties": { "type": { "const": "orphan" } }, "required": ["type", "repo", "branch"] },
+        { "properties": { "type": { "const": "spec-orphan" } }, "required": ["type", "specFolder"] },
+        { "properties": { "type": { "const": "orphan-group" }, "count": { "type": "integer", "minimum": 2 }, "items": { "type": "array", "minItems": 2 } }, "required": ["type", "count", "items"] },
+        { "properties": { "type": { "const": "spec-orphan-group" }, "count": { "type": "integer", "minimum": 2 }, "items": { "type": "array", "minItems": 2 } }, "required": ["type", "count", "items"] }
+      ]
+    }
+  }
+}

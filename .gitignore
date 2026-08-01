@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+config.json
+*.log
+.DS_Store
+.setup-state
+
+# agent worktrees — never committed
+.claude/

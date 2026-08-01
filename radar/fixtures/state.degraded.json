@@ -1,0 +1,128 @@
+{
+  "v": 1,
+  "generatedAt": "2026-07-30T14:32:11.000Z",
+  "collectorId": "machine-a",
+  "machines": [
+    {
+      "id": "machine-a",
+      "bridge": "ok",
+      "lastSeenAt": "2026-07-30T14:32:11.000Z"
+    },
+    {
+      "id": "machine-b",
+      "bridge": "offline",
+      "lastSeenAt": "2026-07-30T12:32:11.000Z"
+    }
+  ],
+  "sources": {
+    "git": {
+      "status": "error",
+      "observedAt": "2026-07-30T14:32:11.000Z",
+      "error": "all 8 repos failed: fetch timeout"
+    },
+    "sessions": {
+      "status": "stale",
+      "observedAt": "2026-07-30T14:32:11.000Z",
+      "error": "bridge machine-b unreachable"
+    },
+    "deploy": {
+      "status": "error",
+      "observedAt": "2026-07-30T14:32:11.000Z",
+      "error": "VERCEL_TOKEN_MAIN is not set"
+    },
+    "jira": {
+      "status": "disabled"
+    },
+    "specs": {
+      "status": "disabled"
+    },
+    "config": {
+      "status": "error",
+      "observedAt": "2026-07-30T14:32:11.000Z",
+      "error": "repos[3] (docs): path is not absolute"
+    }
+  },
+  "counts": {
+    "blocked": 0,
+    "decisions": 0,
+    "mergeable": 0,
+    "orphans": 0,
+    "staleWorktrees": 0
+  },
+  "repos": {
+    "app-web": {
+      "path": "/path/to/workspace/app-web",
+      "defaultBranches": {
+        "develop": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "main": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "branches": [
+        {
+          "name": "feature/PROJ-108-searchindex",
+          "sha": "0000000000000000000000000000000000000000",
+          "epic": "PROJ-108",
+          "epicVia": "issue-key",
+          "isDefault": false,
+          "unpushed": 9,
+          "noRemote": false,
+          "mergedIntoDevelop": false,
+          "mergedIntoMain": false,
+          "lastCommitAt": "2026-07-29T14:32:11.000Z",
+          "worktree": null
+        }
+      ],
+      "worktrees": [
+        {
+          "path": "/path/to/workspace/app-web",
+          "branch": "develop",
+          "head": "0000000000000000000000000000000000000000",
+          "isMain": true,
+          "bare": false,
+          "locked": false,
+          "prunable": false,
+          "dirty": null,
+          "dirtyError": "status timeout",
+          "stale": false,
+          "staleReason": null,
+          "cleanupCommand": null
+        }
+      ],
+      "deploy": null,
+      "fetch": {
+        "status": "stale",
+        "error": "fetch timeout"
+      }
+    }
+  },
+  "epics": [
+    {
+      "key": "PROJ-108",
+      "aliases": [],
+      "title": null,
+      "jira": null,
+      "ladder": {
+        "spec": "done",
+        "pushed": "current",
+        "mergedDevelop": "todo",
+        "deployedDev": "todo",
+        "prod": "todo",
+        "flags": "unknown"
+      },
+      "zone": "active",
+      "signals": [
+        "recent-commit",
+        "unpushed-commits",
+        "unmerged-develop"
+      ],
+      "phrase": "building · 9 commits unpushed",
+      "lastActivityAt": "2026-07-29T14:32:11.000Z",
+      "repos": [
+        "app-web"
+      ],
+      "flag": null,
+      "branchCount": 1
+    }
+  ],
+  "sessions": [],
+  "attention": []
+}

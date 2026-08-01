@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy to ~/.radar/aliases.json. The ONLY hand-curated inputs radar has: alias tags for orphan branches, branch overrides, and asserted feature-flag state. epics{} maps an epic key to the tokens that appear in its branch names (p-numbers and words both work; matching is on delimiter boundaries, so `p5` never claims `p51-...`). titles{} is optional display text.",
+  "epics": {
+    "PROJ-108": ["p59", "p62", "searchindex", "query-groupby", "cache-warm", "migrations"],
+    "example-epic": ["p99", "some-branch-token"]
+  },
+  "titles": {
+    "PROJ-108": "Search indexing + API cleanup"
+  },
+  "branchOverrides": {
+    "example-web:fix-tooltip-jitter": "PROJ-112"
+  },
+  "flags": {
+    "PROJ-108": { "state": "off", "assertedAt": "2026-07-30" }
+  }
+}

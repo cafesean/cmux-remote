@@ -1,0 +1,115 @@
+{
+ "name": "neg-shell-startup",
+ "meta": {
+  "source": "scratch-scenario",
+  "scenario": "neg-shell-startup",
+  "step": "startup"
+ },
+ "grid": {
+  "columns": 98,
+  "rows": 34,
+  "active_screen": "primary",
+  "cursor": {
+   "blinking": true,
+   "column": 20,
+   "row": 1,
+   "style": "bar",
+   "visible": true
+  },
+  "styles": [
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 0,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#1A1A1A",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#FFFFFF",
+    "id": 1,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#0869CB",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#1A1A1A",
+    "id": 2,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   },
+   {
+    "background": "#000000",
+    "blink": false,
+    "bold": false,
+    "faint": false,
+    "foreground": "#0869CB",
+    "id": 3,
+    "inverse": false,
+    "invisible": false,
+    "italic": false,
+    "overline": false,
+    "strikethrough": false,
+    "underline": false
+   }
+  ],
+  "row_spans": [
+   {
+    "cell_width": 42,
+    "column": 0,
+    "row": 0,
+    "style_id": 0,
+    "text": "Last login: Sat Aug  1 16:58:14 on ttys000"
+   },
+   {
+    "cell_width": 14,
+    "column": 0,
+    "row": 1,
+    "style_id": 1,
+    "text": " demouser@127 "
+   },
+   {
+    "cell_width": 4,
+    "column": 14,
+    "row": 1,
+    "style_id": 2,
+    "text": " ~ "
+   },
+   {
+    "cell_width": 1,
+    "column": 18,
+    "row": 1,
+    "style_id": 3,
+    "text": ""
+   },
+   {
+    "cell_width": 1,
+    "column": 19,
+    "row": 1,
+    "style_id": 0,
+    "text": " "
+   }
+  ]
+ }
+}
