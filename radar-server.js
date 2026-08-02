@@ -78,6 +78,23 @@ function createRadar(opts) {
   const paths = collector.paths || { dir: radarDir || store.defaultRadarDir() };
   let started = false;
 
+  // ---- the automatic-scan switch (p9 spec §8, S-006) --------------------------------------------
+  // OPT-OUT ONLY: absent, this is `true` and radar behaves exactly as it always has. Present, it
+  // means NO AUTOMATIC SCANNING OF ANY KIND — not the boot scan, and not one timer. Both halves are
+  // load-bearing. A boot-scan-only switch leaves anything that injects a state.json fixture racing
+  // the 60-second session sweep (radar/collector.js), and "the test usually finishes inside the
+  // first tick" is a race, not a guarantee: one slow sweep republishes the fixture out from under
+  // the assertion and the failure reads as a route bug.
+  //
+  // Two ways in, because there are two callers. `o.scanOnStart === false` is the in-process seam the
+  // unit tests already use; `RADAR_SCAN_ON_START=0` is the only one a spawned `server.js` child has,
+  // since server.js constructs radar with NO options. Either alone suffices — a caller asking for
+  // quiet through one channel is not overruled by silence on the other.
+  //
+  // What stays live: every route, including POST /api/radar/scan. This suppresses what radar does on
+  // its own, never what it is asked to do.
+  const autoScan = !(o.scanOnStart === false || String(env.RADAR_SCAN_ON_START || '').trim() === '0');
+
   // ---- p6 handoff (spec §7.1) -----------------------------------------------------------------
   // The protocol lives in radar/handoff.js and is required LAZILY, on the first p6 request: this
   // file must keep serving p5 verbatim on a checkout where the handoff module is broken — the
@@ -180,10 +197,15 @@ function createRadar(opts) {
     };
     // The other half of the same wiring is handoffPublish, defined beside routeHandoffCall above
     // so the forced-scan route shares the exact same closure.
-    try {
-      collector.start({ fetch: true, handoffSweep, handoffPublish });
-    } catch (e) {
-      log(`radar: scheduler failed to start: ${(e && e.message) || e}`);
+    // The scheduler is the first half of `autoScan` (see the switch above): not starting it is what
+    // makes "no timer ever arms" structural rather than a promise — there is no interval to fire,
+    // so neither the 10-minute git scan nor the 60-second session sweep can exist.
+    if (autoScan) {
+      try {
+        collector.start({ fetch: true, handoffSweep, handoffPublish });
+      } catch (e) {
+        log(`radar: scheduler failed to start: ${(e && e.message) || e}`);
+      }
     }
     // Startup recovery runs before the first sweep can fire (spec §M2): it settles every
     // non-terminal handoff, unsettled claim and open recovery-op exactly once.
@@ -196,7 +218,11 @@ function createRadar(opts) {
     })().catch((e) => log(`radar: handoff startup recovery failed: ${(e && e.message) || e}`));
     // One scan at boot, fire-and-forget. Without it an operator who has just set RADAR_ENABLED
     // cannot tell "radar is off" from "radar has not reached its first 10-minute tick yet".
-    if (o.scanOnStart === false) return;
+    // The second half of `autoScan`. Startup recovery above is deliberately NOT gated: it settles
+    // the handoff ledger and republishes only handoffs/index.json + locks.json, never state.json —
+    // so it cannot disturb an injected snapshot, and suppressing it would turn a scan switch into a
+    // p6 lifecycle switch.
+    if (!autoScan) return;
     try {
       // handoffPublish must be passed here too, and startup recovery must finish FIRST. Without
       // either, the first snapshot after a restart carries handoffs:[] even when the ledger holds
@@ -227,6 +253,7 @@ function createRadar(opts) {
 
     try {
       if (req.method === 'GET' && p === '/api/radar/state') return await routeState(res);
+      if (req.method === 'GET' && p === '/api/radar/inbox') return await routeInbox(res);
       if (req.method === 'POST' && p === '/api/radar/scan') return await routeScan(res);
       if (req.method === 'POST' && p === '/api/radar/tag') return await routeTag(req, res);
       if (req.method === 'POST' && p === '/api/radar/decide') return await routeDecide(req, res);
@@ -297,17 +324,62 @@ function createRadar(opts) {
     return sendJson(res, 200, state);
   }
 
+  // The inbox as its own resource (p9 spec §5.5). Deliberately NOT a slice of the state route: a
+  // client that wants the queue should not have to fetch and re-derive the whole board, and the
+  // classifier's health is a property of THIS resource — a snapshot carrying rows nobody could
+  // classify is still a perfectly valid snapshot.
+  //
+  // Three states a client must be able to tell apart, and the codes are the whole point:
+  //   * no snapshot at all          → 503 no_snapshot   (radar has never published)
+  //   * a snapshot with no `inbox`  → 200 items: []     (a pre-p9 file; the queue really is empty)
+  //   * a snapshot with an empty [] → 200 items: []     (nothing is waiting)
+  // The first must never masquerade as the last two — "never computed" and "computed, empty" are
+  // different facts, and an empty-looking 200 would erase that distinction (spec §2).
+  async function routeInbox(res) {
+    // Same viewer hop as the state route, for the same reason: on a viewer the queue of record is
+    // the leader's, and the LEADER's token may never reach a browser served by a different host.
+    if (typeof paths.config === 'string' && paths.config) {
+      const { config } = await loadConfig(paths.config, Date.now());
+      if (config.role === 'viewer') return await proxyInboxFromLeader(res, config);
+    }
+
+    const state = await collector.getState();
+    if (!state) return sendJson(res, 503, { error: 'no_snapshot', message: 'radar has not published a snapshot yet' });
+    const items = Array.isArray(state.inbox) ? state.inbox : [];
+    // `generatedAt` is the SNAPSHOT's, verbatim — never Date.now(). It is what tells a client how
+    // old this queue is, and minting a fresh timestamp here would make a stale board look current.
+    //
+    // `degraded` is a claim about the classifier, read back off the rows it produced: any row whose
+    // verdict is `unknown` means the classifier could not speak for that session — no credential, a
+    // transport failure, a missing transcript. §5.3 synthesizes a full `intent` for a row that
+    // arrives without one, so the nested read is safe; it is still written defensively, because a
+    // hand-built or hand-edited state.json is exactly the input that would otherwise throw a 500
+    // out of a read-only route.
+    const degraded = items.some((it) => !!(it && it.intent && it.intent.verdict === 'unknown'));
+    return sendJson(res, 200, {
+      items,
+      generatedAt: state.generatedAt,
+      sources: { classifier: degraded ? 'degraded' : 'ok' },
+    });
+  }
+
+  // ONE viewer hop, shared by both GET routes. p9 §5.5 requires the inbox proxy to mirror the state
+  // proxy exactly — same five failure codes, same `lastGood: false`, same bridgeMs timeout, same
+  // Bearer-header-never-query-string rule — and the only way to guarantee "exactly" over time is for
+  // there to be a single copy of that vocabulary. Each route supplies only what actually differs:
+  // the upstream path, and an optional rewrite of the body on the way back.
+  //
   // Every failure here is 502 + `lastGood: false` rather than a synthesised empty snapshot: the UI's
   // stale-state contract keeps rendering the last snapshot IT holds and badges the failure, and it
   // can only do that if a failed proxy is distinguishable from a real empty board (spec §2).
-  async function proxyStateFromLeader(res, config) {
+  async function proxyFromLeader(res, config, apiPath, rewrite) {
     const base = config.leaderBaseUrl;
     if (!base) return sendJson(res, 502, { error: 'leader_unconfigured', message: 'role=viewer but leaderBaseUrl is unset', lastGood: false });
     const token = config.leaderTokenRef ? env[config.leaderTokenRef] : null;
     if (config.leaderTokenRef && !token) {
       return sendJson(res, 502, { error: 'leader_token_missing', message: `env ${config.leaderTokenRef} is unset`, lastGood: false });
     }
-    const url = base.replace(/\/+$/, '') + '/api/radar/state';
+    const url = base.replace(/\/+$/, '') + apiPath;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), (config.timeouts && config.timeouts.bridgeMs) || 8000);
     try {
@@ -322,18 +394,28 @@ function createRadar(opts) {
       try { body = JSON.parse(text); } catch (_) {
         return sendJson(res, 502, { error: 'leader_bad_json', message: 'leader did not answer JSON', lastGood: false });
       }
-      // VIEWER ROLE OVERLAY (p6 spec §3). The leader's snapshot says "leader" — the truth about the
-      // machine that derived it, and the wrong answer on the one machine that needs the right one:
-      // the tab reads state.role to decide whether to render select at all, and a select affordance
-      // that can only 409 is itself a chore. The ONLY field the proxy rewrites, unconditionally, on
-      // the response — the leader's stored snapshot is untouched.
-      if (body && typeof body === 'object' && !Array.isArray(body)) body.role = 'viewer';
+      if (typeof rewrite === 'function') body = rewrite(body);
       return sendJson(res, 200, body);
     } catch (e) {
       const why = e && e.name === 'AbortError' ? 'timeout' : (e && e.message) || String(e);
       return sendJson(res, 502, { error: 'leader_unreachable', message: why, lastGood: false });
     } finally { clearTimeout(timer); }
   }
+
+  // VIEWER ROLE OVERLAY (p6 spec §3). The leader's snapshot says "leader" — the truth about the
+  // machine that derived it, and the wrong answer on the one machine that needs the right one: the
+  // tab reads state.role to decide whether to render select at all, and a select affordance that can
+  // only 409 is itself a chore. The ONLY field either proxy rewrites, unconditionally, on the
+  // response — the leader's stored snapshot is untouched.
+  const proxyStateFromLeader = (res, config) => proxyFromLeader(res, config, '/api/radar/state', (body) => {
+    if (body && typeof body === 'object' && !Array.isArray(body)) body.role = 'viewer';
+    return body;
+  });
+
+  // The inbox envelope carries no `role` and nothing else a viewer must reinterpret, so it is
+  // returned verbatim: the leader already decided what is waiting and how healthy the classifier
+  // was, and a viewer that second-guessed either would be publishing a second, quieter truth.
+  const proxyInboxFromLeader = (res, config) => proxyFromLeader(res, config, '/api/radar/inbox', null);
 
   // Coalesced by the collector itself: concurrent callers join the single in-flight scan rather
   // than starting a second fan-out over a few hundred git spawns. The response is a receipt, not
