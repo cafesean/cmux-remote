@@ -758,7 +758,15 @@ function createRadar(opts) {
         if (held && isoMs(held.blockedSince) === lease.turn.blockedSince) return finish('already_answered');
         // A complete fold showing a NEW turn is the ONLY release — including for the two leases that
         // never time-expire. The read is then REUSED as gate 1: exactly one events fetch, not two.
-        replyLeases.delete(key);
+        //
+        // NO FOLD AT ALL IS NOT THAT RELEASE. A complete read can legitimately stop carrying a
+        // session — a prune, the retention boundary moving, a bridge whose day file rolled — and
+        // that read proves nothing whatever about the turn. Releasing on it drops the guard §6.1
+        // relies on for the two outcomes it marks not-retryable, and when the same turn reappears
+        // the pipeline runs again and types the same reply into the same pane a second time. So the
+        // lease survives, and the request falls through to gate 1, which answers `session_not_found`
+        // without touching the tab.
+        if (held) replyLeases.delete(key);
       }
 
       // ---- 5 · GATE 1 — the session, from the event log ---------------------------------------
