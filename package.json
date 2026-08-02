@@ -18,7 +18,8 @@
     "server": "node server.js",
     "radar": "node radar/radar-cli.js",
     "test": "node --test test/*.test.js",
-    "test:eval:inbox": "node scripts/eval-inbox.mjs"
+    "test:eval:inbox": "node scripts/eval-inbox.mjs",
+    "test:browser:inbox": "node scripts/browser-inbox.mjs"
   },
   "keywords": [
     "cmux",
