@@ -423,18 +423,26 @@
     return !!answerable && machine === MACHINE_READY;
   }
 
-  // What the button actually gets. The conjunction, plus two LATCHES — they are not axes of the
+  // What the button actually gets. The conjunction, plus three LATCHES — they are not axes of the
   // conjunction, they are flags set by a named event and cleared by a named event: `latched` by a
   // §6.1 disable-send code (cleared by a new turn or by closing the card), `vanished` by the key
-  // leaving the payload (cleared by its return).
+  // leaving the payload (cleared by its return), and `sending` by a POST leaving the client (cleared
+  // the moment its result lands). `sending` is NOT a fourth machine state — it never touches the
+  // machine, and Send comes back through the ordinary `answerable && ready` conjunction.
   function canSend(card) {
     if (!card) return false;
-    return sendEnabled(card.answerable, card.machine) && !card.latched && !card.vanished;
+    return sendEnabled(card.answerable, card.machine) && !card.latched && !card.vanished && !card.sending;
   }
 
   // ---- card state + the reducers the DOM layer renders -------------------------------------------
 
-  function openCardState(row) {
+  // `gen` is the CARD GENERATION: the identity of this opening of this card. It is minted when a card
+  // is opened and retired when one is closed, so a reply response that resolves after the operator
+  // moved on can be recognised as belonging to a card that no longer exists. It is state, not a DOM
+  // property, because the decision it drives — "drop this result whole" — is a pure-layer decision.
+  // Omitting it (every caller that predates it, and every pure test) leaves it null, and a null
+  // generation disables the check entirely rather than matching everything.
+  function openCardState(row, gen) {
     return {
       key: rowKey(row),
       row: row || null,
@@ -444,6 +452,8 @@
       answerable: !!(row && row.answerable),
       vanished: false,
       latched: false,
+      sending: false,
+      gen: gen === undefined ? null : gen,
       line: null,
     };
   }
@@ -470,6 +480,10 @@
       closeCard: !!e.closeCard,
       clearField: !!e.clearField,
       post: e.post || null,
+      // Who sent `post`, as a value the caller hands straight back to `applyReplyResult` when the
+      // response lands. Deliberately NOT part of `post`: `post` is the wire body and gains no
+      // client-only fields.
+      postedCard: e.postedCard || null,
     };
   }
 
@@ -557,24 +571,61 @@
     const key = (card.row && card.row.sessionKey) || {};
     // Plain text only in v1, and `turn` copied verbatim from the row the card is holding.
     const post = { machine: key.machine, sessionId: key.sessionId, text: card.draft, turn: m.post.turn };
-    return { state: base, instr: instructionsFor(card, { field: 'keep', post: post }) };
+    // The card goes IN FLIGHT: Send dies for the duration and the draft is not touched. This is the
+    // second lock on the same seam — one tap cannot become two POSTs carrying the same token, and the
+    // window in which a response can outlive its card is as small as the round trip allows.
+    const sending = Object.assign({}, card, { sending: true });
+    return {
+      state: { rows: st.rows, card: sending },
+      instr: instructionsFor(sending, {
+        field: 'keep', post: post,
+        // The sender's identity travels with the request and comes back with the response.
+        postedCard: { gen: sending.gen === undefined ? null : sending.gen, turn: m.post.turn },
+      }),
+    };
   }
 
   // The reply's outcome. THE TYPED TEXT IS KEPT ON EVERY SINGLE NON-SUCCESS PATH — `draft` appears
   // in none of the branches below except the success one, which clears it deliberately.
-  function applyReplyResult(state, code) {
+  //
+  // A REPLY RESPONSE IS ADDRESSED. `posted` is `instr.postedCard` from the `applySend` that issued
+  // the request — `{gen, turn}` — and it is what makes "this result is for the card in front of me"
+  // a checkable fact rather than an assumption. The server's send phase alone can take many seconds,
+  // and in that window the operator can tap Back, open another row and start typing; without an
+  // address the response lands on WHOEVER IS OPEN. Two independent staleness axes, because they are
+  // two different mistakes:
+  //
+  //   1. STALE CARD (`gen` differs, or nothing is open at all) — the result belongs to a card that no
+  //      longer exists. It is DROPPED WHOLE: no close, no field clear, no machine transition, no
+  //      line. §6.1 promises the typed text is always retained, and applying `ok` here would destroy
+  //      a draft the operator never sent.
+  //   2. STALE TURN (same card, but its `turn` moved on while the POST was in flight) — the question
+  //      the server answered is not the question on screen. The §6.1 latch and sentence are skipped,
+  //      because "a new turn is a new question" and a latch earned by the old one must not survive
+  //      onto the new one and leave Send permanently dead on a live question.
+  //
+  // `ok` is the one outcome a stale TURN does not suppress: the send genuinely landed in the pane, so
+  // the card closes. A stale CARD suppresses even that — there is no card of that generation to close.
+  // Both checks are opt-in: `posted` omitted, or a null `gen`/absent `turn`, leaves the old behaviour
+  // exactly as it was.
+  function applyReplyResult(state, code, posted) {
     const st = normalizeState(state);
     const card = st.card;
-    if (!card) return { state: st, instr: instructionsFor(null, {}) };
+    const p = posted || null;
+    if (p && p.gen != null && (!card || card.gen !== p.gen)) {
+      return { state: st, instr: instructionsFor(card, { field: 'keep' }), dropped: true, stale: true };
+    }
+    if (!card) return { state: st, instr: instructionsFor(null, {}), dropped: true, stale: false };
     const copy = copyForCode(code);
     if (copy === null) {
       // §6.1's success row: the field clears, the card closes, and the ROW STAYS in the list until a
       // refresh removes it. Never optimistically hidden.
       return { state: { rows: st.rows, card: null }, instr: instructionsFor(null, { closeCard: true, clearField: true }) };
     }
+    const staleTurn = !!(p && p.turn !== undefined && turnSignature(p.turn) !== turnSignature(card.turn));
     let machine = { name: card.machine, turn: card.turn };
     let immediateGet = false;
-    if (copy.requiresReconfirm) {
+    if (copy.requiresReconfirm && !staleTurn) {
       const m = machineReduce(machine, { type: 'reply-response', code: 'question_changed' });
       machine = m.state;
       immediateGet = m.immediateGet;
@@ -582,13 +633,20 @@
     const next = Object.assign({}, card, {
       machine: machine.name,
       turn: machine.turn,
+      // The round trip is over either way — the button comes back through the conjunction, never by
+      // a branch of its own.
+      sending: false,
       // The machine owns the disable for `question_changed`; latching it as well would outlive the
       // confirm tap and leave Send dead on the fresh turn.
-      latched: copy.disableSend && !copy.requiresReconfirm ? true : card.latched,
+      latched: staleTurn ? card.latched : (copy.disableSend && !copy.requiresReconfirm ? true : card.latched),
       // ...and the notice for it, so the waiting sentence has exactly one producer.
-      line: copy.requiresReconfirm ? null : copy.text,
+      line: staleTurn ? card.line : (copy.requiresReconfirm ? null : copy.text),
     });
-    return { state: { rows: st.rows, card: next }, instr: instructionsFor(next, { field: 'keep', immediateGet: immediateGet }) };
+    return {
+      state: { rows: st.rows, card: next },
+      instr: instructionsFor(next, { field: 'keep', immediateGet: immediateGet }),
+      dropped: false, stale: staleTurn,
+    };
   }
 
   function applyConfirm(state) {
@@ -768,6 +826,9 @@
     // is made by the exported functions above and lands here; the block below only renders it.
     let pure = { rows: [], card: null };
     let refreshState = refreshInitial({ visible: visibleNow() });
+    // The card generation. Monotonic, minted on open, retired on close — never reused, so a reply
+    // response can always be told apart from the card it would otherwise land on.
+    let cardGen = 0;
     // The two DOM handles the card owns. `card.input` is the node trap 10 is about.
     const card = { input: null, sendBtn: null };
 
@@ -923,7 +984,9 @@
         card.input = null;
         card.sendBtn = null;
         fieldEl.replaceChildren();
-        pure = { rows: pure.rows, card: openCardState(row) };
+        // A NEW card, so a new generation — including a reopen of the same key, which is a different
+        // opening and must not inherit an in-flight POST's answer.
+        pure = { rows: pure.rows, card: openCardState(row, ++cardGen) };
       } else {
         pure = { rows: pure.rows, card: Object.assign({}, pure.card, { row: row, answerable: !!row.answerable }) };
       }
@@ -957,6 +1020,9 @@
     }
 
     function closeCard() {
+      // Retire the generation FIRST. Anything still in flight for this card is now addressed to a
+      // card that does not exist, which is exactly what `applyReplyResult` drops.
+      cardGen += 1;
       pure = { rows: pure.rows, card: null };
       card.input = null;
       card.sendBtn = null;
@@ -996,10 +1062,17 @@
       const attempt = applySend(pure, card.input ? card.input.value : undefined);
       pure = attempt.state;
       if (!attempt.instr.post) { renderCard(attempt.instr); return; }
+      // Send goes dead for the round trip. Only the button — the textarea keeps focus, keeps the
+      // caret and keeps the text, so this is invisible to anyone who is not double-tapping.
+      syncSend(attempt.instr);
       let r = null;
       try { r = await jpost('/api/radar/inbox/reply', attempt.instr.post); } catch (_) { r = null; }
       const code = await replyCode(r);
-      const out = applyReplyResult(pure, code);
+      // The response is addressed to the card that sent it. If the operator has since tapped Back or
+      // opened another row, this result belongs to nobody: it is dropped without touching the card
+      // that IS open — whose draft, machine state and Send button are none of its business.
+      const out = applyReplyResult(pure, code, attempt.instr.postedCard);
+      if (out.dropped) return;
       pure = out.state;
       if (out.instr.clearField && card.input) card.input.value = '';
       if (out.instr.closeCard) { closeCard(); return; }

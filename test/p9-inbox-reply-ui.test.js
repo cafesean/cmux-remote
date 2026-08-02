@@ -1118,6 +1118,314 @@ test('wiring · the tappable notice is never a <button> — a read-only card mus
 });
 
 // ================================================================================================
+// THE IN-FLIGHT SEAM — a reply response is addressed, and a response that outlives its card is not
+// applied to whoever happens to be open
+//
+// The server's send phase alone can take many seconds. In that window the operator can tap Back,
+// open another row and start typing. Everything above this line fuses "POST" and "its response" into
+// one atomic step — the AC6 property sweep included, whose alphabet has no event for a response
+// arriving LATE — so no sequence any of it can express reaches this seam at all. These are the
+// sequences that can.
+// ================================================================================================
+
+// A mount whose reply POST is HELD OPEN until the test releases it. This is the only way to write
+// down the interleaving: a `jpost` that resolves on its own microtask can never still be in flight
+// when the operator taps Back.
+function mountHeld(o) {
+  const opts = o || {};
+  const doc = makeDoc();
+  const mount = makeNode(doc, 'div');
+  doc.body.appendChild(mount);
+  const calls = { gets: 0, posts: [] };
+  const held = [];
+  const jget = async () => {
+    calls.gets++;
+    const r = opts.get ? opts.get(calls.gets) : { ok: true, status: 200, body: payloadOf([]) };
+    return { ok: r.ok !== false, status: r.status || 200, json: async () => r.body };
+  };
+  const jpost = (url, body) => {
+    calls.posts.push(body);
+    return new Promise((resolve) => { held.push({ body, resolve }); });
+  };
+  const ui = INBOX.create({
+    mount, jget, jpost, now: () => NOW,
+    setTimer: () => 'timer-held', clearTimer: () => {},
+  });
+  // Answer the i-th (0-based) POST still in flight, then let the client's awaits drain.
+  const answer = async (i, code) => {
+    const h = held[i];
+    assert.ok(h, `POST #${i} must be in flight to be answered`);
+    h.resolve(code === 'ok'
+      ? { ok: true, status: 200, json: async () => ({ ok: true }) }
+      : { ok: false, status: 409, json: async () => ({ error: code }) });
+    await flush();
+  };
+  return { doc, mount, ui, calls, held, answer, pane: ui.el };
+}
+
+// Open A, type, Send (the POST is held), tap Back, open B, start typing. Returns B's live textarea.
+async function aSentThenBOpened(h) {
+  h.ui.open();
+  await flush();
+  byClass(h.pane, 'irow')[0].onclick();
+  const ta = byTag(h.pane, 'TEXTAREA')[0];
+  ta.value = 'A: land it on develop';
+  ta.oninput();
+  byClass(h.pane, 'isend')[0].onclick();
+  await flush();
+  assert.equal(h.calls.posts.length, 1, 'A POSTed');
+  assert.equal(h.held.length, 1, "...and it is still in flight — that is the whole point");
+
+  byClass(h.pane, 'iback')[0].onclick();
+  byClass(h.pane, 'irow')[1].onclick();
+  const tb = byTag(h.pane, 'TEXTAREA')[0];
+  tb.value = 'B: what I am halfway through typing';
+  tb.oninput();
+  return tb;
+}
+
+test("defect 1 · A's `ok` resolving while B is open must not close B or destroy B's draft", async () => {
+  const a = row({ question: 'Should A land on develop?' });
+  const b = row({ question: 'Should B land on develop?' });
+  const h = mountHeld({ get: () => ({ body: payloadOf([a, b]) }) });
+  const tb = await aSentThenBOpened(h);
+
+  await h.answer(0, 'ok');
+
+  assert.equal(h.ui.state().card && h.ui.state().card.key, INBOX.rowKey(b), "B's card is still the open one");
+  assert.equal(byClass(h.pane, 'icard')[0].hidden, false, "B's card was not closed by A's success");
+  assert.equal(byTag(h.pane, 'TEXTAREA')[0], tb, 'the very same field node');
+  assert.equal(tb.value, 'B: what I am halfway through typing', "B'S DRAFT IS INTACT");
+  assert.equal(h.ui.state().card.draft, 'B: what I am halfway through typing');
+  assert.equal(byClass(h.pane, 'isend')[0].disabled, false, 'and B can still send');
+});
+
+test("defect 1 · A's `question_changed` resolving while B is open must not wedge B or emit a GET", async () => {
+  const a = row({ question: 'Should A land on develop?' });
+  const b = row({ question: 'Should B land on develop?' });
+  const h = mountHeld({ get: () => ({ body: payloadOf([a, b]) }) });
+  const tb = await aSentThenBOpened(h);
+  const getsBefore = h.calls.gets;
+
+  await h.answer(0, 'question_changed');
+
+  assert.equal(h.ui.state().card.machine, INBOX.MACHINE_READY, "B's machine is untouched — B's question never changed");
+  assert.equal(h.calls.gets, getsBefore, 'no spurious immediate GET on B behalf');
+  assert.equal(byClass(h.pane, 'inotice')[0].hidden, true, 'and no waiting sentence on a card that never POSTed');
+  assert.equal(tb.value, 'B: what I am halfway through typing');
+  assert.equal(byClass(h.pane, 'isend')[0].disabled, false, 'B is not wedged: Send is live');
+
+  // The wedge, spelled out: B's turn will never change, so a `awaiting-fresh` entered here would have
+  // no exit at all — a cadence refresh keeps it and a confirm tap is a no-op in that state.
+  byClass(h.pane, 'isend')[0].onclick();
+  await flush();
+  assert.equal(h.calls.posts.length, 2, 'B can actually send');
+  assert.equal(h.calls.posts[1].text, 'B: what I am halfway through typing');
+});
+
+test("defect 1 · A's disable-code resolving while B is open must not latch B with A's sentence", async () => {
+  for (const code of ['already_answered', 'send_unconfirmed', 'tab_gone', 'session_not_found', 'surface_reassigned']) {
+    const a = row({ question: 'Should A land on develop?' });
+    const b = row({ question: 'Should B land on develop?' });
+    const h = mountHeld({ get: () => ({ body: payloadOf([a, b]) }) });
+    const tb = await aSentThenBOpened(h);
+
+    await h.answer(0, code);
+
+    assert.equal(h.ui.state().card.latched, false, `${code}: B is not latched by A's outcome`);
+    assert.equal(h.ui.state().card.line, null, `${code}: and shows none of A's copy`);
+    assert.equal(byClass(h.pane, 'inotice')[0].hidden, true, `${code}: nothing rendered`);
+    assert.equal(byClass(h.pane, 'isend')[0].disabled, false, `${code}: Send stays live on B`);
+    assert.equal(tb.value, 'B: what I am halfway through typing', `${code}: B's draft is intact`);
+  }
+});
+
+test('defect 1 · a response resolving with NO card open is a safe no-op', async () => {
+  for (const code of ['ok', 'question_changed', 'already_answered', 'not_at_prompt']) {
+    const a = row({ question: 'Should A land on develop?' });
+    const h = mountHeld({ get: () => ({ body: payloadOf([a]) }) });
+    h.ui.open();
+    await flush();
+    byClass(h.pane, 'irow')[0].onclick();
+    const ta = byTag(h.pane, 'TEXTAREA')[0];
+    ta.value = 'A: land it on develop';
+    ta.oninput();
+    byClass(h.pane, 'isend')[0].onclick();
+    await flush();
+    byClass(h.pane, 'iback')[0].onclick();
+    const getsBefore = h.calls.gets;
+
+    await h.answer(0, code);
+
+    assert.equal(h.ui.state().card, null, `${code}: still no card open`);
+    assert.equal(h.calls.gets, getsBefore, `${code}: no GET`);
+    assert.equal(byClass(h.pane, 'icard')[0].hidden, true, `${code}: the card stays closed`);
+    assert.equal(byClass(h.pane, 'irow').length, 1, `${code}: the list is untouched`);
+    assert.deepEqual(h.ui.state().rows.map(INBOX.rowKey), [INBOX.rowKey(a)], `${code}: and so are the rows`);
+  }
+});
+
+test('defect 1 · the pure layer drops a response addressed to a generation that is gone', () => {
+  const a = row({});
+  const b = row({});
+  const sent = INBOX.applySend({ rows: [a, b], card: Object.assign(INBOX.openCardState(a, 7), { draft: 'A' }) }, 'A');
+  assert.deepEqual(sent.instr.postedCard, { gen: 7, turn: a.turn }, 'the sender addresses its own request');
+
+  const cardB = Object.assign(INBOX.openCardState(b, 8), { draft: 'B, half typed' });
+  const withB = { rows: [a, b], card: cardB };
+  const codes = SIX_ONE.map(([c]) => c).concat(['ok', 'nonsense', INBOX.REPLY_NETWORK_ERROR]);
+  for (const code of codes) {
+    const out = INBOX.applyReplyResult(withB, code, sent.instr.postedCard);
+    assert.equal(out.dropped, true, `${code}: dropped`);
+    assert.equal(out.state.card, cardB, `${code}: B's card object is literally untouched`);
+    assert.equal(out.instr.closeCard, false, `${code}: nothing closes`);
+    assert.equal(out.instr.clearField, false, `${code}: nothing clears`);
+    assert.equal(out.instr.immediateGet, false, `${code}: nothing fetches`);
+  }
+  // The same result addressed to a card that is not there at all.
+  const gone = INBOX.applyReplyResult({ rows: [a, b], card: null }, 'ok', sent.instr.postedCard);
+  assert.equal(gone.dropped, true);
+  assert.equal(gone.state.card, null);
+  assert.equal(gone.instr.closeCard, false, 'there is no card of that generation to close');
+
+  // ...and a reopen of the SAME key is a different opening, so it is a different generation.
+  const reopened = Object.assign(INBOX.openCardState(a, 9), { draft: 'typed again' });
+  const back = INBOX.applyReplyResult({ rows: [a, b], card: reopened }, 'ok', sent.instr.postedCard);
+  assert.equal(back.dropped, true, 'same key, new opening — the old POST is not its business');
+  assert.equal(back.state.card.draft, 'typed again');
+});
+
+test('defect 2 · a stale POST\'s disable-latch must not survive onto a fresh turn', () => {
+  const r = row({});
+  // ready(T0) -> POST(T0) in flight
+  const sent = INBOX.applySend(stateWith([r], r, { draft: 'my answer' }), 'my answer');
+  assert.equal(INBOX.turnSignature(sent.instr.postedCard.turn), INBOX.turnSignature(turnAt(0)));
+
+  // ...a refresh delivers T1 while it is in flight: reconfirm-required, latch cleared.
+  const moved = INBOX.applyRefresh(sent.state, { ok: true, items: [onTurn(r, 1)] });
+  assert.equal(moved.state.card.machine, INBOX.MACHINE_RECONFIRM);
+  assert.equal(moved.state.card.latched, false);
+
+  // ...and only NOW does the POST come back, refusing a question nobody is looking at.
+  const out = INBOX.applyReplyResult(moved.state, 'already_answered', sent.instr.postedCard);
+  assert.equal(out.stale, true, 'the response answers a turn that is gone');
+  assert.equal(out.state.card.latched, false, 'THE LATCH IS NOT APPLIED — a new turn is a new question');
+  assert.equal(out.state.card.line, null, "and neither is the old question's sentence");
+  assert.equal(out.state.card.draft, 'my answer', 'the draft is kept, as always');
+
+  // The operator taps the review notice, and Send is ALIVE on the fresh question.
+  const tapped = INBOX.applyConfirm(out.state);
+  assert.equal(tapped.state.card.machine, INBOX.MACHINE_READY);
+  assert.equal(tapped.instr.sendEnabled, true, 'SEND IS LIVE ON T1');
+  const retry = INBOX.applySend(tapped.state, 'my answer');
+  assert.ok(retry.instr.post, 'and it can actually post');
+  assert.equal(INBOX.turnSignature(retry.instr.post.turn), INBOX.turnSignature(turnAt(1)), 'carrying the FRESH token');
+});
+
+test('defect 2 · a stale `question_changed` must not re-wedge a card the operator already confirmed', () => {
+  const r = row({});
+  const sent = INBOX.applySend(stateWith([r], r, { draft: 'my answer' }), 'my answer');
+  let st = INBOX.applyRefresh(sent.state, { ok: true, items: [onTurn(r, 1)] }).state;
+  st = INBOX.applyConfirm(st).state;                       // ready, on T1
+  assert.equal(st.machine, undefined);                     // (the card holds it, not the state)
+  assert.equal(st.card.machine, INBOX.MACHINE_READY);
+
+  const out = INBOX.applyReplyResult(st, 'question_changed', sent.instr.postedCard);
+  assert.equal(out.state.card.machine, INBOX.MACHINE_READY, 'a refusal of T0 cannot send T1 back to awaiting-fresh');
+  assert.equal(out.instr.immediateGet, false, 'and cannot buy a GET for a question that already arrived');
+  assert.equal(out.instr.sendEnabled, true);
+});
+
+test('defect 2 · `ok` still closes the card even when the turn moved under it — the send DID land', () => {
+  const r = row({});
+  const sent = INBOX.applySend(stateWith([r], r, { draft: 'my answer' }), 'my answer');
+  const moved = INBOX.applyRefresh(sent.state, { ok: true, items: [onTurn(r, 1)] });
+  const out = INBOX.applyReplyResult(moved.state, 'ok', sent.instr.postedCard);
+  assert.equal(out.state.card, null, 'success closes it');
+  assert.equal(out.instr.closeCard, true);
+  assert.equal(out.instr.clearField, true);
+  assert.deepEqual(out.state.rows.map(INBOX.rowKey), [INBOX.rowKey(r)], 'and the row stays until a refresh removes it');
+});
+
+test('defect 2 · wired — the latch never lands, and Send comes back on the fresh turn', async () => {
+  const stale = row({});
+  const fresh = onTurn(stale, 1);
+  let served = 0;
+  const h = mountHeld({ get: () => { served++; return { body: payloadOf([served === 1 ? stale : fresh]) }; } });
+  h.ui.open();
+  await flush();
+  byClass(h.pane, 'irow')[0].onclick();
+  const ta = byTag(h.pane, 'TEXTAREA')[0];
+  ta.value = 'the answer I still want to send';
+  ta.oninput();
+  byClass(h.pane, 'isend')[0].onclick();
+  await flush();
+
+  // The world moves on while the POST is in flight.
+  h.ui.refresh();
+  await flush();
+  assert.equal(h.ui.state().card.machine, INBOX.MACHINE_RECONFIRM);
+
+  await h.answer(0, 'already_answered');
+
+  assert.equal(h.ui.state().card.latched, false, 'no latch from a question that is gone');
+  assert.equal(byClass(h.pane, 'inotice')[0].textContent, INBOX.QUESTION_CHANGED_REVIEW, 'the machine still owns the line');
+  byClass(h.pane, 'inotice')[0].onclick();
+  assert.equal(byClass(h.pane, 'isend')[0].disabled, false, 'SEND IS ALIVE on the fresh question');
+  byClass(h.pane, 'isend')[0].onclick();
+  await flush();
+  assert.equal(h.calls.posts.length, 2);
+  assert.equal(INBOX.turnSignature(h.calls.posts[1].turn), INBOX.turnSignature(turnAt(1)), 'the retry carries the fresh token');
+});
+
+test('in-flight · Send is dead for the round trip, the draft is not, and a double tap is one POST', async () => {
+  const r = row({});
+  const h = mountHeld({ get: () => ({ body: payloadOf([r]) }) });
+  h.ui.open();
+  await flush();
+  byClass(h.pane, 'irow')[0].onclick();
+  const ta = byTag(h.pane, 'TEXTAREA')[0];
+  ta.value = 'sent once, please';
+  ta.oninput();
+  const send = byClass(h.pane, 'isend')[0];
+  assert.equal(send.disabled, false);
+
+  send.onclick();
+  await flush();
+  assert.equal(send.disabled, true, 'dead while the POST is in flight');
+  assert.equal(ta.value, 'sent once, please', 'the draft is untouched by the disable');
+  assert.equal(byTag(h.pane, 'TEXTAREA')[0], ta, 'and the field node never moved');
+
+  send.onclick();                                  // the double tap
+  await flush();
+  assert.equal(h.calls.posts.length, 1, 'ONE POST — a second tap cannot re-send the same token');
+
+  await h.answer(0, 'not_at_prompt');
+  assert.equal(byClass(h.pane, 'isend')[0].disabled, false, 'and it comes back through the ordinary conjunction');
+  assert.equal(h.ui.state().card.sending, false);
+  assert.equal(h.ui.state().card.machine, INBOX.MACHINE_READY, 'no fourth state was invented');
+});
+
+test('in-flight · the disable is the conjunction, not a state — the pure layer refuses the second send', () => {
+  const r = row({});
+  const first = INBOX.applySend(stateWith([r], r, { draft: 'mine' }), 'mine');
+  assert.ok(first.instr.post, 'the first send posts');
+  assert.equal(first.instr.sendEnabled, false, 'and the button dies with it');
+  assert.equal(first.state.card.sending, true);
+  assert.equal(first.state.card.draft, 'mine', 'the draft is not a casualty of the disable');
+  assert.equal(first.state.card.machine, INBOX.MACHINE_READY, 'the MACHINE is untouched — sending is a latch, not a state');
+
+  assert.equal(INBOX.applySend(first.state, 'mine').instr.post, null, 'the second send is a structural no-op');
+  assert.equal(INBOX.canSend(first.state.card), false);
+  // ...and it is released by the result, whatever the result is.
+  for (const code of ['not_at_prompt', 'pane_changed', 'bridge_unreachable', INBOX.REPLY_NETWORK_ERROR]) {
+    const out = INBOX.applyReplyResult(first.state, code, first.instr.postedCard);
+    assert.equal(out.state.card.sending, false, `${code}: released`);
+    assert.equal(out.instr.sendEnabled, true, `${code}: and retryable, per §6.1`);
+  }
+});
+
+// ================================================================================================
 // privacy
 // ================================================================================================
 
