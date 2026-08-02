@@ -200,7 +200,14 @@
     let last = -1;
     for (let i = v.rowSig.length - 1; i >= 0; i--) if (v.rowSig[i]) { last = i; break; }
     if (last < 0) { el.scrollTop = 0; return; }
-    const wantBottom = (last + 1) * lh + (padY || 0);
+    // Rows WRAP on narrow panes (#screen is pre-wrap, and the 7px font floor / user zoom can make
+    // a row wider than the pane), so (index * lineHeight) undercounts pixels and the "tail" lands
+    // mid-content — the reader is yanked up off the bottom on every repaint. Measure the row's
+    // real box instead; the arithmetic stays only as a fallback for a not-yet-painted node.
+    const node = el.childNodes[last];
+    const wantBottom = node && node.getBoundingClientRect
+      ? node.getBoundingClientRect().bottom - el.getBoundingClientRect().top + el.scrollTop
+      : (last + 1) * lh + (padY || 0);
     const target = Math.max(0, Math.min(el.scrollHeight, wantBottom - el.clientHeight));
     if (Math.abs(el.scrollTop - target) < 1) return;
     // Our own scroll fires a scroll EVENT, and the listener would read "not at the bottom" — the
@@ -1802,6 +1809,10 @@
       elLiveToggle.setAttribute('aria-pressed', String(state.live));
       elLiveToggle.title = state.live ? 'Live: keys go straight to the terminal' : 'Batch: type, then Send';
     }
+    // Returning to compose re-measures whatever the field holds now: a draft kept across the
+    // round-trip grows back, a field emptied by live keystrokes drops to one row. Entering live
+    // keeps the height as-is so a kept draft stays fully visible.
+    if (!state.live) autogrow();
   }
   function toggleLive() {
     const sid = composerSurface();
@@ -2341,12 +2352,17 @@
   // listeners because each pane owns its own screen element.
 
   // Live mode: forward each inserted char / enter / backspace straight to the terminal.
+  // The field is a transmit buffer while live, so it is emptied after every event — and the height
+  // a compose draft grew to must fall WITH the text. autogrow() skips live mode, so nothing else
+  // ever shrinks the box: miss it here and an empty one-line field stays draft-tall until the next
+  // compose keystroke (the giant empty "Type…" box on phones).
+  const liveClear = () => { elText.value = ''; elText.style.height = ''; };
   elText.addEventListener('beforeinput', (e) => {
     if (!state.live) return;
     const t = e.inputType;
-    if (t === 'insertText' || t === 'insertCompositionText' || t === 'insertFromPaste') { if (e.data) sendRaw(e.data); e.preventDefault(); elText.value = ''; return; }
-    if (t === 'insertLineBreak' || t === 'insertParagraph') { doKey('enter'); e.preventDefault(); elText.value = ''; return; }
-    if (t === 'deleteContentBackward') { doKey('backspace'); e.preventDefault(); elText.value = ''; return; }
+    if (t === 'insertText' || t === 'insertCompositionText' || t === 'insertFromPaste') { if (e.data) sendRaw(e.data); e.preventDefault(); liveClear(); return; }
+    if (t === 'insertLineBreak' || t === 'insertParagraph') { doKey('enter'); e.preventDefault(); liveClear(); return; }
+    if (t === 'deleteContentBackward') { doKey('backspace'); e.preventDefault(); liveClear(); return; }
   });
   // Keys with no text input event (arrows/Esc/Tab/^C) — from a hardware keyboard (tablet). Both modes.
   elText.addEventListener('keydown', (e) => {
