@@ -49,6 +49,24 @@ function groupHasMembers(pgid) {
   try { process.kill(-pgid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
 }
 
+// "No orphan" is a claim about the STEADY STATE, not about the microsecond after exit. The harness
+// resolving means its own process has gone; the server child it signalled is reaped by the OS a
+// moment later, and under a loaded suite that moment is long enough to lose a race that has nothing
+// to do with the behaviour under test. Asking once measured scheduler luck — measured at roughly one
+// full-suite run in ten, never in isolation.
+//
+// A bounded wait asserts what was actually meant: the group must EMPTY, and quickly. A real orphan
+// never empties, so this still fails — it just takes the budget to say so instead of passing or
+// failing on timing.
+async function groupEmpties(pgid, budgetMs) {
+  const deadline = Date.now() + (budgetMs || 5000);
+  for (;;) {
+    if (!groupHasMembers(pgid)) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 function tcpProbe(port) {
   return new Promise((resolve) => {
     const s = net.connect({ port, host: '127.0.0.1' });
@@ -204,7 +222,7 @@ test('AC2: PLAYWRIGHT_DIR unset → exit 2 naming it, nothing booted, no process
     assert.ok(!/cmux-remote server on/.test(r.all), 'and none may leak through from a child');
     // "Leaves no process" — the harness's own process group, probed after it exited. A port probe
     // cannot answer this on the precondition path, because no port is ever bound to probe.
-    assert.strictEqual(groupHasMembers(r.pgid), false, 'the harness process group must be empty after exit');
+    assert.strictEqual(await groupEmpties(r.pgid), true, 'the harness process group must be empty after exit');
     assert.deepStrictEqual(await fsp.readdir(root), [], 'a precondition failure must not create a scratch RADAR_DIR');
   } finally { await fsp.rm(root, { recursive: true, force: true }); }
 });
@@ -215,7 +233,7 @@ test('AC2: an unresolvable PLAYWRIGHT_DIR is the same loud failure, not a crash'
   assert.match(r.err, /PRECONDITION FAILED/);
   assert.match(r.err, /PLAYWRIGHT_DIR/, 'the message names the variable, not just the path');
   assert.ok(!/harness: server on/.test(r.all), 'still nothing booted');
-  assert.strictEqual(groupHasMembers(r.pgid), false, 'still no process left behind');
+  assert.strictEqual(await groupEmpties(r.pgid), true, 'still no process left behind');
 });
 
 test('AC2: all three resolution failures name PLAYWRIGHT_DIR and carry exit code 2', async () => {
@@ -355,7 +373,7 @@ test('AC3: a FAILING run exits 1 (never 2), and teardown still leaves no orphan 
     const port = Number(m[1]);
     assert.ok(port > 1024 && port !== 8080, `expected an ephemeral port, got ${port}`);
 
-    assert.strictEqual(groupHasMembers(r.pgid), false, 'teardown runs on the failure path too — no orphan');
+    assert.strictEqual(await groupEmpties(r.pgid), true, 'teardown runs on the failure path too — no orphan');
     const probe = await tcpProbe(port);
     assert.notStrictEqual(probe, 'open', `nothing may still be listening on the parsed port (probe: ${probe})`);
     assert.deepStrictEqual(await fsp.readdir(root), [], 'and the scratch RADAR_DIR is gone with it');
