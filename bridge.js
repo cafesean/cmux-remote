@@ -148,10 +148,22 @@ if (COMPLETIONS_ENABLED) {
   }
 }
 // ---------- source control (p7 Track C) --------------------------------------
-// OFF BY DEFAULT, and reads and writes have SEPARATE switches. Default-off on the panel buys
-// nothing once the operator turns the panel on, and the honest position (§12.6) is that direct writes add
-// untraced execution even though they add no authority a shell did not already have.
-const GIT_PANEL_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.GIT_PANEL_ENABLED || '').trim());
+// Reads and writes have SEPARATE switches, and the asymmetry is deliberate.
+//
+// THE PANEL IS ON BY DEFAULT (opt-out, same shape as COMPLETIONS_ENABLED above). p7 shipped it
+// default-off and it stayed off for its whole life, because the switch does not live where anyone
+// looks: `loadenv.js` reads a `.env` from the process CWD, and the plists set CWD to the release
+// directory — so "the flag" is a file that a deploy replaces. A default that is only ever reached
+// through a file nobody edits is not a safety property, it is a feature nobody has.
+//
+// WRITES STAY OPT-OUT-OF-NOTHING — off unless explicitly set. §12.6's position is unchanged and is
+// the reason this line is not symmetric with the one above: direct writes add UNTRACED execution.
+// They grant no authority a shell did not already have, but a commit made through the panel is not
+// in the terminal scrollback. Reads are bounded by authorizeRead's pinned tuple and were hardened
+// against five measured escapes; writes are a different bet. This file is public, and a clone with
+// no `.env` also has no SERVER_TOKEN — an open UI (see server.js) that can read git in the open
+// workspaces is a very different thing from an open UI that can commit and push.
+const GIT_PANEL_ENABLED = !/^(0|false|no|off)$/i.test(String(process.env.GIT_PANEL_ENABLED ?? '1').trim());
 const GIT_WRITES_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.GIT_WRITES_ENABLED || '').trim());
 let gitPanel = null;
 if (GIT_PANEL_ENABLED) {
