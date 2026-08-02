@@ -43,7 +43,8 @@
     "decisions": 2,
     "mergeable": 1,
     "orphans": 4,
-    "staleWorktrees": 1
+    "staleWorktrees": 1,
+    "handoffsLive": 0
   },
   "repos": {
     "app-api": {
@@ -574,5 +575,8 @@
         }
       ]
     }
-  ]
+  ],
+  "handoffs": [],
+  "handoffRecovery": null,
+  "role": "leader"
 }

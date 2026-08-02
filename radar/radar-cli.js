@@ -8,6 +8,8 @@
 const path = require('path');
 const { createCollector } = require('./collector');
 const { flattenAttention } = require('./derive');
+const { loadConfig } = require('./config');
+const { parseSelector, keysForSelector, epicOfWorktree, dirtyCount } = require('./handoff-keys');
 const store = require('./store');
 
 const CELL = { done: 'v', current: '>', todo: '.', unknown: '?', violation: '!' };
@@ -263,14 +265,124 @@ function renderDone(state, key) {
 
 // ---- brief ---------------------------------------------------------------------------------------
 
+// §6.5: the ORIGIN line of one epic. The join is EXACT (repo, branch) equality against the epic's
+// BRANCH records — never `w.epic` (which does not exist, §9 trap 2), never a title-text or cwd
+// match: a fuzzier join would turn "was seen here" into a causal claim (§2 principle 7). The
+// reduction takes the SINGLE newest observation across ALL of the epic's pairs — greatest `at`,
+// ties broken by later file offset — so an epic renders one line, never one per branch. A null
+// customTitle on the WINNING observation still renders `origin unknown`: the winner is chosen
+// first and only then downgraded, so an older titled observation can never leak through.
+function lastObservedLine(state, epicKey, observations) {
+  const pairs = new Set();
+  for (const repoId of Object.keys(state.repos || {})) {
+    for (const b of (state.repos[repoId].branches || [])) {
+      if (b.epic === epicKey) pairs.add(`${repoId}\n${b.name}`);
+    }
+  }
+  let best = null;
+  // Observations arrive in file order, so `>=` hands an equal-`at` tie to the later offset.
+  for (const obs of (observations || [])) {
+    if (!obs || !pairs.has(`${obs.repo}\n${obs.branch}`)) continue;
+    const t = Date.parse(obs.at);
+    if (!Number.isFinite(t)) continue;
+    if (!best || t >= best.t) best = { t, obs };
+  }
+  if (!best || typeof best.obs.customTitle !== 'string' || !best.obs.customTitle) return 'origin unknown';
+  return `last seen by session "${best.obs.customTitle}" · ${best.obs.at}`;
+}
+
+// One §6.8 block for a kind-prefixed selector, or null when it is unresolved. Resolution is
+// keysForSelector — the SAME rule the reservation uses (§6.1), so the brief and the lock table can
+// never disagree about what a selector names — and a selector resolving to ZERO fact keys is
+// unresolved, never a partial block. Fact lines mirror §6.2's minting predicates one-for-one: a
+// line exists iff its fact key exists.
+function kindSelectorItem(state, sel, observations, repos, recall) {
+  const p = parseSelector(sel);
+  if (!p.ok || keysForSelector(state, sel).length === 0) return null;
+  switch (p.kind) {
+    case 'epic': {
+      const key = p.segs[0];
+      const epic = (state.epics || []).find((e) => e.key === key) || null;
+      const lines = [epic ? `epic ${key} — ${epic.phrase}` : `epic ${key}`];
+      if (epic) lines.push(`  ladder     ${LADDER.map(([k, l]) => `${l}=${epic.ladder[k]}`).join(' · ')}`);
+      for (const repoId of Object.keys(state.repos || {})) {
+        const repo = state.repos[repoId];
+        for (const b of (repo.branches || [])) {
+          if (b.epic !== key) continue;
+          repos.add(repoId);
+          if (Number(b.unpushed) > 0) lines.push(`  ${repoId}:${b.name} — ${b.unpushed} unpushed`);
+          if (b.mergedIntoDevelop === false) lines.push(`  ${repoId}:${b.name} — unmerged-develop`);
+          if (b.mergedIntoMain === false) lines.push(`  ${repoId}:${b.name} — unmerged-main`);
+        }
+        // Worktree -> epic goes through the BRANCH record (§9 trap 2). Both the :stale and :dirty
+        // facts render, so a clean-but-stale epic worktree is in the brief with its epic.
+        for (const w of (repo.worktrees || [])) {
+          if (epicOfWorktree(state, repoId, w) !== key) continue;
+          repos.add(repoId);
+          if (w.stale) lines.push(`  ${w.path} — ${w.staleReason ? `stale (${w.staleReason})` : 'stale'}`);
+          if (dirtyCount(w) > 0) lines.push(`  ${w.path} — dirty (${w.dirty.staged || 0} staged, ${w.dirty.unstaged || 0} unstaged, ${w.dirty.untracked || 0} untracked)`);
+        }
+      }
+      for (const s of ((epic && epic.signals) || [])) {
+        if (s === 'merged-not-deployed' || s === 'deployed-flag-off') lines.push(`  signal ${s}`);
+      }
+      lines.push(`  ${lastObservedLine(state, key, observations)}`);
+      if (epic) (epic.repos || []).forEach((r) => repos.add(r));
+      recall(key);
+      return { verb: 'FINISH', lines };
+    }
+    case 'branch': {
+      const [repoId, name] = p.segs;
+      // keysForSelector resolved, so the branch record exists and minted at least one fact.
+      const b = (((state.repos || {})[repoId] || {}).branches || []).find((x) => x.name === name);
+      repos.add(repoId);
+      const lines = [`${repoId} · ${name}${Number(b.unpushed) > 0 ? ` · ${b.unpushed} unpushed` : ''}`];
+      if (b.mergedIntoDevelop === false) lines.push('  unmerged-develop');
+      if (b.mergedIntoMain === false) lines.push('  unmerged-main');
+      recall(b.epic);
+      return { verb: 'PUSH', lines };
+    }
+    case 'wt': {
+      for (const repoId of Object.keys(state.repos || {})) {
+        const w = ((state.repos[repoId] || {}).worktrees || []).find((x) => x.path === p.segs[0]);
+        if (!w) continue;
+        repos.add(repoId);
+        const lines = [w.path];
+        if (w.stale) lines.push(`  ${w.staleReason ? `stale (${w.staleReason})` : 'stale'}`);
+        if (dirtyCount(w) > 0) lines.push(`  dirty (${w.dirty.staged || 0} staged, ${w.dirty.unstaged || 0} unstaged, ${w.dirty.untracked || 0} untracked)`);
+        if (w.cleanupCommand) lines.push(`  ${w.cleanupCommand}`);
+        recall(epicOfWorktree(state, repoId, w));
+        return { verb: 'CLEAN', lines };
+      }
+      return null;                       // unreachable: keysForSelector found this worktree above
+    }
+    case 'orphan': {
+      const [repoId, name] = p.segs;
+      repos.add(repoId);
+      // An orphan is a branch with NO epic — that IS the fact — so there is nothing to /recall.
+      return { verb: 'TAG', lines: [`${repoId} · ${name} — untagged branch; alias it to its epic`] };
+    }
+    default:
+      return null;                       // `worktrees`/`orphans` never reach here; buildBrief owns them
+  }
+}
+
 // Assembles the prompt a handoff session starts with. The FACTS come from the snapshot and are
 // stated once; the PROCEDURE lives in the `radar-handoff` skill, which the first line invokes — so
 // this stays short and the how-to improves centrally instead of being copied into every brief.
+// p6 §6.8 widens the vocabulary: besides the shipped `worktrees`, `orphans` and bare epic key, the
+// four kind-prefixed forms (`epic:` `branch:` `wt:` `orphan:`) each render a fixed verb-led block.
 function buildBrief(state, selectors, opts) {
   const o = opts || {};
+  const observations = Array.isArray(o.observations) ? o.observations : [];
   const items = [];
   const repos = new Set();
   const unknown = [];
+  // One `/recall <epic>` line per epic named by ANY selector (§6.8): directly for `epic:` and the
+  // bare key, through the branch record for `branch:`/`wt:` — deduped, in selection order, so the
+  // shipped bare-key behaviour is a special case of one rule rather than a second one.
+  const recalls = [];
+  const recall = (k) => { if (k && recalls.indexOf(k) === -1) recalls.push(k); };
   const att = flattenAttention(state.attention || []);
 
   for (const sel of selectors) {
@@ -291,6 +403,11 @@ function buildBrief(state, selectors, opts) {
       else unknown.push('orphans (none on the board)');
       continue;
     }
+    if (sel.indexOf(':') !== -1) {
+      const it = kindSelectorItem(state, sel, observations, repos, recall);
+      if (it) items.push(it); else unknown.push(sel);
+      continue;
+    }
     const epic = (state.epics || []).find((e) => e.key === sel);
     if (!epic) { unknown.push(sel); continue; }
     (epic.repos || []).forEach((r) => repos.add(r));
@@ -301,8 +418,10 @@ function buildBrief(state, selectors, opts) {
       `  ladder     ${LADDER.map(([k, l]) => `${l}=${epic.ladder[k]}`).join(' · ')}`,
       `  signals    ${(epic.signals || []).join(', ') || 'none'}`,
       `  last work  ${epic.lastActivityAt || 'never'}`,
+      `  ${lastObservedLine(state, epic.key, observations)}`,
     ];
     items.push({ verb: mergeable ? 'MERGE' : 'SHIP-OR-PARK', lines });
+    recall(epic.key);
   }
 
   const out = [];
@@ -318,7 +437,7 @@ function buildBrief(state, selectors, opts) {
   if (!items.length) out.push('  (nothing selected resolved to a fact — see UNRESOLVED below)');
   out.push('');
   out.push('CONTEXT:');
-  for (const sel of selectors) if ((state.epics || []).some((e) => e.key === sel)) out.push(`  /recall ${sel}`);
+  for (const k of recalls) out.push(`  /recall ${k}`);
   out.push(`  radar status --all   # the live board`);
   out.push('');
   // Source health is part of the brief, not a footnote: a degraded source means some fact above is
@@ -330,6 +449,73 @@ function buildBrief(state, selectors, opts) {
   out.push(`END STATE: \`radar done <epic>\` passes for each epic above, and the worktrees/branches named are gone from \`radar status\`.`);
   out.push('Anything you cannot close: name it and park it with a reason. Never drop it, never fake it.');
   return { text: out.join('\n') + '\n', items: items.length, unknown, repos: Array.from(repos) };
+}
+
+// ---- handoff client (§M5) ------------------------------------------------------------------------
+
+// The `radar handoff` subcommand is an HTTP CLIENT and nothing else. radar/store.js's queue
+// serialises writers within ONE process — no flock, no O_EXCL — so a CLI that wrote p6 state would
+// be the second writer principle 8 forbids. Every mutation goes to the server; if the server is
+// unreachable the command fails with a stated error and changes nothing. The token travels in the
+// Authorization header, NEVER in the URL (§7.1).
+function httpJson(method, url, token, body) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const mod = u.protocol === 'https:' ? require('https') : require('http');
+    const payload = body === undefined ? null : JSON.stringify(body);
+    const headers = { accept: 'application/json', connection: 'close' };
+    if (token) headers.authorization = `Bearer ${token}`;
+    if (payload !== null) { headers['content-type'] = 'application/json'; headers['content-length'] = Buffer.byteLength(payload); }
+    // u.pathname only — a query string is where a token could leak, so none is ever sent.
+    const req = mod.request({ hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80), path: u.pathname, method, headers }, (res) => {
+      let raw = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => { raw += d; });
+      res.on('end', () => {
+        let parsed = null;
+        try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+        resolve({ status: res.statusCode, body: parsed, raw });
+      });
+    });
+    req.on('error', reject);
+    if (payload !== null) req.write(payload);
+    req.end();
+  });
+}
+
+// One line from stdin, for the typed confirmation. No readline machinery: collect until '\n' or EOF.
+function readLine(stream) {
+  return new Promise((resolve) => {
+    let buf = '';
+    const finish = (s) => {
+      stream.removeListener('data', onData);
+      stream.removeListener('end', onEnd);
+      stream.removeListener('error', onEnd);
+      if (typeof stream.pause === 'function') stream.pause();
+      resolve(s);
+    };
+    const onData = (d) => { buf += d; const i = buf.indexOf('\n'); if (i !== -1) finish(buf.slice(0, i)); };
+    const onEnd = () => finish(buf);
+    if (typeof stream.setEncoding === 'function') { try { stream.setEncoding('utf8'); } catch (_) { /* object-mode stream */ } }
+    stream.on('data', onData);
+    stream.on('end', onEnd);
+    stream.on('error', onEnd);
+    if (typeof stream.resume === 'function') stream.resume();
+  });
+}
+
+// observations.jsonl is append-only NDJSON (§4.5). An absent file means no observations — the
+// brief renders `origin unknown`, never an error — and a truncated final line is skipped, because
+// a half-written record must not cost the brief the whole relation.
+async function readObservations(file) {
+  let raw;
+  try { raw = await require('fs').promises.readFile(file, 'utf8'); } catch (_) { return []; }
+  const out = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch (_) { /* truncated tail — skip, keep the rest */ }
+  }
+  return out;
 }
 
 // ---- argv ----------------------------------------------------------------------------------------
@@ -363,6 +549,8 @@ const HELP = `radar — derived truth for the repos, worktrees and epics on this
   radar flag <epic> <on|off|n/a>              assert feature-flag state (never auto-detected)
   radar done <epic>                           check the 9 TRUE DONE conditions; exit 0 only if done
   radar brief <epic|worktrees|orphans> ...    print the handoff prompt for a selection
+  radar handoff <selector> [more...] [--dry]  dispatch the selection via the radar server (--dry: preview only)
+  radar handoff show <handoffId>              print one handoff by id (no listing command exists, by design)
 
   --dir <path>     radar home (default $RADAR_DIR or ~/.radar)
   --config <path>  config file (default <dir>/config.json)
@@ -433,12 +621,85 @@ async function main(argv, io) {
         if (!sels.length) throw new Error('usage: radar brief <epic|worktrees|orphans> [more...]');
         const state = await collector.getState();
         if (!state) throw new Error('no snapshot yet — run `radar scan` first');
-        const b = buildBrief(state, sels, {});
+        // §6.5: lastObservedBy reads observations.jsonl, radar's OWN file — the CLI stays a reader.
+        const observations = await readObservations(path.join(radarDir, 'observations.jsonl'));
+        const b = buildBrief(state, sels, { observations });
         if (flags.json) { stdout.write(JSON.stringify(b, null, 2) + '\n'); return b.items ? 0 : 1; }
         stdout.write(b.text);
         // Unresolved selectors are a failure, not a footnote: a brief that silently dropped one
         // would hand off less work than was selected and nobody would notice.
         return b.items && !b.unknown.length ? 0 : 1;
+      }
+      case 'handoff': {
+        // §M5: an HTTP client, never a writer. Config names the server and the ENV VAR holding the
+        // token; the value is read here at use time and sent as a bearer header only. Exit codes
+        // are the contract: 0 ok · 1 usage/declined · 3 unreachable/401/viewer_readonly · 4 a 404
+        // from `show` · 5 any other non-2xx. There is deliberately NO listing form of any kind —
+        // a list is user work whatever it is labelled (§1, §8).
+        const { config } = await loadConfig(flags.config || path.join(radarDir, 'config.json'));
+        const base = String(config.serverBaseUrl || '').replace(/\/+$/, '');
+        const token = process.env[config.serverTokenRef];
+        const unreachable = (detail) => {
+          stderr.write(`radar: the radar server at ${base} is not reachable (${detail}).\n`);
+          stderr.write('p6 state is written only by the server; nothing was changed.\n');
+          return 3;
+        };
+        // One response -> one exit code. 401 and viewer_readonly are "wrong door", not a failed
+        // request: the remedy is the token or serverBaseUrl, so both print the changed-nothing
+        // message and exit 3. Everything else non-2xx prints `error` and `message` as two lines,
+        // plus `incidentId` as a third ONLY when the body carries one — never a list (§7.3).
+        const refused = (res) => {
+          const b = res.body || {};
+          if (res.status === 401) return unreachable(`HTTP 401 ${b.error || 'unauthorized'}`);
+          if (res.status === 409 && b.error === 'viewer_readonly') {
+            stderr.write(`radar: viewer_readonly — ${b.message || 'this server is a viewer'} (leader: ${b.leaderBaseUrl || 'unknown'})\n`);
+            stderr.write('p6 state is written only by the server; nothing was changed.\n');
+            return 3;
+          }
+          stderr.write(`${b.error || `http_${res.status}`}\n`);
+          stderr.write(`${b.message || (res.raw || '').trim()}\n`);
+          if (b.incidentId) stderr.write(`${b.incidentId}\n`);
+          return 5;
+        };
+
+        if (positional[1] === 'show') {
+          const id = positional[2];
+          if (!id || positional.length > 3) throw new Error('usage: radar handoff show <handoffId>');
+          let res;
+          try { res = await httpJson('GET', `${base}/api/radar/handoff/${encodeURIComponent(id)}`, token); }
+          catch (e) { return unreachable((e && (e.code || e.message)) || e); }
+          if (res.status === 404) { stderr.write(JSON.stringify(res.body, null, 2) + '\n'); return 4; }
+          if (res.status < 200 || res.status >= 300) return refused(res);
+          stdout.write(JSON.stringify(res.body, null, 2) + '\n');
+          return 0;
+        }
+
+        const sels = positional.slice(1);
+        if (!sels.length) throw new Error('usage: radar handoff <selector> [more...] [--dry]  |  radar handoff show <handoffId>');
+        let res;
+        try { res = await httpJson('POST', `${base}/api/radar/handoff/preview`, token, { selectors: sels }); }
+        catch (e) { return unreachable((e && (e.code || e.message)) || e); }
+        if (res.status < 200 || res.status >= 300) return refused(res);
+        stdout.write(JSON.stringify(res.body, null, 2) + '\n');
+        if (flags.dry) return 0;
+
+        // Outward action is always confirmed (§8): a typed `y`, exactly, or nothing is posted.
+        stdout.write('hand off? type y to dispatch: ');
+        const answer = await readLine((io && io.stdin) || process.stdin);
+        if (answer.trim() !== 'y') { stderr.write('radar: declined — nothing was dispatched\n'); return 1; }
+        const envelope = res.body || {};
+        const commitReq = {
+          previewId: (envelope.plan || {}).previewId,
+          hash: envelope.hash,
+          // Minted once per confirmed run (§7.1); the server's idempotency, not the CLI's memory,
+          // is what makes an accidental re-run safe.
+          idempotencyKey: require('crypto').randomUUID(),
+        };
+        try { res = await httpJson('POST', `${base}/api/radar/handoff`, token, commitReq); }
+        catch (e) { return unreachable((e && (e.code || e.message)) || e); }
+        if (res.status < 200 || res.status >= 300) return refused(res);
+        stdout.write(JSON.stringify(res.body, null, 2) + '\n');
+        return 0;
       }
       case 'tag': {
         // `--spec` selects the mod-specs write (alias append) rather than the branch write
@@ -497,4 +758,4 @@ if (require.main === module) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => { process.stderr.write(`radar: ${e.stack || e}\n`); process.exitCode = 1; });
 }
 
-module.exports = { main, renderStatus, parseArgs, describeAttention, age, HELP, trueDoneReport, renderDone, buildBrief };
+module.exports = { main, renderStatus, parseArgs, describeAttention, age, HELP, trueDoneReport, renderDone, buildBrief, lastObservedLine };

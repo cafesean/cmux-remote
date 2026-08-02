@@ -56,6 +56,60 @@ async function writeJsonAtomicUnqueued(file, value) {
 // atomic publication ITSELF fails, the previous state.json is still on disk, untouched.
 const writeJsonAtomic = (file, value) => enqueue(() => writeJsonAtomicUnqueued(file, value));
 
+// ---- text + append primitives (p6 §4.8) --------------------------------------------------------
+// The seed is Markdown. writeJsonAtomic CANNOT write it: it JSON-quotes the string, so the file
+// would gain surrounding quotes and escaped newlines and stop being the seed. Hence a text pair
+// beside the JSON pair, with the same queued/unqueued split.
+async function writeTextAtomicUnqueued(file, text) {
+  const dir = path.dirname(file);
+  await fsp.mkdir(dir, { recursive: true });
+  const tmp = path.join(dir, `.${path.basename(file)}.tmp-${process.pid}-${Date.now()}-${tmpSeq++}`);
+  try {
+    await fsp.writeFile(tmp, text, 'utf8');   // byte-exact: no JSON quoting, no trailing newline added
+    await fsp.rename(tmp, file);
+  } catch (e) {
+    try { await fsp.unlink(tmp); } catch (_) { /* nothing to clean */ }
+    throw e;
+  }
+  return Buffer.byteLength(text, 'utf8');
+}
+
+const writeTextAtomic = (file, text) => enqueue(() => writeTextAtomicUnqueued(file, text));
+
+// One record is one line, always: JSON escapes every newline, so the serialisation can never
+// contain a raw one.
+const LINE_MAX = 131072;
+
+// UNQUEUED — the caller already owns a queue slot. `commit` holds one and appends several records,
+// and `enqueue` is NOT re-entrant (chain = p.then(...) where p is the running slot), so a nested
+// enqueue would await its own caller forever. That is why this pair exists at all.
+async function appendLineUnqueued(file, obj) {
+  const line = JSON.stringify(obj) + '\n';
+  const bytes = Buffer.byteLength(line, 'utf8');
+  if (bytes > LINE_MAX) {
+    throw Object.assign(new RangeError(`ledger line ${bytes} > LINE_MAX ${LINE_MAX}`), { code: 'ERR_LINE_TOO_LONG' });
+  }
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const fd = await fsp.open(file, 'a');
+  try {
+    const { bytesWritten } = await fd.write(line, null, 'utf8');
+    // A short write leaves a truncated tail that a later append would fuse onto. Refuse it here
+    // rather than detect it at startup. NOTE: bytesWritten bytes may already be on disk — this
+    // throws, it does not roll back, and the startup tail repair handles the remains.
+    if (bytesWritten !== bytes) {
+      throw Object.assign(new Error(`short write: ${bytesWritten}/${bytes}`), { code: 'EIO' });
+    }
+    // Durable BEFORE we return, because callers act on that: §M4 appends `recovery-op` and then
+    // sends signals it cannot un-send. The record must survive a crash one millisecond later.
+    await fd.sync();
+  } finally {
+    await fd.close();
+  }
+  return bytes;
+}
+
+const appendLine = (file, obj) => enqueue(() => appendLineUnqueued(file, obj));
+
 // Never throws. A missing or corrupt radar file is a degraded source, not a crash.
 async function readJson(file, fallback) {
   let text;
@@ -101,4 +155,9 @@ module.exports = {
   enqueue, drain, queueDepth,
   writeJsonAtomic, writeJsonAtomicUnqueued,
   readJson, readJsonSync, updateJson,
+  // p6 §4.8 — exactly four additions, in the two queued/unqueued pairs. LINE_MAX is deliberately
+  // NOT exported: the spec fixes it at 131072, so a test asserts that literal rather than
+  // re-deriving the contract from the implementation.
+  appendLine, appendLineUnqueued,
+  writeTextAtomic, writeTextAtomicUnqueued,
 };

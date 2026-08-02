@@ -14,7 +14,7 @@
 // Read-only outside ~/.radar/: the routes here can publish a snapshot and edit radar's own three
 // JSON files. Nothing else. No git write, no Jira, no DB, no deploy.
 const store = require('./radar/store');
-const { loadConfig } = require('./radar/config');
+const { loadConfig, normalizeConfig } = require('./radar/config');
 
 const BODY_CAP = 16 * 1024;            // spec §7
 const HARD_CAP = 16 * BODY_CAP;        // give up on a body that keeps coming after the 413
@@ -78,22 +78,132 @@ function createRadar(opts) {
   const paths = collector.paths || { dir: radarDir || store.defaultRadarDir() };
   let started = false;
 
+  // ---- p6 handoff (spec §7.1) -----------------------------------------------------------------
+  // The protocol lives in radar/handoff.js and is required LAZILY, on the first p6 request: this
+  // file must keep serving p5 verbatim on a checkout where the handoff module is broken — the
+  // require lands inside handle()'s try/catch and answers a radar-scoped 500, not a dead server.
+  // `o.createHandoff` is the test seam, exactly like `o.createCollector` above.
+  let handoff = null;
+  async function getHandoff() {
+    if (handoff) return handoff;
+    const factory = o.createHandoff || require('./radar/handoff').createHandoff;
+    // No config file on disk (a stubbed collector, a bare install) still yields a usable config:
+    // normalizeConfig(null) is pure defaults, which is exactly what loadConfig degrades to anyway.
+    const cfg = typeof paths.config === 'string' && paths.config
+      ? (await loadConfig(paths.config, Date.now())).config
+      : normalizeConfig(null).config;
+    handoff = factory({
+      dir: paths.dir,
+      config: cfg,
+      // SYNC on purpose — handoff.js consumes this inside preview/commit/sweep and branches on
+      // `if (!state)`. collector.getState() is async, and a Promise is truthy, so wiring it here
+      // would make every preview 422 with an undefined board. See collector.lastStateSync.
+      getState: () => collector.lastStateSync(),
+      now: () => Date.now(),
+      spawn: require('child_process').spawn,
+    });
+    return handoff;
+  }
+
+  // Every p6 route on a viewer answers 409 viewer_readonly and writes nothing (spec §3): a dispatch
+  // from a viewer would spawn a process on the wrong machine against a plan.machine taken from the
+  // leader's snapshot. The check runs BEFORE the body is read and BEFORE the handoff module is even
+  // required — "does nothing" starts at zero side effects.
+  async function viewerRefusal(res) {
+    if (!(typeof paths.config === 'string' && paths.config)) return false;
+    const { config } = await loadConfig(paths.config, Date.now());
+    if (config.role !== 'viewer') return false;
+    sendJson(res, 409, {
+      error: 'viewer_readonly',
+      message: 'this server is a viewer; handoffs are dispatched by the leader',
+      leaderBaseUrl: config.leaderBaseUrl,
+    });
+    return true;
+  }
+
+  // p6's own body reader. The shared body() helper answers 400 bad_json WITHOUT a message, which is
+  // fine for p5 but p6's envelope rule (spec §7.1) allows a missing `message` on exactly two
+  // inherited 401s and nothing else. Object-shape and field validation (steps 3-7) belong to
+  // radar/handoff.js, which owns the per-route tables.
+  async function p6Body(req, res) {
+    const r = await readJsonBody(req);
+    if (r.tooLarge) { sendJson(res, 413, { error: 'body_too_large', message: `bodies are capped at ${BODY_CAP} bytes` }); return null; }
+    if (r.badJson) { sendJson(res, 400, { error: 'bad_json', message: 'the request body is not valid JSON' }); return null; }
+    if (r.aborted) { try { res.end(); } catch (_) {} return null; }
+    return r.value;
+  }
+
+  // One relay for all five routes: the handoff module resolves {status, body} and this layer
+  // answers it verbatim — no reshaping, or the route table would exist twice.
+  async function routeHandoffCall(res, call, opts) {
+    const h = await getHandoff();
+    const out = await call(h);
+    // A recovery press must clear the element NOW, not at the next sweep. The discard drive runs
+    // its kill rounds inside the sweep that would otherwise republish, so without this the
+    // PRE-PRESS element stays on disk for the whole drive — up to 2 x discardKillMs — and a
+    // polling tab keeps showing something the operator already dismissed. §7.2 says one press
+    // always clears it; this is what makes that true.
+    // Best-effort: the press has already succeeded and its record is durable, so a failed
+    // republication must not turn a 200 into an error. The next sweep publishes anyway.
+    if (opts && opts.republish && out.status >= 200 && out.status < 300) {
+      try { await collector.republishHandoffView(handoffPublish()); }
+      catch (e) { log(`radar: republish after recovery press failed: ${(e && e.message) || e}`); }
+    }
+    return sendJson(res, out.status, out.body);
+  }
+
+  // derive() must SEE the live handoffs on EVERY publication path or suppression flickers: a scan
+  // that omits this publishes handoffs:[] and every suppressed row flashes back onto the board
+  // until the next sweep. One closure, passed to the timer scans, the boot scan AND the forced
+  // POST /api/radar/scan — the forced path was measured doing exactly that flicker. Synchronous by
+  // design (it runs inside runScan before publication, off the in-memory index, no disk); before
+  // the first p6 request constructs the instance it answers null, which suppresses nothing — the
+  // safe direction.
+  const handoffPublish = () => (handoff ? handoff.publish() : null);
+
   // ---- lifecycle ------------------------------------------------------------------------------
   // start()/stop() are the ENTIRE rollback mechanism. stop() clears the collector's single
   // setInterval; with RADAR_ENABLED unset start() is never called, so there is no timer to clear.
   function start() {
     if (started) return;
     started = true;
+    // p6: the handoff lifecycle rides the session sweep, handed in through runOpts because the
+    // SERVER owns the single writer (spec principle 8) — the collector must never construct it, or
+    // `radar scan` in a CLI process would become a second p6 writer. Lazy + isolated: a broken
+    // handoff module degrades to "no lifecycle", never to "no radar", and a viewer runs none of it.
+    const handoffSweep = async () => {
+      if (!(typeof paths.config === 'string' && paths.config)) return;
+      const { config } = await loadConfig(paths.config, Date.now());
+      if (config.role === 'viewer') return;
+      const h = await getHandoff();
+      await h.sweep();
+    };
+    // The other half of the same wiring is handoffPublish, defined beside routeHandoffCall above
+    // so the forced-scan route shares the exact same closure.
     try {
-      collector.start({ fetch: true });
+      collector.start({ fetch: true, handoffSweep, handoffPublish });
     } catch (e) {
       log(`radar: scheduler failed to start: ${(e && e.message) || e}`);
     }
+    // Startup recovery runs before the first sweep can fire (spec §M2): it settles every
+    // non-terminal handoff, unsettled claim and open recovery-op exactly once.
+    const recovered = (async () => {
+      if (!(typeof paths.config === 'string' && paths.config)) return;
+      const { config } = await loadConfig(paths.config, Date.now());
+      if (config.role === 'viewer') return;
+      const h = await getHandoff();
+      await h.recoverAtStartup();
+    })().catch((e) => log(`radar: handoff startup recovery failed: ${(e && e.message) || e}`));
     // One scan at boot, fire-and-forget. Without it an operator who has just set RADAR_ENABLED
     // cannot tell "radar is off" from "radar has not reached its first 10-minute tick yet".
     if (o.scanOnStart === false) return;
     try {
-      Promise.resolve(collector.scan({ fetch: true })).then(
+      // handoffPublish must be passed here too, and startup recovery must finish FIRST. Without
+      // either, the first snapshot after a restart carries handoffs:[] even when the ledger holds
+      // live ones — so every suppressed row flashes back onto the board until the next sweep, which
+      // is the feature visibly forgetting itself for up to a minute. Recovery before the scan also
+      // makes the ordering structural instead of a race between a millisecond and a 60s tick.
+      Promise.resolve(recovered).catch(() => {}).then(() => collector.scan({ fetch: true, handoffPublish })).then(
         (r) => { if (r && !r.published) log(`radar: boot scan did not publish: ${r.error}`); },
         (e) => log(`radar: boot scan failed: ${(e && e.message) || e}`),
       );
@@ -123,6 +233,38 @@ function createRadar(opts) {
       if (req.method === 'POST' && p === '/api/radar/flag') return await routeFlag(req, res);
       const close = /^\/api\/radar\/decisions\/([^/]+)\/close$/.exec(p);
       if (req.method === 'POST' && close) return await routeCloseDecision(res, decodeURIComponent(close[1]));
+
+      // ----- p6 handoff routes (spec §7.1) — five, no collection route, mounted inside the same
+      // dispatch so they inherit authed() and the token-in-url refusal above.
+      if (req.method === 'POST' && p === '/api/radar/handoff/preview') {
+        if (await viewerRefusal(res)) return;
+        const b = await p6Body(req, res);
+        if (b === null) return;
+        return await routeHandoffCall(res, (h) => h.preview(b));
+      }
+      if (req.method === 'POST' && p === '/api/radar/handoff') {
+        if (await viewerRefusal(res)) return;
+        const b = await p6Body(req, res);
+        if (b === null) return;
+        return await routeHandoffCall(res, (h) => h.commit(b));
+      }
+      if (req.method === 'POST' && p === '/api/radar/recovery/adopt') {
+        if (await viewerRefusal(res)) return;
+        const b = await p6Body(req, res);
+        if (b === null) return;
+        return await routeHandoffCall(res, (h) => h.adopt(b), { republish: true });
+      }
+      if (req.method === 'POST' && p === '/api/radar/recovery/discard') {
+        if (await viewerRefusal(res)) return;
+        const b = await p6Body(req, res);
+        if (b === null) return;
+        return await routeHandoffCall(res, (h) => h.discard(b), { republish: true });
+      }
+      const hid = /^\/api\/radar\/handoff\/([^/]+)$/.exec(p);
+      if (req.method === 'GET' && hid) {
+        if (await viewerRefusal(res)) return;
+        return await routeHandoffCall(res, (h) => h.get(decodeURIComponent(hid[1])));
+      }
       // GET /api/radar/scan lands here on purpose: a force-scan is a mutation, so it is POST-only
       // and must not be reachable from a link, a prefetch, or an <img src>.
       return sendJson(res, 404, { error: 'not_found' });
@@ -180,6 +322,12 @@ function createRadar(opts) {
       try { body = JSON.parse(text); } catch (_) {
         return sendJson(res, 502, { error: 'leader_bad_json', message: 'leader did not answer JSON', lastGood: false });
       }
+      // VIEWER ROLE OVERLAY (p6 spec §3). The leader's snapshot says "leader" — the truth about the
+      // machine that derived it, and the wrong answer on the one machine that needs the right one:
+      // the tab reads state.role to decide whether to render select at all, and a select affordance
+      // that can only 409 is itself a chore. The ONLY field the proxy rewrites, unconditionally, on
+      // the response — the leader's stored snapshot is untouched.
+      if (body && typeof body === 'object' && !Array.isArray(body)) body.role = 'viewer';
       return sendJson(res, 200, body);
     } catch (e) {
       const why = e && e.name === 'AbortError' ? 'timeout' : (e && e.message) || String(e);
@@ -191,7 +339,9 @@ function createRadar(opts) {
   // than starting a second fan-out over a few hundred git spawns. The response is a receipt, not
   // the snapshot — clients read state through GET /api/radar/state, which has the schema.
   async function routeScan(res) {
-    const r = await collector.scan({ fetch: true });
+    // handoffPublish rides along (p6): a forced scan without it publishes a handoff-less snapshot
+    // and every suppressed row flashes back until the next sweep — measured by the S-009 proof.
+    const r = await collector.scan({ fetch: true, handoffPublish });
     const body = {
       ok: !!(r && r.ok),
       published: !!(r && r.published),

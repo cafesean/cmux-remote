@@ -241,6 +241,37 @@
     '  text-align:left;cursor:pointer;font:inherit}',
     '#radar .wt.dirty-toggle .caret{color:var(--rdim);font-family:var(--rmono);flex:none}',
 
+    // p6 select mode + confirm sheet + recovery (spec §7.2). Checkboxes exist ONLY in select mode;
+    // the resting board renders none of this.
+    '#radar .selbtn{flex:none;background:none;border:1px solid var(--rline);color:var(--rdim);',
+    '  border-radius:6px;padding:2px 9px;font:11px var(--rmono);cursor:pointer}',
+    '#radar .selbox{flex:none;margin:0 2px 0 0;accent-color:var(--raccent)}',
+    '#radar .selbar{position:sticky;bottom:0;display:flex;align-items:center;gap:10px;',
+    '  border:1px solid var(--rline);border-radius:9px;background:var(--rpanel);padding:10px 14px;',
+    '  font:12px var(--rmono);color:var(--rmuted)}',
+    '#radar .selbar button{background:none;border:1px solid #2a3646;color:var(--rink);border-radius:7px;',
+    '  padding:6px 12px;font:12px var(--rmono);cursor:pointer}',
+    '#radar .selbar button:disabled{opacity:.5}',
+    '#radar .hsheet{position:fixed;z-index:50;inset:0;background:#0b0e13d9;display:flex;',
+    '  align-items:center;justify-content:center;padding:18px}',
+    '#radar .hsheet .card{background:var(--rpanel);border:1px solid var(--rline);border-radius:12px;',
+    '  padding:16px;max-width:640px;width:100%;max-height:86vh;overflow:auto;display:flex;',
+    '  flex-direction:column;gap:10px}',
+    '#radar .hsheet h4{margin:0;font:600 13px var(--rsans);color:var(--rink)}',
+    '#radar .hsheet textarea{width:100%;min-height:180px;background:#0b0e13;color:var(--rink);',
+    '  border:1px solid var(--rline);border-radius:8px;padding:8px 10px;font:12px var(--rmono)}',
+    '#radar .hsheet .meta{color:var(--rdim);font-size:11px;font-family:var(--rmono);overflow-wrap:anywhere}',
+    '#radar .hsheet .safety{color:var(--rmuted);font-size:11.5px;border-top:1px solid var(--rline);padding-top:8px}',
+    '#radar .hsheet .btns{display:flex;gap:8px}',
+    '#radar .hsheet button{background:none;border:1px solid #2a3646;color:var(--rink);border-radius:7px;',
+    '  padding:6px 12px;font:12px var(--rmono);cursor:pointer}',
+    '#radar .hsheet .err{color:var(--ralert);font-size:12px;font-family:var(--rmono);overflow-wrap:anywhere}',
+    '#radar .recover{display:flex;align-items:center;gap:12px;border:1px solid var(--rline);',
+    '  border-radius:9px;background:var(--rpanel);padding:11px 14px;color:var(--rink);',
+    '  font-family:var(--rsans);font-size:13.5px;flex-wrap:wrap}',
+    '#radar .recover button{background:none;border:1px solid #2a3646;color:var(--rink);border-radius:7px;',
+    '  padding:5px 12px;font:12px var(--rmono);cursor:pointer}',
+
     // popovers — read-only for runbook/context; the only inputs are the tag/flag/decide writes
     '#radar .rpop{position:fixed;z-index:40;background:var(--rpanel);border:1px solid var(--rline);',
     '  border-radius:10px;padding:12px;min-width:260px;max-width:min(420px,92vw);max-height:70vh;overflow:auto;',
@@ -281,18 +312,30 @@
     var scope = el('div', 'scope'); scope.setAttribute('aria-hidden', 'true');
     var wordmark = el('span', 't', 'RADAR');
     var headRight = el('span', 'right');
+    // p6 select mode lives behind ONE toolbar control. It sits in a slot renderHead() empties on a
+    // viewer (spec §3): an affordance whose only outcome is 409 viewer_readonly is itself a chore,
+    // so it is not rendered at all rather than rendered disabled.
+    var selSlot = el('span');
+    var selBtn = el('button', 'selbtn', 'select');
+    selBtn.type = 'button';
+    selBtn.title = 'Select rows to hand off';
     var newDec = el('button', 'newdec', '+ decision');
     newDec.type = 'button';
     newDec.title = 'Open a decision item';
-    head.append(scope, wordmark, headRight, newDec);
+    head.append(scope, wordmark, headRight, selSlot, newDec);
     var badges = el('div', 'badges');
+    // The recovery element (spec §M4/§7.2) renders in its OWN zone above the board — never a row,
+    // never inside the attention list.
+    var recoverZone = el('section');
     var nowZone = el('section');
     nowZone.style.cssText = 'display:flex;flex-direction:column;gap:10px';
     var queueZone = el('section', 'queue');
     var foldsZone = el('div', 'folds');
-    surface.append(head, badges, nowZone, queueZone, foldsZone);
+    var selBar = el('div', 'selbar');
+    surface.append(head, badges, recoverZone, nowZone, queueZone, foldsZone, selBar);
     var pop = el('div', 'rpop'); pop.hidden = true;
-    pane.append(surface, pop);
+    var sheetHost = el('div');
+    pane.append(surface, pop, sheetHost);
     host.appendChild(pane);
 
     // ---- state held by the tab
@@ -327,6 +370,21 @@
     // Which orphan groups are open. Deliberately NOT persisted: expanding 131 spec folders is an
     // act of triage you perform now, not a preference you want restored tomorrow morning.
     var expanded = {};
+
+    // ---- p6 state -------------------------------------------------------------------------------
+    // A selection is COMPOSED, never presented (spec §2): sel.on is entered deliberately, and the
+    // resting board carries none of it. sel.rows is the ordered registry of selectable rows,
+    // rebuilt on every render — shift-click ranges walk it by index.
+    var sel = { on: false, picked: {}, lastIdx: null };
+    var selRows = [];
+    // The confirm sheet's five-state machine (spec §7.2). null = no sheet.
+    var sheet = null;
+    var sheetDrawnFor = null;         // rebuild the sheet DOM only when its identity changes,
+                                      // so a re-render never clobbers an in-progress seed edit
+    // One press empties the recovery element (spec §M4): a token that answered 200 — or 409
+    // not_recoverable, which means the set resolved itself — never renders again.
+    var recoveryDone = {};
+    var recoveryChip = null;
 
     // ---- attention, after optimistic edits ------------------------------------------------------
     // Optimism lives HERE rather than by mutating `snapshot`, so the next successful fetch replaces
@@ -455,6 +513,346 @@
       return function () { delete optimistic.removed[key]; };
     }
 
+    // ---- p6: selectors, suppression, the sheet and recovery (spec §6.1/§6.6/§7.2) ---------------
+
+    // Must stay byte-equal to SAFETY_NOTICE in radar/handoff.js (S-007 owns the constant; the
+    // p6 UI test compares the two, so the copy cannot drift silently). Spec §7.2 pins the constant
+    // as the PLAIN TEXT of the sentence — 334 UTF-8 bytes, canonical copy at
+    // _specs/p6-handoff/fixtures/s007-seed/SAFETY_NOTICE.txt: the spec's ** and backticks are its
+    // own markdown emphasis, and literal asterisks would render as asterisks in this DOM.
+    var SAFETY_NOTICE = 'The session is instructed to inspect and plan only on its first turn, ' +
+      'and to ask before modifying, committing, pushing, merging or deleting anything. It runs ' +
+      'without --dangerously-skip-permissions, so Claude\'s own permission prompts still apply ' +
+      '— but your existing allowlists may already permit some commands. This is not a sandbox.';
+
+    // §6.1 producer encoding, single pass over the original characters: % -> %25, : -> %3A.
+    // A selector is a lock identity — this must match radar/handoff-keys.js::encodeSegment exactly.
+    function encSeg(s) {
+      var out = '';
+      for (var i = 0; i < String(s).length; i++) {
+        var ch = String(s)[i];
+        out += ch === '%' ? '%25' : ch === ':' ? '%3A' : ch;
+      }
+      return out;
+    }
+    function uuid4() {
+      try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (_) {}
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+        var r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 3 | 8)).toString(16);
+      });
+    }
+
+    // The fact keys a board row contributes, minted from the published snapshot exactly as
+    // radar/handoff-keys.js mints them server-side (§6.2). The tab needs its own copy because the
+    // board's worktree and epic rows are suppressed HERE — attention[] arrives pre-suppressed from
+    // derive(), but repos/epics arrive intact (stop-capture and the lifecycle read them, so the
+    // snapshot data itself must never be hollowed out).
+    function dirtySum(w) {
+      return w && w.dirty ? (w.dirty.staged || 0) + (w.dirty.unstaged || 0) + (w.dirty.untracked || 0) : 0;
+    }
+    function wtKeysOf(w) {
+      var out = [];
+      if (w.stale) out.push('wt:' + encSeg(w.path) + ':stale');
+      if (dirtySum(w) > 0) out.push('wt:' + encSeg(w.path) + ':dirty');
+      return out;
+    }
+    function epicKeysOf(e) {
+      var out = [];
+      var repos = (snapshot && snapshot.repos) || {};
+      Object.keys(repos).forEach(function (repoId) {
+        var r = repos[repoId];
+        (r.branches || []).forEach(function (b) {
+          if (b.epic !== e.key) return;
+          if (typeof b.unpushed === 'number' && b.unpushed > 0) out.push('branch:' + encSeg(repoId) + ':' + encSeg(b.name) + ':unpushed');
+          if (b.mergedIntoDevelop === false) out.push('branch:' + encSeg(repoId) + ':' + encSeg(b.name) + ':unmerged-develop');
+          if (b.mergedIntoMain === false) out.push('branch:' + encSeg(repoId) + ':' + encSeg(b.name) + ':unmerged-main');
+        });
+        (r.worktrees || []).forEach(function (w) {
+          // worktree -> epic goes through the BRANCH RECORD, never w.epic, which does not exist
+          var hit = (r.branches || []).filter(function (b) { return b.name === w.branch; })[0];
+          if (hit && hit.epic === e.key) out.push.apply(out, wtKeysOf(w));
+        });
+      });
+      (e.signals || []).forEach(function (s) {
+        if (s === 'merged-not-deployed' || s === 'deployed-flag-off') out.push('epic:' + encSeg(e.key) + ':' + s);
+      });
+      return out;
+    }
+    // The union of every live handoff's factKeys — §6.6's one suppression identity. Null when no
+    // handoff is live, so the resting board takes the fast path.
+    function coveredKeys() {
+      var cov = null;
+      ((snapshot && snapshot.handoffs) || []).forEach(function (h) {
+        (h.factKeys || []).forEach(function (fk) { (cov = cov || {})[fk] = true; });
+      });
+      return cov;
+    }
+    // Removed iff it contributes AT LEAST ONE key and every one is covered — the non-empty
+    // precondition is §9 trap 20: without it, one live handoff would hide every row.
+    function rowSuppressed(keys, cov) {
+      if (!cov || keys.length === 0) return false;
+      return keys.every(function (fk) { return cov[fk]; });
+    }
+
+    // Row -> selector (§6.1's table). Returns null for a row that is not selectable — and a row
+    // that is not selectable contributes no fact key and is never suppressed.
+    function selectorsOfItem(it) {
+      switch (it.type) {
+        case 'mergeable': return { selectors: ['epic:' + encSeg(it.epic)], repos: (epicByKey(it.epic) || {}).repos || [] };
+        case 'default-unpushed': return { selectors: ['branch:' + encSeg(it.repo) + ':' + encSeg(it.branch)], repos: [it.repo] };
+        case 'orphan': return { selectors: ['orphan:' + encSeg(it.repo) + ':' + encSeg(it.branch)], repos: [it.repo] };
+        case 'orphan-group': {
+          var ss = [], rr = [];
+          membersOf(it).forEach(function (m) { ss.push('orphan:' + encSeg(m.repo) + ':' + encSeg(m.branch)); rr.push(m.repo); });
+          return ss.length ? { selectors: ss, repos: rr } : null;
+        }
+        default: return null;     // blocked, blocked-stale, decision, rule-violation, spec-orphan*
+      }
+    }
+
+    function exitSelect() {
+      sel = { on: false, picked: {}, lastIdx: null };
+      sheet = null;
+      // sheetDrawnFor keeps its last identity on purpose: renderSheet only clears the host on an
+      // identity CHANGE, so resetting it here makes "no sheet" read as already-drawn and leaves
+      // the last card attached over the board until a reload.
+    }
+    function pickedRows() {
+      return Object.keys(sel.picked).map(function (k) { return sel.picked[k]; });
+    }
+    function currentSelectors() {
+      var seen = {}, out = [];
+      pickedRows().forEach(function (e) {
+        e.selectors.forEach(function (s) { if (!seen[s]) { seen[s] = true; out.push(s); } });
+      });
+      return out;
+    }
+    function setPicked(row, on) {
+      if (on) sel.picked[row.id] = row.entry;
+      else delete sel.picked[row.id];
+    }
+    function toggleRowAt(idx, shiftKey) {
+      var row = selRows[idx];
+      if (!row) return;
+      if (shiftKey && sel.lastIdx != null && selRows[sel.lastIdx]) {
+        var lo = Math.min(sel.lastIdx, idx), hi = Math.max(sel.lastIdx, idx);
+        for (var i = lo; i <= hi; i++) setPicked(selRows[i], true);
+      } else {
+        setPicked(row, !sel.picked[row.id]);
+      }
+      sel.lastIdx = idx;
+      render();
+    }
+    // Registers a selectable row and, in select mode, prepends its checkbox. The registry is the
+    // shift-click range order, so it is rebuilt in render order on every pass.
+    function selRow(rowEl, entry, label) {
+      if (!sel.on || !entry) return;
+      var id = entry.selectors.join(',');
+      var idx = selRows.length;
+      selRows.push({ id: id, entry: entry });
+      var box = el('input', 'selbox');
+      box.type = 'checkbox';
+      box.checked = !!sel.picked[id];
+      box.setAttribute('aria-label', 'select ' + label);
+      box.onclick = function (ev) { toggleRowAt(idx, !!(ev && ev.shiftKey)); };
+      rowEl.insertBefore ? rowEl.insertBefore(box, rowEl.firstChild) : rowEl.append(box);
+      // `space` toggles (spec §7.2) — the row answers it as well as the box, so a focused row
+      // needs no pointer.
+      rowEl.onkeydown = function (ev) {
+        if (ev && (ev.key === ' ' || ev.key === 'Space')) { if (ev.preventDefault) ev.preventDefault(); toggleRowAt(idx, !!ev.shiftKey); }
+      };
+    }
+
+    function renderSelBar() {
+      clear(selBar);
+      selBar.hidden = !sel.on;
+      if (!sel.on) return;
+      var rows = pickedRows();
+      var repos = {};
+      rows.forEach(function (e) { (e.repos || []).forEach(function (r) { repos[r] = true; }); });
+      var label = rows.length + ' selected';
+      var repoList = Object.keys(repos).sort().join(' ');
+      selBar.append(el('span', null, label + (repoList ? ' · ' + repoList : '')));
+      var go = el('button', null, 'hand off');
+      go.type = 'button';
+      go.disabled = rows.length === 0;
+      go.onclick = function () { postPreview(currentSelectors(), undefined); };
+      var cancel = el('button', null, 'cancel');
+      cancel.type = 'button';
+      cancel.onclick = function () { exitSelect(); render(); };
+      selBar.append(go, cancel);
+    }
+
+    // ---- the confirm sheet (spec §7.2's five-state machine; `selecting` is sel.on itself) -------
+    async function postPreview(selectors, seedOverride) {
+      if (!selectors.length) return;
+      sheet = { state: 'previewing', selectors: selectors, seedOverride: seedOverride };
+      render();
+      try {
+        var body = seedOverride === undefined ? { selectors: selectors } : { selectors: selectors, seedOverride: seedOverride };
+        var r = await jpost('/api/radar/handoff/preview', body);
+        var b = null;
+        try { b = await r.json(); } catch (_) { b = null; }
+        if (r.ok && b && b.plan) {
+          // The idempotency key is minted once per DISPLAYED plan and reused for every submit of
+          // it (§7.1); an edit re-previews, which mints a new plan and therefore a new key.
+          sheet = { state: 'ready', selectors: selectors, plan: b.plan, hash: b.hash, idemKey: uuid4() };
+        } else {
+          sheet = { state: 'failed', selectors: selectors, from: 'preview', err: errOf(r, b) };
+        }
+      } catch (e) {
+        sheet = { state: 'failed', selectors: selectors, from: 'preview', err: { transport: true, message: (e && e.message) || 'network error' } };
+      }
+      render();
+    }
+    function errOf(r, b) {
+      return {
+        status: r ? r.status : 0,
+        error: (b && b.error) || ('HTTP ' + (r ? r.status : '?')),
+        message: (b && b.message) || '',
+        incidentId: (b && b.incidentId) || null,
+      };
+    }
+    async function postCommit() {
+      var s = sheet;
+      var body = { previewId: s.plan.previewId, hash: s.hash, idempotencyKey: s.idemKey };
+      sheet = { state: 'committing', selectors: s.selectors, plan: s.plan, hash: s.hash, idemKey: s.idemKey, body: body };
+      render();
+      try {
+        var r = await jpost('/api/radar/handoff', body);
+        var b = null;
+        try { b = await r.json(); } catch (_) { b = null; }
+        if (r.ok) {
+          // 201, 202 and 200-resumed all close the sheet the same way: the dispatch is owned by
+          // the server now, and the next poll redraws the board (suppression included).
+          exitSelect();
+          render();
+          setTimeout(function () { tick(); }, 400);
+          return;
+        }
+        sheet = { state: 'failed', selectors: s.selectors, from: 'commit', plan: s.plan, hash: s.hash, idemKey: s.idemKey, body: body, err: errOf(r, b) };
+      } catch (e) {
+        sheet = { state: 'failed', selectors: s.selectors, from: 'commit', plan: s.plan, hash: s.hash, idemKey: s.idemKey, body: body, err: { transport: true, message: (e && e.message) || 'network error' } };
+      }
+      render();
+    }
+    async function retrySheet() {
+      var s = sheet;
+      if (s.from === 'commit' && (s.err.transport || (s.err.status === 409 && s.err.error === 'in_flight'))) {
+        // Same request, SAME idempotency key — the claim protocol makes the re-send safe.
+        sheet = { state: 'committing', selectors: s.selectors, plan: s.plan, hash: s.hash, idemKey: s.idemKey, body: s.body };
+        render();
+        try {
+          var r = await jpost('/api/radar/handoff', s.body);
+          var b = null;
+          try { b = await r.json(); } catch (_) { b = null; }
+          if (r.ok) { exitSelect(); render(); setTimeout(function () { tick(); }, 400); return; }
+          sheet = { state: 'failed', selectors: s.selectors, from: 'commit', plan: s.plan, hash: s.hash, idemKey: s.idemKey, body: s.body, err: errOf(r, b) };
+        } catch (e) {
+          sheet = { state: 'failed', selectors: s.selectors, from: 'commit', plan: s.plan, hash: s.hash, idemKey: s.idemKey, body: s.body, err: { transport: true, message: (e && e.message) || 'network error' } };
+        }
+        render();
+        return;
+      }
+      // A settled failure spends the key (§M2): re-preview with the selection the sheet still
+      // holds, minting a new plan and a new key. A failed preview re-previews the same way.
+      postPreview(s.selectors, s.seedOverride);
+    }
+
+    function renderSheet() {
+      var idFor = sheet
+        ? sheet.state + ':' + (sheet.plan ? sheet.plan.previewId : '') + ':' + (sheet.err ? sheet.err.error + (sheet.err.incidentId || '') : '')
+        : null;
+      if (idFor === sheetDrawnFor) return;
+      sheetDrawnFor = idFor;
+      clear(sheetHost);
+      if (!sheet || sheet.state === 'selecting') return;
+      var wrap = el('div', 'hsheet');
+      var card = el('div', 'card');
+      wrap.appendChild(card);
+      if (sheet.state === 'previewing' || sheet.state === 'committing') {
+        card.append(el('h4', null, sheet.state === 'previewing' ? 'building the brief…' : 'dispatching…'));
+      } else if (sheet.state === 'ready') {
+        card.append(el('h4', null, 'Hand off'));
+        // The EXACT seed text, editable. Editing and blurring re-previews with seedOverride —
+        // editing by itself never confirms.
+        var ta = el('textarea');
+        ta.value = sheet.plan.seedText;
+        ta.setAttribute('aria-label', 'seed text');
+        ta.onblur = function () {
+          if (sheet && sheet.state === 'ready' && ta.value !== sheet.plan.seedText) {
+            postPreview(sheet.selectors, ta.value);
+          }
+        };
+        card.append(ta);
+        card.append(el('div', 'meta', 'preview ' + sheet.plan.previewId));
+        card.append(el('div', 'meta', 'workdir ' + sheet.plan.workdir));
+        card.append(el('div', 'meta', 'argv ' + JSON.stringify(sheet.plan.argv)));
+        card.append(el('div', 'safety', SAFETY_NOTICE));
+        var btns = el('div', 'btns');
+        var ok = el('button', null, 'confirm'); ok.type = 'button';
+        ok.onclick = function () { postCommit(); };
+        var no = el('button', null, 'cancel'); no.type = 'button';
+        no.onclick = function () { exitSelect(); render(); };
+        btns.append(ok, no);
+        card.append(btns);
+      } else if (sheet.state === 'failed') {
+        card.append(el('h4', null, 'Hand off failed'));
+        // One incident, never a list (spec §7.3): the server's code and sentence verbatim, the
+        // incidentId as an opaque token to quote, and exactly one remedy control.
+        card.append(el('div', 'err', sheet.err.error));
+        if (sheet.err.message) card.append(el('div', 'err', sheet.err.message));
+        if (sheet.err.incidentId) card.append(el('div', 'meta', sheet.err.incidentId));
+        var b2 = el('div', 'btns');
+        var retry = el('button', null, 'retry'); retry.type = 'button';
+        retry.onclick = function () { retrySheet(); };
+        var no2 = el('button', null, 'cancel'); no2.type = 'button';
+        no2.onclick = function () { exitSelect(); render(); };
+        b2.append(retry, no2);
+        card.append(b2);
+      }
+      sheetHost.appendChild(wrap);
+    }
+
+    // ---- the recovery element (spec §M4, §7.2) --------------------------------------------------
+    // Rendered iff state.handoffRecovery !== null — a REQUIRED field, so an omitted key can never
+    // render it. ONE element for the whole undecidable set: no id, no count, no per-item action,
+    // and its text is byte-identical whether one handoff or ten are undecidable.
+    async function recoveryPress(op, token) {
+      try {
+        var r = await jpost('/api/radar/recovery/' + op, { token: token });
+        if (r.ok) { recoveryDone[token] = true; recoveryChip = null; render(); setTimeout(function () { tick(); }, 400); return; }
+        var b = null;
+        try { b = await r.json(); } catch (_) { b = null; }
+        if (r.status === 409 && b && b.error === 'not_recoverable') {
+          // Not an error to the user: the set resolved itself, so the element simply disappears.
+          recoveryDone[token] = true; recoveryChip = null; render(); return;
+        }
+        // The only failure reachable after a press (500 ledger_write_failed) leaves the element
+        // exactly as it was, showing the server's sentence — nothing was recorded, nothing killed.
+        recoveryChip = (b && b.message) || ('HTTP ' + r.status);
+        render();
+      } catch (e) {
+        recoveryChip = (e && e.message) || 'network error';
+        render();
+      }
+    }
+    function renderRecovery(t) {
+      clear(recoverZone);
+      var hr = snapshot && snapshot.handoffRecovery;
+      if (!hr || recoveryDone[hr.token]) return;
+      var box = el('div', 'recover');
+      box.append(el('span', null, 'A handoff was dispatched ' + age(hr.since, t) + ' ago and never produced a transcript, but its process is still running.'));
+      var adopt = el('button', null, 'adopt'); adopt.type = 'button';
+      adopt.onclick = function () { recoveryPress('adopt', hr.token); };
+      var discard = el('button', null, 'discard'); discard.type = 'button';
+      discard.onclick = function () { recoveryPress('discard', hr.token); };
+      box.append(adopt, discard);
+      if (recoveryChip) box.append(el('div', 'chip', recoveryChip));
+      recoverZone.appendChild(box);
+    }
+
     // ---- popover ---------------------------------------------------------------------------------
     function closePop() { pop.hidden = true; clear(pop); }
     function openPop(anchor, build) {
@@ -504,6 +902,23 @@
           : ok + '/' + machines.length + ' machines');
       }
       headRight.textContent = parts.join(' · ');
+
+      // p6: the select affordance exists ONLY on a leader (spec §3). state.role is published by
+      // the leader and rewritten to "viewer" by the viewer's own proxy, so this read is correct on
+      // both machines. On a viewer the control is NOT rendered — not disabled, absent.
+      clear(selSlot);
+      var viewer = snapshot && snapshot.role === 'viewer';
+      if (viewer) {
+        if (sel.on) exitSelect();
+      } else if (snapshot) {
+        selBtn.textContent = sel.on ? 'done' : 'select';
+        selBtn.onclick = function () {
+          if (sel.on) exitSelect();
+          else sel = { on: true, picked: {}, lastIdx: null };
+          render();
+        };
+        selSlot.appendChild(selBtn);
+      }
     }
 
     function badge(text, strongText, action) {
@@ -842,6 +1257,7 @@
       main.append(meta);
       hero.append(main);
       hero.append(actionButton(it, t, true));
+      selRow(hero, selectorsOfItem(it), info.title);
       nowZone.appendChild(hero);
       var itemK = key(it);
       if (chips[itemK]) nowZone.appendChild(el('div', 'chip', chips[itemK].msg));
@@ -859,6 +1275,9 @@
       if (info.small) text.append(el('small', null, info.small));
       row.append(text);
       row.append(actionButton(it, t, false));
+      // p6 select mode: selectable rows get a checkbox; the rest render exactly as they always did
+      // and ignore selection entirely (spec §7.2 — blocked rows keep jump).
+      selRow(row, selectorsOfItem(it), info.title);
       return row;
     }
 
@@ -978,6 +1397,8 @@
     function epicRow(e, t, showLadder) {
       var row = el('div', 'er');
       row.dataset.epic = e.key;
+      // An epic row selects the whole group as ONE epic: selector (spec §6.1's row->selector table)
+      selRow(row, { selectors: ['epic:' + encSeg(e.key)], repos: e.repos || [] }, e.key);
       row.append(el('span', 'name', e.title ? e.key + ' ' + e.title : e.key));
       if (showLadder) row.append(ladderStrip(e));
       row.append(el('span', 'phrase', e.phrase || ''));
@@ -1020,7 +1441,12 @@
     function renderFolds(t) {
       clear(foldsZone);
       if (!snapshot) return;
-      var epics = snapshot.epics || [];
+      // p6 suppression of BOARD rows (spec §6.6): an epic or worktree row leaves while some live
+      // handoff holds every fact key it contributes, and returns the moment that stops being true.
+      // attention[] arrives pre-suppressed from derive(); the epic and worktree rows are suppressed
+      // here because their snapshot DATA must stay intact for every other consumer.
+      var cov = coveredKeys();
+      var epics = (snapshot.epics || []).filter(function (e) { return !rowSuppressed(epicKeysOf(e), cov); });
       var active = epics.filter(function (e) { return e.zone === 'active'; });
       var dormant = epics.filter(function (e) { return e.zone === 'dormant'; });
 
@@ -1028,6 +1454,7 @@
       var dirty = [];
       Object.keys(snapshot.repos || {}).forEach(function (id) {
         (snapshot.repos[id].worktrees || []).forEach(function (w) {
+          if (rowSuppressed(wtKeysOf(w), cov)) return;
           if (w.stale && w.cleanupCommand) stale.push({ repo: id, w: w });
           if (w.dirty && (w.dirty.staged || w.dirty.unstaged || w.dirty.untracked)) dirty.push({ repo: id, w: w });
         });
@@ -1066,6 +1493,8 @@
           function (wrap) {
             stale.forEach(function (s) {
               var row = el('div', 'wt');
+              // a worktree row selects wt:<path> (spec §6.1)
+              selRow(row, { selectors: ['wt:' + encSeg(s.w.path)], repos: [s.repo] }, s.w.path);
               row.append(el('code', null, s.w.cleanupCommand));
               row.append(el('span', 'why', s.w.staleReason || 'stale'));
               var copy = el('button', 'q-act', 'copy'); copy.type = 'button';
@@ -1098,6 +1527,7 @@
               if (folds.dirty) {
                 dirty.forEach(function (s) {
                   var row = el('div', 'wt dirty');
+                  selRow(row, { selectors: ['wt:' + encSeg(s.w.path)], repos: [s.repo] }, s.w.path);
                   row.append(el('code', null, '⚠ ' + s.w.path));
                   row.append(el('span', 'why', s.w.branch || 'detached'));
                   wrap.appendChild(row);
@@ -1111,11 +1541,15 @@
     function render() {
       var t = now();
       try {
+        selRows = [];                 // the selectable-row registry is rebuilt in render order
         renderHead(t);
         renderBadges(t);
+        renderRecovery(t);
         renderHero(t);
         renderQueue(t);
         renderFolds(t);
+        renderSelBar();
+        renderSheet();
       } catch (e) {
         // A render bug must degrade to "radar looks broken", never to a broken cmux. The pane keeps
         // whatever it managed to paint and says so.

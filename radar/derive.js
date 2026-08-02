@@ -36,6 +36,8 @@
 // leftover work "active" and re-break the oracle. Only inputs that exist independently of the
 // epic derivation may be activity signals.
 
+const { keysOfAttentionItem } = require('./handoff-keys');
+
 const LADDER_ORDER = ['spec', 'pushed', 'mergedDevelop', 'deployedDev', 'prod', 'flags'];
 const RECENT_COMMIT_MS = 14 * 24 * 60 * 60 * 1000;
 const FLAG_STALE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -342,6 +344,42 @@ function flattenAttention(list) {
   return out;
 }
 
+// ---- p6 suppression (spec §6.6) ------------------------------------------------------------------
+// An attention item is removed from the PUBLISHED attention[] iff it contributes AT LEAST ONE fact
+// key and every key it contributes is held by some live handoff. The non-empty precondition is not
+// pedantry (spec §9 trap 20): "every key it contributes is covered" is vacuously true of an item
+// contributing NONE, and a vacuous reading would hide every blocked prompt, open decision,
+// rule-violation and spec-orphan the moment any handoff went live.
+//
+// The covered set comes from the PUBLISHED live handoffs' factKeys — which the server derives from
+// its in-memory ledger index (spec §3). Nothing here reads index.json or locks.json; this function
+// is as pure as the rest of the file.
+function suppressAttention(attention, covered, stateLite) {
+  if (!covered || covered.size === 0) return attention;
+  const gone = (it) => {
+    const keys = keysOfAttentionItem(stateLite, it);
+    return keys.length > 0 && keys.every((key) => covered.has(key));
+  };
+  const out = [];
+  for (const it of attention) {
+    // A folded group is removed only when EVERY member is (flattenAttention decides membership);
+    // a partially covered group keeps its remaining members reachable. Below ORPHAN_GROUP_MIN the
+    // survivors go back to being loose rows — a "group of one" is barred by the schema and would be
+    // strictly worse than the row itself.
+    if (it.type === 'orphan-group' && Array.isArray(it.items)) {
+      const members = it.items.filter((m) => !gone(m));
+      if (members.length === 0) continue;
+      if (members.length === it.items.length) { out.push(it); continue; }
+      if (members.length < ORPHAN_GROUP_MIN) { out.push(...members); continue; }
+      out.push(Object.assign({}, it, { count: members.length, items: members }));
+      continue;
+    }
+    if (gone(it)) continue;
+    out.push(it);
+  }
+  return out;
+}
+
 // ---- entry ---------------------------------------------------------------------------------------
 
 function derive(input) {
@@ -470,6 +508,34 @@ function derive(input) {
     now, sessions, decisions, orphanBranches, defaultUnpushed, ruleViolations, specOrphans,
   });
 
+  // ---- p6 handoffs (spec §4.6). The server passes the LIVE set (and the recovery element) from
+  // its in-memory ledger index; with nothing passed the fields publish their required empty values,
+  // so a consumer never has to distinguish absent from empty.
+  const handoffs = Array.isArray(input.handoffs) ? input.handoffs : [];
+  const handoffRecovery = input.handoffRecovery == null ? null : input.handoffRecovery;
+  const role = input.config && input.config.role === 'viewer' ? 'viewer' : 'leader';
+
+  // EVERY p5 count is computed from the UNSUPPRESSED structures, and only then is suppression
+  // applied to the published attention[] (spec §6.6, load-bearing ordering): counts.mergeable is
+  // computed from attention itself, so suppressing first would silently change an existing p5
+  // count. counts.handoffsLive is the ONE count p6 adds.
+  const counts = {
+    blocked: sessions.filter((s) => s.status === 'blocked').length,
+    decisions: decisions.filter((d) => !d.closedAt).length,
+    mergeable: attention.filter((a) => a.type === 'mergeable').length,
+    // Counted from the SOURCE lists, not from attention[]: grouping folds N rows into 1, and a
+    // count that silently dropped to 1 would be the exact false-green the fold exists to avoid.
+    orphans: orphanBranches.length + specOrphans.length,
+    staleWorktrees,
+    handoffsLive: handoffs.length,
+  };
+
+  const covered = new Set();
+  for (const h of handoffs) for (const key of (Array.isArray(h.factKeys) ? h.factKeys : [])) covered.add(key);
+  // keysOfAttentionItem resolves `mergeable` through the epic's branch/worktree records, so it
+  // needs the repos and epics assembled above — the same shape the published snapshot carries.
+  const published = suppressAttention(attention, covered, { repos, epics, attention });
+
   // The Jira drift digest (spec §M4): weekly reading, never an interrupt, never an attention item.
   // Carried on the snapshot so the CLI and the daily brief can read it without a second Jira call.
   // `jira-inprogress-no-git` is the direction that used to be rendered as an ACTIVE epic.
@@ -485,25 +551,21 @@ function derive(input) {
     collectorId: input.collectorId,
     machines,
     sources,
-    counts: {
-      blocked: sessions.filter((s) => s.status === 'blocked').length,
-      decisions: decisions.filter((d) => !d.closedAt).length,
-      mergeable: attention.filter((a) => a.type === 'mergeable').length,
-      // Counted from the SOURCE lists, not from attention[]: grouping folds N rows into 1, and a
-      // count that silently dropped to 1 would be the exact false-green the fold exists to avoid.
-      orphans: orphanBranches.length + specOrphans.length,
-      staleWorktrees,
-    },
+    counts,
     repos,
     epics,
     sessions,
-    attention,
+    attention: published,
+    handoffs,
+    handoffRecovery,
+    role,
     jiraDrift,
   };
 }
 
 module.exports = {
   derive, assembleLadder, tally, buildEpic, buildAttention, epicFlag, flattenAttention,
+  suppressAttention,
   LADDER_ORDER, ATTENTION_ORDER, ACTIVITY_SIGNALS, DANGLING_SIGNALS, DRIFT_SIGNALS,
   ORPHAN_GROUP_MIN, RECENT_COMMIT_MS, EPOCH,
 };

@@ -19,6 +19,20 @@ const DEFAULTS = {
   sessionSweepSec: 60,
   timeouts: { gitFetchSec: 20, bridgeMs: 8000, deployMs: 10000 },
   repos: [],
+  // ---- p6 handoff (spec §4.7) — eleven keys. normalizeConfig builds an explicit object literal,
+  // i.e. a WHITELIST, so a key absent from here is silently dropped and reads as its default
+  // forever. Every one of these must therefore also appear in the `config` literal below.
+  polyrepoRoot: null,              // null -> unconfigured; a multi-repo dispatch then 422s workdir_unresolved
+  claudeBin: null,                // null -> $HOME/.local/bin/claude, resolved at use time
+  serverBaseUrl: 'http://127.0.0.1:8080',
+  serverTokenRef: 'SERVER_TOKEN', // the NAME of the env var; never the value
+  captureQuietMs: 600000,
+  sessionQuietMs: 1800000,
+  goneGraceMs: 600000,
+  confirmMs: 20000,
+  discardKillMs: 5000,
+  previewTtlMs: 120000,
+  seedMaxBytes: 12288,
 };
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -27,6 +41,9 @@ const num = (v, dflt, min, max) => {
   if (!Number.isFinite(n)) return dflt;
   return Math.min(max, Math.max(min, n));
 };
+// The string counterpart of `num`, same silence: a non-empty trimmed string wins, anything else
+// takes the default, and no issue is pushed. `leaderBaseUrl` already worked this way inline.
+const str = (v, dflt) => (typeof v === 'string' && v.trim() ? v.trim() : dflt);
 
 // Only the shape P1 consumes is validated hard. `deploy` is carried through untouched for S-005;
 // unknown keys are ignored so an additive schema bump never breaks an older collector.
@@ -84,6 +101,20 @@ function normalizeConfig(raw) {
       deployMs: num(t.deployMs, DEFAULTS.timeouts.deployMs, 100, 120000),
     },
     repos: [],
+    // p6 §4.7. Numerics use `num`, which is the store's EXISTING convention and not what a reader
+    // would guess: non-finite -> default, finite -> SILENT CLAMP into [min,max], never an issue.
+    // Adopted unchanged so there is one answer to "what happens to a bad config value".
+    polyrepoRoot: str(raw.polyrepoRoot, DEFAULTS.polyrepoRoot),
+    claudeBin: str(raw.claudeBin, DEFAULTS.claudeBin),
+    serverBaseUrl: str(raw.serverBaseUrl, DEFAULTS.serverBaseUrl),
+    serverTokenRef: str(raw.serverTokenRef, DEFAULTS.serverTokenRef),
+    captureQuietMs: num(raw.captureQuietMs, DEFAULTS.captureQuietMs, 1000, 86400000),
+    sessionQuietMs: num(raw.sessionQuietMs, DEFAULTS.sessionQuietMs, 1000, 86400000),
+    goneGraceMs: num(raw.goneGraceMs, DEFAULTS.goneGraceMs, 1000, 86400000),
+    confirmMs: num(raw.confirmMs, DEFAULTS.confirmMs, 1000, 120000),
+    discardKillMs: num(raw.discardKillMs, DEFAULTS.discardKillMs, 250, 60000),
+    previewTtlMs: num(raw.previewTtlMs, DEFAULTS.previewTtlMs, 5000, 3600000),
+    seedMaxBytes: num(raw.seedMaxBytes, DEFAULTS.seedMaxBytes, 1024, 1048576),
   };
 
   if (config.role === 'viewer' && !config.leaderBaseUrl) issues.push('role=viewer but leaderBaseUrl is unset');
