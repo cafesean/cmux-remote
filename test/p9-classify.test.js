@@ -654,6 +654,151 @@ test('AC2b - the codex parse is liberal in what it accepts and strict in what it
 });
 
 // ================================================================================================
+// AC2c — THE REAL CODEX ENVELOPE, and the nesting that no invented fixture had
+//
+// This is the only test in the file whose input was not invented, and it is here because inventing
+// it is exactly what failed. Every synthetic case above passed against a parser that could not read
+// a single real answer: the scan walked the event's own top-level strings, and codex puts the answer
+// at `event.item.text` — one level further down. Green suite, green review, `unknown` for every
+// classification in production.
+//
+// The envelope was the one thing the tests could not invent. So the fixture is a CAPTURE, ids
+// scrubbed to synthetic values, and the first thing this test does is assert the capture still has
+// the property that makes it a regression — because a fixture quietly flattened is a regression test
+// that no longer regresses, and it would fail silently in exactly the same way.
+// ================================================================================================
+const CODEX_ENVELOPE = fs.readFileSync(path.join(__dirname, 'fixtures', 'codex-envelope.jsonl'), 'utf8');
+
+test('AC2c - the real captured codex envelope parses, and the fixture still exercises the nesting', async () => {
+  _resetClassifyState();
+
+  // ---- the fixture guards itself ---------------------------------------------------------------
+  const events = CODEX_ENVELOPE.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+  assert.ok(events.length >= 5, 'the capture is a whole run, not a single line');
+
+  // THE PROPERTY THAT MAKES THIS A REGRESSION TEST: no answer is reachable from any event's own
+  // top-level string values. That is precisely what the shipped-and-broken one-level scan looked at,
+  // so if this assertion ever fails the fixture has been flattened and the test below is proving
+  // nothing.
+  const oneLevelScan = (event) => {
+    for (const v of Object.values(event)) {
+      if (typeof v !== 'string') continue;
+      let parsed; try { parsed = JSON.parse(v); } catch (_) { continue; }
+      if (parsed && typeof parsed === 'object' && VERDICTS_IN_FIXTURE.indexOf(parsed.verdict) !== -1) return parsed;
+    }
+    return null;
+  };
+  assert.ok(events.every((e) => oneLevelScan(e) === null),
+    'the answer must NOT be reachable one level down, or this fixture cannot catch the bug it exists for');
+
+  // And it IS reachable deeper — at a nested key, next to decoys.
+  const answerEvent = events.find((e) => e.item && e.item.type === 'agent_message');
+  assert.ok(answerEvent, 'the capture still carries an agent_message event');
+  assert.ok(typeof answerEvent.item.text === 'string', 'whose answer is a nested string, not a top-level one');
+  assert.ok(events.some((e) => e.item && e.item.type === 'error'),
+    'and the decoy error events are still there — the scan must step over them, not stop on them');
+
+  // ---- the regression itself -------------------------------------------------------------------
+  assert.deepEqual(readVerdict(CODEX_ENVELOPE, 'codex'), { verdict: 'needs-decision', reason: 'test' },
+    'the real envelope yields the real answer');
+
+  // Through the WHOLE stage, not just the parser — a published intent and a cache entry, which is
+  // what was actually broken in production.
+  const dir = tmpdir();
+  const cachePath = path.join(dir, 'intent-cache.json');
+  const config = normalizeConfig({ classifierProvider: 'codex', classifierBin: BIN }).config;
+  const run = stubRun(async () => runOk(CODEX_ENVELOPE));
+  const s = blocked(dir, { sessionId: 'fixture-inbox-codex-real' });
+  await classifyBlocked([s], baseDeps({ run, cachePath, config }));
+  assert.equal(s.intent.verdict, 'needs-decision', 'the stage publishes a real verdict, not unknown');
+  assert.equal(s.intent.reason, 'test');
+  assert.equal(s.intent.model, 'codex:default', 'and records the provider label, never the null marker');
+  const version = resolveClassifier(config, { HOME: '/fixture/home' }).version;
+  assert.ok(readCache(cachePath)[intentCacheKey(MACHINE, 'fixture-inbox-codex-real', TS, version)],
+    'and it is cached, so the next sweep costs nothing');
+
+  // The other provider must still refuse it. Cross-accepting would mean neither parser is reading
+  // its own CLI.
+  assert.deepEqual(readVerdict(CODEX_ENVELOPE, 'claude'), { verdict: 'unknown', reason: 'unparseable' },
+    'the claude parser does not accept a codex envelope');
+});
+
+// The enum, restated locally for the fixture guard above so that the guard does not depend on the
+// module it is guarding — a self-check that imports its own subject can be talked out of failing.
+const VERDICTS_IN_FIXTURE = ['needs-decision', 'offer-more', 'status-only'];
+
+// ================================================================================================
+// AC2d — nesting is genuinely walked, at any key, through arrays, to a bounded depth
+//
+// The fixture pins ONE real shape. This pins the RULE, because the codex event vocabulary moves
+// between CLI versions and the next one may nest differently. Nothing here may depend on the key
+// being called `item` or `text` — if it did, the parser would be keyed on a vocabulary again, which
+// is the failure mode the recursion exists to avoid.
+// ================================================================================================
+test('AC2d - the scan finds an answer at any key, inside arrays, up to the depth bound and no further', async () => {
+  _resetClassifyState();
+  const answer = { verdict: 'needs-decision', reason: 'asked a direct question' };
+  const expected = { verdict: 'needs-decision', reason: 'asked a direct question' };
+  const line = (o) => JSON.stringify(o);
+  const read = (stdout) => readVerdict(stdout, 'codex');
+
+  // Depth 3, under keys nobody would guess, proving the key is not load-bearing.
+  assert.deepEqual(read(line({
+    type: 'fixture.event', fixture_outer: { fixture_middle: { fixture_inner: JSON.stringify(answer) } },
+  })), expected, 'depth 3 under arbitrary key names');
+
+  // Inside arrays, including an array of objects — a plausible shape for a multi-part message.
+  assert.deepEqual(read(line({ type: 'fixture.event', parts: [JSON.stringify(answer)] })), expected, 'a string inside an array');
+  assert.deepEqual(read(line({
+    type: 'fixture.event',
+    content: [{ kind: 'reasoning', body: 'thinking about it' }, { kind: 'final', body: JSON.stringify(answer) }],
+  })), expected, 'an array of objects, answer in the last');
+  assert.deepEqual(read(line({ type: 'fixture.event', a: [[[JSON.stringify(answer)]]] })), expected, 'nested arrays');
+
+  // LAST hit wins, even when the earlier one is deeper or shallower than the later one.
+  assert.deepEqual(read(line({
+    first: { text: JSON.stringify({ verdict: 'status-only', reason: 'an earlier answer' }) },
+    second: JSON.stringify(answer),
+  })), expected, 'the last valid verdict wins regardless of nesting depth');
+
+  // THE DEPTH BOUND IS REAL. It is a cost guard, not decoration: this runs on a 60-second sweep over
+  // every blocked session, and an unbounded walk over an untrusted-ish envelope is a bill.
+  const nest = (n) => { let o = JSON.stringify(answer); for (let i = 0; i < n; i++) o = { deeper: o }; return JSON.stringify(o); };
+  assert.deepEqual(read(nest(2)), expected, 'well inside the bound');
+  assert.deepEqual(read(nest(7)), expected, 'at the deepest level the bound admits');
+  assert.deepEqual(read(nest(8)), { verdict: 'unknown', reason: 'unparseable' }, 'and one level past it is not found');
+
+  // A cyclic or absurdly deep structure must not hang or throw — it simply does not answer.
+  const deep = nest(50);
+  let threw = null;
+  try { assert.deepEqual(read(deep), { verdict: 'unknown', reason: 'unparseable' }); } catch (e) { threw = e; }
+  assert.equal(threw, null, 'a runaway structure is bounded, never an exception');
+
+  // ---- THE NEGATIVES STILL HOLD AT DEPTH ------------------------------------------------------
+  // Walking deeper must not make the parser more credulous. Everything the shallow scan refused,
+  // the deep scan must still refuse — otherwise the fix traded a false `unknown` for a false answer,
+  // which is the far worse direction (principle 2: a wrong verdict SUPPRESSES a real question).
+  const nestedNotAnswers = [
+    ['a model-authored unknown, nested', line({ e: { item: { text: JSON.stringify({ verdict: 'unknown', reason: 'I cannot tell' }) } } })],
+    ['prose, nested', line({ e: { item: { text: 'I think this is needs-decision, probably.' } } })],
+    ['reasoning chatter naming the enum, nested', line({ e: { item: { type: 'reasoning', text: 'weighing needs-decision against offer-more' } } })],
+    ['a verdict with no reason, nested', line({ e: { item: { text: JSON.stringify({ verdict: 'needs-decision' }) } } })],
+    ['a non-string reason, nested', line({ e: { item: { text: JSON.stringify({ verdict: 'needs-decision', reason: 7 }) } } })],
+    ['an out-of-enum verdict, nested', line({ e: { item: { text: JSON.stringify({ verdict: 'maybe', reason: 'r' }) } } })],
+    ['an array where an object was asked for, nested', line({ e: { item: { text: JSON.stringify(['needs-decision']) } } })],
+    ['the enum appearing as a bare nested string', line({ e: { item: { text: 'needs-decision' } } })],
+    ['an error event carrying enum-shaped prose', line({ type: 'item.completed', item: { type: 'error', message: 'expected one of needs-decision, offer-more' } })],
+  ];
+  for (const [name, stdout] of nestedNotAnswers) {
+    assert.deepEqual(read(stdout), { verdict: 'unknown', reason: 'unparseable' }, name);
+  }
+
+  // And the claude parser is unaffected by any of it — it reads its own envelope and nothing else.
+  assert.deepEqual(readVerdict(line({ e: { item: { text: JSON.stringify(answer) } } }), 'claude'),
+    { verdict: 'unknown', reason: 'unparseable' });
+});
+
+// ================================================================================================
 // AC3 — the pinned digest
 // ================================================================================================
 test('AC3 - CLASSIFIER_VERSION is sha256(provider + model + effort + prompt + transport), space-joined, first 12 hex', () => {
