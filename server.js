@@ -564,6 +564,11 @@ const httpServer = http.createServer((req, res) => {
   // 404s, the defensive load path skips the feature, and it ships dark with its flag reading on.
   if (u.pathname === '/menuparse.js') return serveStatic(req, res, 'menuparse.js');
   if (u.pathname === '/git.js') return serveStatic(req, res, 'git.js');
+  // p9 inbox. Served like radar.js — whether or not RADAR_ENABLED is set, because a static file that
+  // answers 404 half the time is a confusing way to say "off". With radar disabled the tab simply
+  // finds no /api/radar/inbox and says so. There is no fallback route here: without this line the
+  // module 404s and the feature ships dark.
+  if (u.pathname === '/inbox.js') return serveStatic(req, res, 'inbox.js');
   if (u.pathname === '/sw.js') return serveStatic(req, res, 'sw.js');
   if (u.pathname === '/manifest.webmanifest') return serveStatic(req, res, 'manifest.webmanifest');
   if (u.pathname === '/icon-180.png') return serveStatic(req, res, 'icon-180.png');
