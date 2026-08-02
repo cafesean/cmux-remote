@@ -255,12 +255,14 @@ test('preview mints every plan field; hash is beside the plan, computed over the
   assert.deepStrictEqual(onDisk, r.body);
 });
 
-test('workdir: exactly one repo -> its configured path; two or more -> polyrepoRoot; missing dir -> 422', async () => {
+test('workdir: ALWAYS polyrepoRoot — one repo, many repos, no exceptions; missing dir -> 422', async () => {
+  // Owner decision 2026-08-02: every session runs from the polyrepo root so all transcripts land
+  // in ONE project folder. A per-repo workdir would scatter them; the seed names the repo instead.
   const w = world();
   // NOTE: §6.1 escapes ONLY `%` and `:`; a branch slash stays literal, so the selector is
   // branch:repoA:feature/x (the `%2F` in §4.2's example key is illegal under §6.1's own decoder).
   const one = await w.api.preview({ selectors: ['branch:repoA:feature/x'] });
-  assert.strictEqual(one.body.plan.workdir, w.dir);              // repoA's configured path
+  assert.strictEqual(one.body.plan.workdir, w.cfg.polyrepoRoot, 'single repo STILL dispatches from polyrepoRoot');
   const two = await w.api.preview({ selectors: ['epic:PROJ-2'] }); // spans repoA + repoB
   assert.strictEqual(two.body.plan.workdir, w.cfg.polyrepoRoot);
   const twoSingles = await w.api.preview({ selectors: ['branch:repoA:feature/x', 'branch:repoB:feature/z'] });
