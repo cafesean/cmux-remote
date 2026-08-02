@@ -4,8 +4,12 @@
 // `/app.js` is NETWORK-FIRST so code changes land in a SINGLE reload — cache-first here made every deploy
 // "one launch behind" (the query ?v= is ignored by cache matching), which looked like changes not taking.
 // It falls back to cache only when offline. /api/* is never touched — grids/streams stay fully live.
-const CACHE = 'cmux-shell-v14';
-const SHELL = ['/', '/app.js', '/radar.js'];
+// Shell entries are BARE PATHNAMES — never `?v=`. The fetch branch below strips every request to
+// `url.pathname` and cache-matches by that, so a query-bearing precache key would leave nothing the
+// pathname fallback could find and the first offline load would 503. The versioned tags live in
+// index.html alone, and they still bust caches because this CACHE version bumps with them.
+const CACHE = 'cmux-shell-v15';
+const SHELL = ['/', '/app.js', '/radar.js', '/inbox.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -26,9 +30,11 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
   const path = url.pathname === '/index.html' ? '/' : url.pathname;
 
-  // app.js + radar.js: network-first → the freshest code every reload; cache is only the offline
-  // fallback. Cache-first here made every deploy "one launch behind".
-  if (path === '/app.js' || path === '/radar.js') {
+  // app.js + radar.js + inbox.js: network-first → the freshest code every reload; cache is only the
+  // offline fallback. Cache-first here made every deploy "one launch behind". Precaching a script
+  // WITHOUT listing it here leaves the copy sitting unused in Cache Storage — this branch is the only
+  // thing that ever reads it.
+  if (path === '/app.js' || path === '/radar.js' || path === '/inbox.js') {
     e.respondWith(
       fetch(new Request(path, { cache: 'no-store' }))
         .then((r) => putCache(path, r))

@@ -409,6 +409,9 @@
          did not mount, so a missing/broken radar leaves no dead control behind. -->
     <button class="icon" id="gitBtn" aria-pressed="false" aria-label="Source control" title="Source control">⎇</button>
     <button class="icon" id="radarBtn" aria-pressed="false" aria-label="Radar" title="Radar">◎</button>
+    <!-- Inbox (p9). Same toolbar, same contract as Radar: removed at boot if inbox.js did not
+         mount, so a missing/broken inbox leaves no dead control behind. -->
+    <button class="icon" id="inboxBtn" aria-pressed="false" aria-label="Inbox" title="Inbox">✉</button>
     <button class="icon" id="settingsBtn" aria-haspopup="menu" aria-expanded="false" aria-label="Settings" title="Settings">⚙</button>
     <button class="icon" id="refresh" aria-label="Refresh">⟳</button>
   </header>
@@ -563,6 +566,12 @@
   <script src="/menuparse.js?v=v1-p7-20260801a"></script>
   <script src="/git.js?v=v1-p7-20260801a"></script>
   <script src="/radar.js?v=v1-p5radar-20260731a"></script>
+  <!-- p9 inbox. Loaded BEFORE app.js so window.cmuxInbox exists when app boot runs, and versioned
+       HERE ONLY: sw.js precaches the BARE /inbox.js and its fetch branch matches by pathname, so a
+       query-bearing cache key would leave the offline fallback nothing to find. The ?v= still busts
+       caches because the sw cache version bumps with it. If it 404s, app.js renders no inbox chip
+       and the terminal mirror is untouched. -->
+  <script src="/inbox.js?v=v1-p9inbox-20260802a"></script>
   <script src="/app.js?v=v16-p7-20260801b"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
 </body>

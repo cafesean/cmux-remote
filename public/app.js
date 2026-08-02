@@ -34,7 +34,7 @@
   const $ = (id) => document.getElementById(id);
   const elTabs = $('tabs'), elPanes = $('panes'), elEmpty = $('empty'), elStatus = $('status'), elJump = $('jump');
   const elText = $('text'), elSend = $('send'), elRefresh = $('refresh'), elFilesBtn = $('filesBtn');
-  const elRadarBtn = $('radarBtn');
+  const elRadarBtn = $('radarBtn'), elInboxBtn = $('inboxBtn');
   const elWsChip = $('wsChip'), elWsLabel = $('wsLabel'), elHost = $('hostLabel'), elWsMenu = $('wsMenu');
   const elKeys = $('keys'), elKbToggle = $('kbToggle'), elHint = $('hint');
   const elModeCompose = $('modeCompose'), elModeLive = $('modeLive');
@@ -94,6 +94,9 @@
   // p5 radar. Declared up here (not at its section) so renderTabs can test it without a TDZ risk.
   // It stays null unless radar.js loaded AND created cleanly — that null is the entire kill switch.
   let radarUI = null;
+  // p9 inbox, same contract and same reason: renderTabs/syncFilesBtn read it, and a null here means
+  // the feature is simply absent.
+  let inboxUI = null;
 
   function gate(msg, showToken) {
     const g = $('gate'); g.replaceChildren(); g.style.flexDirection = 'column';
@@ -426,7 +429,7 @@
       // whose status changes upstream (a session starts running, a tab is added) silently closes
       // Radar or Files mid-read — on a live board that is every few seconds. Track the resolved
       // tab so leaving lands on the right surface, but do not switch to it now.
-      const owned = state.tabType === 'radar' || state.tabType === 'files' || state.tabType === 'viewer';
+      const owned = state.tabType === 'radar' || state.tabType === 'inbox' || state.tabType === 'files' || state.tabType === 'viewer';
       if (!state.tab || state.tab.id !== keep.id) {
         if (owned) state.tab = { id: keep.id, ref: keep.ref };
         else selectTab(keep.id);
@@ -571,8 +574,16 @@
     elRadarBtn.setAttribute('aria-pressed', inRadar ? 'true' : 'false');
     elRadarBtn.title = inRadar ? 'Hide radar' : 'Radar';
   }
+  // The inbox chip carries its own on/off state too — same toolbar, same contract.
+  function syncInboxBtn() {
+    if (!elInboxBtn) return;
+    const inInbox = state.tabType === 'inbox';
+    elInboxBtn.setAttribute('aria-pressed', inInbox ? 'true' : 'false');
+    elInboxBtn.title = inInbox ? 'Hide inbox' : 'Inbox';
+  }
   function syncFilesBtn() {
     syncRadarBtn();
+    syncInboxBtn();
     if (!elFilesBtn) return;
     const inFiles = state.tabType === 'files' || state.tabType === 'viewer';
     elFilesBtn.setAttribute('aria-pressed', inFiles ? 'true' : 'false');
@@ -586,6 +597,7 @@
     // that is mirroring perfectly well underneath — indistinguishable from "the tab didn't switch".
     exitFilesMode();
     exitRadarMode();
+    exitInboxMode();
     const isBrowser = t.type === 'browser';
     const sameTab = state.tab && state.tab.id === id;
     state.tab = { id: t.id, ref: t.ref };
@@ -1965,6 +1977,7 @@
       exitFilesMode();
       if (state.browser && state.browser.surface) exitBrowserMode();
       exitRadarMode();
+      exitInboxMode();
       teardownPanes();
       setStatus('');
       state.tabType = 'git';
@@ -2547,6 +2560,50 @@
   if (!gitUI && elGitBtn && elGitBtn.parentNode) elGitBtn.remove();
   if (gitUI && elGitBtn) elGitBtn.onclick = (e) => { e.stopPropagation(); toggleGit(); };
 
+  // ---- Inbox tab (p9, S-008) -------------------------------------------------
+  // The same defensive mount, for the same reason. jget/jpost are private to this IIFE, so the
+  // factory injection below is the ONLY way the inbox can reach the API — there is no other seam.
+  // If /inbox.js 404s (no route, stale cache) or throws in create(), inboxUI stays null, the chip is
+  // removed, and the terminal mirror is untouched.
+  try {
+    if (window.cmuxInbox && typeof window.cmuxInbox.create === 'function') {
+      inboxUI = window.cmuxInbox.create({
+        mount: $('wrap'),
+        jget, jpost, promptToken,
+        onJump: radarJump,
+      });
+    }
+  } catch (e) { inboxUI = null; if (window.console) console.error('inbox failed to mount', e); }
+  if (!inboxUI && elInboxBtn && elInboxBtn.parentNode) elInboxBtn.remove();
+  if (inboxUI && elInboxBtn) elInboxBtn.onclick = (e) => { e.stopPropagation(); toggleInbox(); };
+
+  function toggleInbox() {
+    if (!inboxUI) return;
+    if (state.tabType === 'inbox') {
+      // Leaving goes back through selectTab so the terminal resumes polling — opening the inbox
+      // stopped it, and merely hiding the pane would leave a frozen mirror underneath.
+      if (state.tab && findTab(state.tab.id)) return selectTab(state.tab.id);
+      exitInboxMode(); renderTabs(); return;
+    }
+    try {
+      exitFilesMode();
+      if (state.browser && state.browser.surface) exitBrowserMode();
+      exitRadarMode();
+      exitGitMode();
+      teardownPanes();
+      setStatus('');
+      state.tabType = 'inbox';
+      inboxUI.open();
+    } catch (e) { state.tabType = 'terminal'; if (window.console) console.error('inbox open failed', e); }
+    renderTabs();
+  }
+
+  function exitInboxMode() {
+    if (!inboxUI) return;
+    try { inboxUI.close(); } catch (_) {}
+    if (state.tabType === 'inbox') state.tabType = 'terminal';
+  }
+
   function toggleRadar() {
     if (!radarUI) return;
     if (state.tabType === 'radar') {
@@ -2558,6 +2615,7 @@
     try {
       exitFilesMode();
       if (state.browser && state.browser.surface) exitBrowserMode();
+      exitInboxMode();
       // This called the poll-stopper that the multi-pane merge deleted; teardownPanes() is its
       // replacement. Opening radar must stop the mirror, or a frozen terminal sits underneath.
       teardownPanes();
@@ -2691,6 +2749,7 @@
     document.body.classList.toggle('mode-fview', which === 'viewer');
     if (which === 'files' || which === 'viewer') {
       exitRadarMode();
+      exitInboxMode();
       // teardownPanes() is the multi-pane replacement for the old poll-stopper — same job, stop
       // mirroring. The old function no longer exists, so calling it here would throw.
       teardownPanes();
