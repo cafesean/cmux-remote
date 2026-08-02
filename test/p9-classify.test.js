@@ -1066,3 +1066,68 @@ test('DoD - no test in this file can reach the network: the default transport is
   assert.equal(captured[0].body, '{"x":1}');
   assert.ok(captured[0].signal, 'every attempt carries an AbortController signal');
 });
+
+// ================================================================================================
+// CARRIED INTENT — a row does not always arrive blank, and last turn's verdict must never survive
+//
+// `mod-sessions`' events-outage branch carries the previous published rows forward wholesale, and
+// `collector.js :: fragmentsFromState` replays `state.sessions` verbatim after a module throw.
+// Published rows carry `intent`, because `derive` publishes the fragment array as `state.sessions`.
+// So the stage is genuinely handed rows that already hold a verdict from a PRIOR turn.
+//
+// Every deadline fixture above builds a fresh row with no `intent`, which is exactly the blind spot
+// this section exists to cover: with a carried verdict present, the deadline's final `if (!s.intent)`
+// sweep finds it truthy and leaves it standing beside a `lastAssistant` that is already the NEW
+// question. A carried `offer-more` then fails §5.4 rule 3 and the row is dropped — a question the
+// operator asked for, silently suppressed. That is principle 2 inverted.
+// ================================================================================================
+test('a carried suppressing intent never survives the stage - deadline, live verdict, and no-credential', async (t) => {
+  // 1 — THE SUPPRESSION CASE. Carried `offer-more`, a NEW question on disk, classification hangs
+  //     past the deadline. The verdict must be `deadline`, never the carried one.
+  t.mock.timers.enable({ apis: ['setTimeout'], now: NOW });
+  _resetClassifyState();
+  const dir = tmpdir();
+  const http = gatedHttp();                                   // never settles on its own
+  const row = blocked(dir, { sessionId: 'fixture-inbox-carry-1', text: QUESTION });
+  row.intent = { verdict: 'offer-more', reason: 'fixture prior turn', model: 'fixture-model', at: TS, inferred: true };
+
+  const stage = classifyBlocked([row], baseDeps({ http, cachePath: path.join(dir, 'intent-cache.json') }));
+  assert.ok(await until(() => http.calls.length === 1), 'the classification is in flight');
+  t.mock.timers.tick(CLASSIFY_DEADLINE_MS);
+  await stage;
+
+  assert.deepEqual(row.intent, { verdict: 'unknown', reason: 'deadline', model: null, at: NOW_ISO, inferred: true },
+    'the carried offer-more is gone; the deadline owns the verdict');
+  assert.deepEqual(row.lastAssistant, { text: QUESTION, ts: TS }, 'and the NEW question is published beside it');
+  t.mock.timers.reset();
+
+  // 2 — the ordinary path still overwrites: a carried verdict loses to this sweep's live answer.
+  _resetClassifyState();
+  const dir2 = tmpdir();
+  const live = alwaysOk('needs-decision', 'fixture live reason');
+  const row2 = blocked(dir2, { sessionId: 'fixture-inbox-carry-2', text: QUESTION });
+  row2.intent = { verdict: 'offer-more', reason: 'fixture prior turn', model: 'fixture-model', at: TS, inferred: true };
+  await classifyBlocked([row2], baseDeps({ http: live, cachePath: path.join(dir2, 'intent-cache.json') }));
+  assert.equal(row2.intent.verdict, 'needs-decision', 'this sweep answered, so this sweep wins');
+  assert.equal(row2.intent.reason, 'fixture live reason');
+
+  // 3 — and the no-credential exit, which returns before the cache is even read, still clears it.
+  //     Without the clear this path is safe by luck (it assigns unconditionally); asserting it
+  //     keeps that luck from quietly becoming the only reason the case passes.
+  _resetClassifyState();
+  const dir3 = tmpdir();
+  const row3 = blocked(dir3, { sessionId: 'fixture-inbox-carry-3', text: QUESTION });
+  row3.intent = { verdict: 'status-only', reason: 'fixture prior turn', model: 'fixture-model', at: TS, inferred: true };
+  await classifyBlocked([row3], baseDeps({ env: {}, cachePath: path.join(dir3, 'intent-cache.json') }));
+  assert.deepEqual(row3.intent, { verdict: 'unknown', reason: 'no credential', model: null, at: NOW_ISO, inferred: true });
+
+  // 4 — a NON-blocked carried row is returned untouched (§5.2.6), so the clear must not reach it.
+  _resetClassifyState();
+  const dir4 = tmpdir();
+  const idle = blocked(dir4, { sessionId: 'fixture-inbox-carry-4', status: 'idle' });
+  const keep = { verdict: 'offer-more', reason: 'fixture prior turn', model: 'fixture-model', at: TS, inferred: true };
+  idle.intent = keep;
+  const alive = blocked(dir4, { sessionId: 'fixture-inbox-carry-5', text: QUESTION });
+  await classifyBlocked([idle, alive], baseDeps({ http: alwaysOk('needs-decision'), cachePath: path.join(dir4, 'intent-cache.json') }));
+  assert.deepEqual(idle.intent, keep, 'non-blocked sessions are returned untouched, carried intent included');
+});

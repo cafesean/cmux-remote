@@ -431,7 +431,24 @@ async function classifyBlocked(sessions, deps) {
   // Step 1, for every blocked session, ALWAYS — hit, miss, or no credential at all. Hoisted out of
   // the pool because it is synchronous and bounded (§5.2.1 reads at most 256 KB) and because a
   // session whose pool task never starts must still publish honest `lastAssistant` data.
-  for (const s of blocked) s.lastAssistant = readLastAssistantText(s.transcriptPath) || null;
+  //
+  // THE STALE INTENT IS CLEARED HERE, AND THAT LINE IS LOAD-BEARING. Rows do not always arrive
+  // blank: `mod-sessions`' events-outage branch carries the previous published rows forward
+  // wholesale, and `collector.js :: fragmentsFromState` replays `state.sessions` verbatim after a
+  // module throw — and published rows carry `intent`, because `derive` publishes the fragment
+  // array as `state.sessions`. A carried verdict is last turn's answer, not this stage's.
+  //
+  // Without the clear, the deadline's final `if (!s.intent)` sweep sees a carried `offer-more`,
+  // finds it truthy, and leaves it standing next to a `lastAssistant` that is already the NEW
+  // question. §5.4 rule 3 admits only `needs-decision` and `unknown`, so the row is dropped and the
+  // operator never sees a question that was genuinely asked — principle 2 inverted, silently, for
+  // as long as both degradations last. Clearing first makes every exit path re-attach: no
+  // credential overwrites unconditionally, `resolveOne` attaches, and the deadline sweep covers the
+  // rest. Losing a valid carried verdict costs an `unknown`, which is SHOWN — the safe direction.
+  for (const s of blocked) {
+    s.lastAssistant = readLastAssistantText(s.transcriptPath) || null;
+    delete s.intent;
+  }
 
   // PRECEDENCE. Before any network or cache decision. See the block comment at the top.
   const credential = resolveCredential(d.config, env);
