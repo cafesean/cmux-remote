@@ -590,21 +590,102 @@ function cmuxStream(req, res, surface) {
 }
 
 // ---------- input (addressed by surface) ------------------------------------
-// POST /cmux/send { surface, text, submit } — type text into a tab, optionally press enter to submit.
+// POST /cmux/send { surface, text, submit, expect_seq? } — type text into a tab, optionally press
+// enter to submit. Typing into a terminal is a BLIND WRITE, so this route owes its callers three
+// things the first version did not give them:
+//
+//  1. PER-SURFACE SERIALIZATION OF EVERY SEND. All /cmux/send work for one surface — with or
+//     without expect_seq — queues through one promise chain, so a check-then-write pair can never
+//     be interleaved by another send for the same surface. Serializing only the preconditioned
+//     sends would leave an unguarded legacy call free to land between a check and its write, which
+//     is exactly the race the precondition exists to close.
+//  2. A SEQ PRECONDITION THAT FAILS CLOSED. expect_seq is compared, inside the serialized section,
+//     against the ENVELOPE seq of a fresh grid read taken through the same gridPayload path
+//     /cmux/grid serves. (`grid.state_seq` is a phantom field that is never present on real data;
+//     it is never read here.) A seq that cannot be re-read is answered `seq_unavailable`, never
+//     waved through — an unverifiable precondition is not a satisfied one.
+//  3. PHASE-DISTINCT WRITE FAILURES. "Nothing was typed" may only be claimed when it is provable,
+//     and it is provable in exactly one case: the text command's child never started. Every later
+//     failure — timeout, signal, nonzero exit, late error — leaves the terminal side effect
+//     unproved and must say so instead of lying to the operator. The blanket `cmux_failed` is gone
+//     from this route.
+const SEND_CHAINS = new Map();
+// The per-surface queue. `fn` runs only once every earlier send for this surface has settled; a
+// rejection never poisons the chain, and the key is dropped when the queue drains so a long-lived
+// bridge does not accumulate one entry per surface it has ever written to.
+function serializeSend(surface, fn) {
+  const prev = SEND_CHAINS.get(surface) || Promise.resolve();
+  const done = prev.then(fn);
+  const settled = done.then(() => {}, () => {});
+  SEND_CHAINS.set(surface, settled);
+  settled.then(() => { if (SEND_CHAINS.get(surface) === settled) SEND_CHAINS.delete(surface); });
+  return done;
+}
+// The same 8 s budget the shared cmux() runner applies. Overridable ONLY so the post-dispatch
+// timeout branch is exercisable in milliseconds rather than eight seconds; unset in production.
+const SEND_CMD_TIMEOUT_MS = Number(process.env.CMUX_SEND_TIMEOUT_MS) || 8000;
+// Run one cmux command for this route and report WHICH PHASE a failure belongs to.
+//
+// The discriminator is structural, never a match on the error message: Node assigns
+// `subprocess.pid` synchronously when uv_spawn succeeds and leaves it `undefined` when the spawn
+// itself fails (the ENOENT/EACCES class), and the callback always fires after execFile() has
+// returned. So `pid === undefined` is the one state that PROVES no child ever ran; anything else is
+// a child that started and may have written before it died. A flag retry (adaptArgs, mirroring
+// cmux()) carries `dispatched` forward — once any attempt has started a child, no later attempt is
+// allowed to claim nothing happened. cb(null) on success, cb({dispatched, detail}) on failure.
+function runSendCommand(args, cb, dispatched, tries) {
+  const child = execFile(CMUX_BIN, args, { timeout: SEND_CMD_TIMEOUT_MS, env: CMUX_ENV, maxBuffer: 8 * 1024 * 1024 },
+    (err, stdout, stderr) => {
+      const started = dispatched || child.pid !== undefined;
+      const m = err && (tries || 0) < 3 && String(stderr || '').match(/unknown flag '(--[a-z-]+)'/);
+      if (m) {
+        const next = adaptArgs(args, m[1]);
+        if (next) return runSendCommand(next, cb, started, (tries || 0) + 1);
+      }
+      cb(err ? { dispatched: started, detail: String(stderr || err.message || err).slice(0, 200) } : null);
+    });
+}
+const runSendCommandP = (args) => new Promise((resolve) => runSendCommand(args, resolve, false, 0));
+
 function cmuxSend(req, res) {
   cmuxReadBody(req, (b) => {
     if (!b) return send(res, 400, { error: 'bad_json' });
     const surface = String(b.surface || '');
     if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
+    // OWN-PROPERTY presence, not truthiness (expect_seq 0 is a legitimate precondition). A PRESENT
+    // expect_seq that is not a finite JSON number — string, null, object, array, NaN, and the
+    // Infinity a 1e999 literal parses to — is rejected HERE: before any grid read and before the
+    // queue. Treating invalid-present as absent would silently drop the precondition; comparing it
+    // would fabricate a seq_changed. bad_json is the code the reply route already reads as
+    // provably-pre-typing.
+    const wants = Object.prototype.hasOwnProperty.call(b, 'expect_seq');
+    if (wants && !Number.isFinite(b.expect_seq)) return send(res, 400, { error: 'bad_json' });
     const text = typeof b.text === 'string' ? b.text : '';
-    const run = (args) => new Promise((resolve, reject) => cmux(args, (e) => (e ? reject(e) : resolve())));
-    (async () => {
-      try {
-        if (text) await run(['send', '--surface', surface, '--', text]);   // argv (no shell) → no injection
-        if (b.submit) await run(['send-key', '--surface', surface, '--', 'enter']);
-        send(res, 200, { ok: true });
-      } catch (e) { send(res, 502, { error: 'cmux_failed', detail: String((e && e.message) || e).slice(0, 200) }); }
-    })();
+    let replied = false;
+    const answer = (code, body) => { if (replied) return; replied = true; send(res, code, body); };
+    serializeSend(surface, async () => {
+      if (wants) {
+        const cur = await new Promise((resolve) => gridPayload(surface, resolve));
+        // gridPayload's real failure shapes are `null` and the plain-text fallback, which carries no
+        // envelope seq at all. Neither can verify the precondition, so neither may pass it.
+        if (!cur || !Number.isFinite(cur.seq)) return answer(409, { error: 'seq_unavailable' });
+        if (cur.seq !== b.expect_seq) return answer(409, { error: 'seq_changed', seq: cur.seq });
+      }
+      if (text) {
+        const e = await runSendCommandP(['send', '--surface', surface, '--', text]);   // argv (no shell) → no injection
+        // The one provable case, and everything else. Enter is never attempted after either.
+        if (e) return answer(502, { error: e.dispatched ? 'text_command_unconfirmed' : 'send_failed', detail: e.detail });
+      }
+      if (b.submit) {
+        const e = await runSendCommandP(['send-key', '--surface', surface, '--', 'enter']);
+        if (e) return answer(502, { error: 'submit_failed_text_inserted', detail: e.detail });
+      }
+      answer(200, { ok: true });
+    }).catch((e) => {
+      // An unexpected throw cannot prove where it landed, so it takes the unproved answer — the
+      // conservative direction, since the caller treats it as "check the tab", never as a retry.
+      answer(502, { error: 'text_command_unconfirmed', detail: String((e && e.message) || e).slice(0, 200) });
+    });
   });
 }
 
