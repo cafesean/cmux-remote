@@ -17,7 +17,8 @@
     "bridge": "node bridge.js",
     "server": "node server.js",
     "radar": "node radar/radar-cli.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:eval:inbox": "node scripts/eval-inbox.mjs"
   },
   "keywords": [
     "cmux",
