@@ -271,8 +271,10 @@ test('AC2: an absolute home path in an entry text refuses the run and names the 
 test('AC2: every forbidden shape is detected, and none of them fires on the shipped corpus', async () => {
   const { FORBIDDEN_PATTERNS, checkPreconditions } = await evalMod();
   const names = FORBIDDEN_PATTERNS.map(([n]) => n);
-  // The set is the story's list plus B1's fixed owner-identifier patterns.
-  for (const n of ['uuid', 'session-url', 'home-path', 'issue-key', 'owner-name', 'codename', 'machine-name', 'infra-id', 'email', 'credential']) {
+  // The STRUCTURAL set — shapes that identify regardless of who owns the machine. Owner-specific
+  // words are deliberately absent from this file and from the script: they are derived at runtime
+  // (see the identity-term test below), so nothing identifying is committed to the repo.
+  for (const n of ['uuid', 'session-url', 'home-path', 'issue-key', 'infra-id', 'email', 'credential']) {
     assert.ok(names.includes(n), `no pattern named ${n}`);
   }
   // Each pattern is live: a constructed sample of its shape trips it, one at a time.
@@ -280,10 +282,7 @@ test('AC2: every forbidden shape is detected, and none of them fires on the ship
     uuid: SYNTHETIC_UUID,
     'session-url': 'https://claude.ai/code/session' + '/x',
     'home-path': '/Volumes/fixture-disk/work',
-    'issue-key': ['ABC', 'DEF'].join('').slice(0, 0) + 'CAD' + '-1234',
-    'owner-name': ['sean', 'liao'].join(''),
-    codename: ['cad', 'ra'].join(''),
-    'machine-name': ['mac', '-mini'].join(''),
+    'issue-key': ['ABC', '-1234'].join(''),
     'infra-id': ['prj', '_abc123def'].join(''),
     email: ['someone', '@', 'fixture-host.example'].join(''),
     credential: ['sk', '-ant-', 'fixture'].join(''),
@@ -296,6 +295,39 @@ test('AC2: every forbidden shape is detected, and none of them fires on the ship
     const p6 = v.checks.find((c) => c.id === 'P6');
     assert.match(p6.detail, new RegExp(`forbidden pattern ${name}\\b`), `${name}: P6 named the wrong pattern: ${p6.detail}`);
   }
+});
+
+test('AC2: identity terms are derived from the machine, and no owner word is written in the repo', async () => {
+  const { forbiddenPatterns } = await evalMod();
+
+  // Derived from env, from RADAR_PRIVACY_TERMS, and from git identity — none of it hardcoded.
+  const built = forbiddenPatterns(
+    { USER: 'fixtureowner', RADAR_PRIVACY_TERMS: 'acmecorp, widgetco' },
+    (key) => (key === 'user.name' ? 'Fixture Person' : 'fixture.person@fixture-host.example'),
+  );
+  const identity = built.find(([n]) => n === 'identity-term');
+  assert.ok(identity, 'no identity-term pattern when the machine supplied terms');
+  for (const term of ['fixtureowner', 'acmecorp', 'WIDGETCO', 'Fixture', 'person']) {
+    assert.ok(identity[1].test(`a corpus line mentioning ${term} inline`), `identity term not caught: ${term}`);
+  }
+
+  // A term under three characters is noise, not identity — it would flag half the corpus.
+  const short = forbiddenPatterns({ USER: 'ab', RADAR_PRIVACY_TERMS: 'x' }, () => null);
+  assert.ok(!short.some(([n]) => n === 'identity-term'), 'a 2-char term must not become a pattern');
+
+  // THE FAIL-OPEN GUARD. With nothing derivable the pattern is ABSENT, never an empty alternation —
+  // `new RegExp('')` matches every string, which would refuse every corpus on every line.
+  const bare = forbiddenPatterns({}, () => null);
+  assert.ok(!bare.some(([n]) => n === 'identity-term'), 'empty machine identity must not add a pattern');
+  assert.ok(!bare.some(([, re]) => re.test('an entirely invented sentence about a slot planner')),
+    'with no identity terms the structural patterns must still not fire on clean text');
+
+  // Structural coverage survives regardless of identity: a pasted real session is caught by shape.
+  assert.ok(bare.some(([, re]) => re.test('see /Users/someone/notes.md')), 'home-path must fire without identity terms');
+
+  // And the source itself carries no owner word — the property this whole change exists for.
+  const src = fs.readFileSync(SCRIPT, 'utf8');
+  assert.ok(!/\bfrag\s*\(/.test(src), 'the fragment-assembly helper is gone; identity is derived, not spelled');
 });
 
 // ---- AC 3 — the classifier is asserted BY PATH -----------------------------------------------------

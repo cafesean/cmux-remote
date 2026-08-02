@@ -83,26 +83,67 @@ export const EXIT_NO_CLASSIFIER = 3;
 
 export const ID_GRAMMAR = /^fixture-inbox-\d+$/;
 
-// Assembled from fragments, deliberately. This file is itself a blob the B1 hygiene sweep scans
-// with these very patterns — a literal owner name written here would make the eval script the hit
-// it exists to prevent. Each fragment is chosen so that no fragment matches on its own.
-const frag = (...parts) => parts.join('');
 const alt = (...parts) => parts.join('|');
+
+// NOTHING OWNER-SPECIFIC IS WRITTEN IN THIS FILE, and that is the point.
+//
+// An earlier version spelled the owner's name and the project codenames out in split fragments, so
+// the blob would not match its own scanner. That solved the wrong half of the problem: the
+// fragments still shipped, and a public repo carrying a labelled list of its owner's identifiers is
+// worse than the bare string, not better.
+//
+// The identity terms now come from the MACHINE AT RUNTIME, which is also just more correct — a
+// hardcoded list protects exactly one person and silently protects nobody else who runs the eval.
+// Whoever runs it is who it guards. Extra terms (codenames, company names, anything that must never
+// appear in an invented corpus) come from RADAR_PRIVACY_TERMS, comma-separated, so a site extends
+// the denylist without committing the words anywhere.
+const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function identityTerms(env, readGitConfig) {
+  const out = new Set();
+  const add = (v) => {
+    const s = String(v == null ? '' : v).trim();
+    if (s.length >= 3) out.add(s.toLowerCase());   // under 3 chars is noise, not identity
+  };
+  const e = env || {};
+  add(e.USER);
+  add(e.LOGNAME);
+  for (const t of String(e.RADAR_PRIVACY_TERMS || '').split(',')) add(t);
+  // Git identity, best effort and injectable. An eval run must never fail because git is missing or
+  // unconfigured — a smaller denylist is a worse check, not a broken one.
+  if (typeof readGitConfig === 'function') {
+    for (const key of ['user.name', 'user.email']) {
+      try {
+        const v = readGitConfig(key);
+        if (v) { add(v); for (const part of String(v).split(/[\s@.]+/)) add(part); }
+      } catch (_) { /* nothing to add */ }
+    }
+  }
+  return [...out];
+}
 
 // The shapes that are never invented. A corpus entry containing one of these did not come from
 // someone's imagination, whatever else it looks like.
-export const FORBIDDEN_PATTERNS = [
-  ['uuid', /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i],
-  ['session-url', /claude\.ai\/code\/session|\bsession_[A-Za-z0-9_-]{8,}/i],
-  ['home-path', /\/(Users|Volumes)\//],
-  ['issue-key', /\b(CAD|TRI|YMS)-\d+\b/],
-  ['owner-name', new RegExp(alt(frag('sean', 'liao'), frag('cafe', 'sean')), 'i')],
-  ['codename', new RegExp('\\b(' + alt(frag('cad', 'ra'), frag('cad', 'raos'), frag('yo', 'bo'), frag('yo', 'bolabs'), frag('jet', 'devs'), frag('qra', 'ved')) + ')\\b', 'i')],
-  ['machine-name', /\bmac-(max|mini)\b/i],
-  ['infra-id', /\b(prj|team)_[A-Za-z0-9]{6,}/],
-  ['email', /[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/],
-  ['credential', new RegExp(alt('gh[pousr]_[A-Za-z0-9]{20,}', 'xox[baprs]-', 'AKIA[0-9A-Z]{16}', frag('sk', '-ant-'), frag('gl', 'pat-'), 'BEGIN [A-Z ]*PRIVATE KEY'))],
-];
+export function forbiddenPatterns(env, readGitConfig) {
+  const patterns = [
+    ['uuid', /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i],
+    ['session-url', /claude\.ai\/code\/session|\bsession_[A-Za-z0-9_-]{8,}/i],
+    ['home-path', /\/(Users|Volumes)\//],
+    // Any tracker key shape, not an enumerated list of this project's own prefixes.
+    ['issue-key', /\b[A-Z]{2,5}-\d+\b/],
+    ['infra-id', /\b(prj|team)_[A-Za-z0-9]{6,}/],
+    ['email', /[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/],
+    ['credential', new RegExp(alt('gh[pousr]_[A-Za-z0-9]{20,}', 'xox[baprs]-', 'AKIA[0-9A-Z]{16}', 'sk' + '-ant-', 'gl' + 'pat-', 'BEGIN [A-Z ]*PRIVATE KEY'))],
+  ];
+  const terms = identityTerms(env === undefined ? process.env : env, readGitConfig);
+  // Only added when the machine actually yielded something: an empty alternation compiles to a
+  // regex matching the empty string, which would refuse every corpus on every line.
+  if (terms.length) patterns.push(['identity-term', new RegExp(alt(...terms.map(reEscape)), 'i')]);
+  return patterns;
+}
+
+// The default, machine-derived set.
+export const FORBIDDEN_PATTERNS = forbiddenPatterns();
 
 // ---- the precondition layer ---------------------------------------------------------------------
 // Pure, synchronous, offline, and separately importable: it takes the corpus file's TEXT and
