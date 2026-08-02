@@ -9,3 +9,7 @@ config.json
 
 # agent worktrees — never committed
 .claude/
+
+# acceptance evidence stays local: real-machine captures (process listings, absolute paths)
+# do not belong in a public tree. run.sh scripts still write here; the durable copy is external.
+_specs/p6-handoff/evidence/

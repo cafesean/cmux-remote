@@ -82,7 +82,7 @@ test('the three fixtures really are full / degraded / empty', () => {
   assert.deepStrictEqual(empty.epics, []);
   assert.deepStrictEqual(empty.attention, []);
   assert.deepStrictEqual(empty.repos, {});
-  assert.deepStrictEqual(empty.counts, { blocked: 0, decisions: 0, mergeable: 0, orphans: 0, staleWorktrees: 0 });
+  assert.deepStrictEqual(empty.counts, { blocked: 0, decisions: 0, mergeable: 0, orphans: 0, staleWorktrees: 0, handoffsLive: 0 });
 });
 
 test('the schema is LOAD-BEARING: plausible corruptions are rejected', () => {

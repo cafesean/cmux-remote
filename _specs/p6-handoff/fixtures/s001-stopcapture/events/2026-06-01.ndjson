@@ -1,0 +1,5 @@
+{"ts":1780272001000,"sessionId":"s001-stop-session","event":"UserPromptSubmit","cwd":"/tmp/p6fix/app-api"}
+{"ts":1780272002000,"sessionId":"s001-decoy-session","event":"Stop","cwd":"/tmp/p6fix/app-api"}
+{"ts":1780272003000,"sessionId":"s001-decoy-session","event":"UserPromptSubmit","cwd":"/tmp/p6fix/app-api"}
+{"ts":1780272004000,"sessionId":"s001-stop-session","event":"Stop","cwd":"/tmp/p6fix/app-api"}
+{"ts":1780272067000,"sessionId":"s001-stop-session","event":"Notification","notificationType":"idle_prompt","cwd":"/tmp/p6fix/app-api"}

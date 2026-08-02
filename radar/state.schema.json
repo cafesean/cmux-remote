@@ -5,7 +5,7 @@
   "description": "The versioned snapshot contract. Consumers (radar CLI, /api/radar/state, the Radar tab, external brief consumers) read ONLY this shape. Additive changes keep v:1; any removal or retype bumps v.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["v", "generatedAt", "collectorId", "machines", "sources", "counts", "repos", "epics", "sessions", "attention"],
+  "required": ["v", "generatedAt", "collectorId", "machines", "sources", "counts", "repos", "epics", "sessions", "attention", "handoffs", "handoffRecovery", "role"],
   "properties": {
     "v": { "const": 1 },
     "generatedAt": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T" },
@@ -20,19 +20,39 @@
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["blocked", "decisions", "mergeable", "orphans", "staleWorktrees"],
+      "required": ["blocked", "decisions", "mergeable", "orphans", "staleWorktrees", "handoffsLive"],
       "properties": {
         "blocked": { "type": "integer", "minimum": 0 },
         "decisions": { "type": "integer", "minimum": 0 },
         "mergeable": { "type": "integer", "minimum": 0 },
         "orphans": { "type": "integer", "minimum": 0 },
-        "staleWorktrees": { "type": "integer", "minimum": 0 }
+        "staleWorktrees": { "type": "integer", "minimum": 0 },
+        "handoffsLive": { "type": "integer", "minimum": 0, "description": "p6: handoffs.length — the ONE count p6 adds. Every p5 count is computed BEFORE suppression (spec §6.6)." }
       }
     },
     "repos": { "type": "object", "additionalProperties": { "$ref": "#/$defs/repo" } },
     "epics": { "type": "array", "items": { "$ref": "#/$defs/epic" } },
     "sessions": { "type": "array", "items": { "$ref": "#/$defs/session" } },
     "attention": { "type": "array", "items": { "$ref": "#/$defs/attention" } },
+    "handoffs": {
+      "type": "array",
+      "description": "p6 (spec §4.6): ONLY handoffs that hold fact keys — the live set. Terminal handoffs are absent entirely; they live in the ledger. Consumed by the derivation for suppression, never rendered.",
+      "items": { "$ref": "#/$defs/handoff" }
+    },
+    "handoffRecovery": {
+      "type": ["object", "null"],
+      "description": "p6 (spec §M4): ONE object for the WHOLE undecidable set, or null. No ids, no count, no array — REQUIRED so a consumer's `!== null` predicate can never fire on an omitted key (undefined !== null).",
+      "additionalProperties": false,
+      "required": ["token", "since"],
+      "properties": {
+        "token": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "since": { "type": "string" }
+      }
+    },
+    "role": {
+      "enum": ["leader", "viewer"],
+      "description": "p6 (spec §3): published from config.role by derive(); a viewer's OWN proxy overwrites it to \"viewer\" on the response — the only field the proxy rewrites. The tab renders no select affordance when it reads viewer."
+    },
     "jiraDrift": {
       "type": "array",
       "description": "Weekly digest material (spec §M4). NEVER an interrupt and never an attention item — a Jira status that git cannot corroborate belongs here, not on the board.",
@@ -41,6 +61,26 @@
   },
   "$defs": {
     "nullableString": { "type": ["string", "null"] },
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "selectors", "factKeys", "session"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": ["pending", "launching", "active", "quiet", "unconfirmed"],
+          "description": "The LIVE statuses only (spec §4.1.1). resolved/abandoned/discarded never appear here — a terminal handoff is absent from state.json."
+        },
+        "selectors": { "type": "array", "items": { "type": "string" } },
+        "factKeys": { "type": "array", "items": { "type": "string" }, "description": "The one suppression identity (spec §6.6)." },
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["machine", "sessionId"],
+          "properties": { "machine": { "type": "string" }, "sessionId": { "type": "string" } }
+        }
+      }
+    },
     "machine": {
       "type": "object",
       "additionalProperties": false,

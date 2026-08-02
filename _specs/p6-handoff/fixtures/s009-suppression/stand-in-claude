@@ -1,0 +1,15 @@
+#!/bin/bash
+# p6 fixture stand-in for the claude binary. Answers --version (preview validates the binary and
+# records claudeVersion into the plan) and otherwise idles as a real, killable process — without
+# touching ~/.claude or the network, and WITHOUT writing a transcript, so every commit settles 202.
+#
+# A BOUNDED LOOP, never `exec sleep`: exec replaces this process's argv, and the sessionUuid the
+# wrapper delivered via --session-id would vanish from the ps scan — breaking dispatch-set
+# liveness (identity leg) and the uuid-keyed kill. The loop keeps the original argv visible for
+# the process's whole life, and self-expires as a backstop if a proof's kill step is never reached.
+if [ "${1:-}" = "--version" ]; then
+  echo "2.1.220 (stand-in)"
+  exit 0
+fi
+i=0
+while [ "$i" -lt 600 ]; do sleep 1; i=$((i+1)); done

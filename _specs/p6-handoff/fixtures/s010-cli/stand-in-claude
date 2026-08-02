@@ -1,0 +1,13 @@
+#!/bin/bash
+# p6 fixture stand-in for the claude binary. Answers --version (preview validates the binary and
+# records claudeVersion into the plan) and otherwise waits as a real, killable process — so a
+# dispatch exists without ever touching ~/.claude or the network.
+if [ "${1:-}" = "--version" ]; then
+  echo "2.1.220 (stand-in)"
+  exit 0
+fi
+# A bounded WAIT LOOP, never `exec sleep`: exec replaces the process image and its argv becomes
+# `sleep N` — the sessionUuid disappears from the ps scan, silently exempting the worker from
+# dispatch-set liveness and the kill (the §2.1 duplicate-worker hole, reproduced in a fixture).
+# The loop keeps bash's original argv (with --session-id <uuid>) visible and self-expires.
+for _ in $(seq 1 600); do sleep 1; done

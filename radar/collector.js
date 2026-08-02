@@ -187,7 +187,30 @@ function createCollector(opts) {
       }
     }
 
-    const state = derive({ now, collectorId, config, sources, aliases, decisions, fragments });
+    // p6: the handoff module is the server's, not the collector's (principle 8 — one writer), so
+    // its published view arrives through runOpts rather than being constructed here. Without this
+    // line derive() always sees handoffs: [] and suppression is inert: every dispatched row stays
+    // on the board, which reads as "the feature does nothing" rather than as a failure.
+    //
+    // It is READ-ONLY and defensive. publish() reflects in-memory state owned by another module,
+    // and a throw here would fail the whole scan and take the last-good publication with it — so a
+    // bad publish degrades to "no handoffs", which suppresses nothing. Suppressing nothing is the
+    // safe direction; suppressing wrongly hides a real row.
+    let handoffView = { handoffs: [], handoffRecovery: null };
+    const publish = runOpts && runOpts.handoffPublish;
+    if (typeof publish === 'function') {
+      try {
+        const v = publish();
+        if (v && Array.isArray(v.handoffs)) {
+          handoffView = { handoffs: v.handoffs, handoffRecovery: v.handoffRecovery || null };
+        }
+      } catch (e) { warnings.push(`handoff publish: ${e && e.message ? e.message : e}`); }
+    }
+
+    const state = derive({
+      now, collectorId, config, sources, aliases, decisions, fragments,
+      handoffs: handoffView.handoffs, handoffRecovery: handoffView.handoffRecovery,
+    });
 
     // --- publication. This is the ONLY place the whole-file last-good rule applies.
     try {
@@ -234,9 +257,59 @@ function createCollector(opts) {
   // The session sweep (S-004). Its own 60 s cadence, DECOUPLED from the 10-minute git scan: a
   // blocked session must be seen inside two sweeps, and a fan-out over ~200 git spawns every minute
   // to achieve that would be absurd. It coalesces onto a full scan if one is already running.
+  // p6 riders on the session sweep. Both run AFTER the scan has republished state.json, because
+  // both read the fresh snapshot: M1 resolves a session's git facts from it, and M3 decides
+  // `resolved` from whether the fact keys are still present.
+  //
+  // Neither may break the sweep. A throw here would stop the timer's only useful work and, worse,
+  // would stop the handoff lifecycle from ever observing a dead process — which is the one
+  // direction that must not fail, since a handoff that is never evaluated never releases its keys.
+  // So each is isolated: it logs and the sweep continues.
+  async function sweepRiders(runOpts) {
+    const warnings = [];
+    try {
+      const cap = require('./stop-capture.js');
+      // `collectorId` and the loaded config are scoped inside scan(), so re-resolve them the same
+      // way here rather than hoisting scan's locals — the sweep is a separate entry point and
+      // sharing mutable scan state between them would couple two lifetimes for no gain.
+      const now = clock();
+      const { config } = await loadConfig(paths.config, now);
+      const machine = collectorIdOverride || config.collectorId || os.hostname();
+      const r = await cap.sweepStopCapture({ now, machine, paths, config });
+      if (r && r.warnings) warnings.push(...r.warnings);
+    } catch (e) { warnings.push(`stop-capture: ${e && e.message ? e.message : e}`); }
+
+    // The handoff lifecycle is wired by the server, which owns the single writer (spec principle 8)
+    // and hands its sweep in through runOpts. The collector does not construct it: doing so would
+    // put a second p6 writer in the CLI's process the moment anyone runs `radar scan`.
+    const hs = runOpts && runOpts.handoffSweep;
+    if (typeof hs === 'function') {
+      try { await hs(); } catch (e) { warnings.push(`handoff sweep: ${e && e.message ? e.message : e}`); }
+    }
+    return warnings;
+  }
+
+  // Riders run BEFORE the scan, and the ordering is load-bearing in a way the obvious one is not.
+  //
+  // Running them after means every state change the handoff sweep itself produces — adopted_auto,
+  // abandoned, resolved, the undecidable set — misses the publication that just happened and waits
+  // for the NEXT one, up to a full sweep later. That silently doubles the spec's own bounds: the
+  // recovery element would be computed at grace + 1 sweep but published at grace + 2, and §11
+  // promises the former.
+  //
+  // The cost of going first is that riders decide against the PREVIOUS snapshot, so their git facts
+  // are up to one sweep stale. That errs in the safe direction: a fact that has just disappeared
+  // still reads as present, so `resolved` fires one sweep late and a key is held slightly longer.
+  // Holding a key too long suppresses a row; releasing one too early permits a second dispatch
+  // against live work. Only one of those is recoverable.
   function sweepSessions(runOpts) {
     stats.sweeps++;
-    return scan(Object.assign({}, runOpts, { only: ['sessions'] }));
+    const opts = runOpts || {};
+    return sweepRiders(opts).then((w) =>
+      scan(Object.assign({}, opts, { only: ['sessions'] })).then((res) => {
+        if (w.length && res && Array.isArray(res.warnings)) res.warnings.push(...w);
+        return res;
+      }));
   }
 
   function start(runOpts) {
@@ -373,6 +446,48 @@ function createCollector(opts) {
 
   return {
     paths, stats, scan, sweepSessions, getState, start, stop,
+    // SYNCHRONOUS snapshot accessor. p6 needs one: handoff.js reads the state inside preview,
+    // commit and the sweep, and every one of those decides on `if (!state)`. Handing it an async
+    // getState() there is silently catastrophic — a Promise is TRUTHY, so the `503 no_snapshot`
+    // branch never fires, state.repos is undefined, every selector resolves to zero fact keys, and
+    // EVERY preview answers 422 selector_unresolved no matter what is on the board. It reads as a
+    // selector bug and is not one. Unit tests that stub a sync getState pass throughout; the seam
+    // only shows up against a real server, which is what caught it.
+    // Returns the last PUBLISHED state. Before this process has published anything it falls back
+    // to reading state.json once, synchronously, so a server that restarts with a good snapshot on
+    // disk does not answer 503 for the whole window until its boot scan lands. Still null when
+    // there is genuinely no snapshot — which is the honest answer the 503 branch is written for.
+    // Republish the CURRENT snapshot with a fresh p6 view, without re-scanning anything.
+    //
+    // §7.2 promises that one press always clears the recovery element. It did not: a discard's kill
+    // rounds run inside the sweep that would otherwise republish, so the PRE-PRESS element sat on
+    // disk for the whole drive — up to 2 x discardKillMs — and a tab polling in that window still
+    // showed an element the operator had already dismissed. That is the "one press, two outcomes"
+    // guarantee failing in the only place a user can see it.
+    //
+    // Deliberately NOT a scan: no git, no bridge, no deploy probe. It re-derives from the fragments
+    // of the last published state and swaps in the caller's handoff view, so it is cheap enough to
+    // run on a keypress. No snapshot yet means nothing to republish, which is not an error.
+    republishHandoffView: async (view) => {
+      const base = lastState;
+      if (!base) return false;
+      const next = Object.assign({}, base, {
+        handoffs: (view && Array.isArray(view.handoffs)) ? view.handoffs : [],
+        handoffRecovery: (view && view.handoffRecovery) || null,
+        counts: Object.assign({}, base.counts, {
+          handoffsLive: (view && Array.isArray(view.handoffs)) ? view.handoffs.length : 0,
+        }),
+      });
+      await store.writeJsonAtomic(paths.state, next);
+      lastState = next;
+      return true;
+    },
+    lastStateSync: () => {
+      if (lastState) return lastState;
+      const r = store.readJsonSync(paths.state, null);
+      if (r.ok && r.value && r.value.v === 1) lastState = r.value;
+      return lastState;
+    },
     tagBranch, tagSpec, setFlag, addDecision, closeDecision,
     isScanning: () => inflight !== null,
     hasSweepTimer: () => sweepTimer !== null,

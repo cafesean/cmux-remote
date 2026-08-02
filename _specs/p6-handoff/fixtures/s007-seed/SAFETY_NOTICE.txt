@@ -1,0 +1,1 @@
+The session is instructed to inspect and plan only on its first turn, and to ask before modifying, committing, pushing, merging or deleting anything. It runs without --dangerously-skip-permissions, so Claude's own permission prompts still apply — but your existing allowlists may already permit some commands. This is not a sandbox.

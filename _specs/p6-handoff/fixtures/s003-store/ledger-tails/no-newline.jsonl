@@ -1,0 +1,2 @@
+{"t":"status","at":"2026-08-01T00:00:00.000Z","id":"h-s003-inert","from":"active","to":"resolved","reason":"facts_cleared","detail":{}}
+{"t":"status","at":"2026-08-01T00:00:01.000Z","id":"h-s003-tail","from":"active","to":"resolved","reason":"facts_cleared","detail":{}}

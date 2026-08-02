@@ -135,7 +135,10 @@ test('a VIEWER proxies /state to the leader server-side, with the token in a Bea
   try {
     const r = await call(v.m.base, 'GET', '/api/radar/state');
     assert.strictEqual(r.status, 200);
-    assert.deepStrictEqual(r.json, fullFixture);
+    // p6 (spec §3): `role` is the ONE field the viewer's proxy rewrites — the leader's snapshot
+    // says "leader", and repeating that on a viewer would render a select affordance that can
+    // only 409. Everything else passes through byte-identical.
+    assert.deepStrictEqual(r.json, Object.assign({}, fullFixture, { role: 'viewer' }));
     assert.strictEqual(seen.length, 1, 'the viewer server made the hop, not the browser');
     assert.strictEqual(seen[0].url, 'http://leader.invalid:8080/api/radar/state');
     assert.strictEqual(seen[0].init.headers.authorization, 'Bearer leader-secret');
