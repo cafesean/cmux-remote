@@ -21,6 +21,7 @@ const { collectSessions } = require('./mod-sessions');
 const { collectDeploy } = require('./mod-deploy');
 const { collectJira } = require('./mod-jira');
 const { collectSpecs, applySpecTag } = require('./mod-specs');
+const { classifyBlocked } = require('./classify');
 const { createPusher } = require('./push');
 const { derive, flattenAttention } = require('./derive');
 const store = require('./store');
@@ -110,6 +111,9 @@ function createCollector(opts) {
   // Injectable so a test can make a module throw and prove the carry-forward contract, and so the
   // P2 modules can be wired in without touching the orchestration loop.
   const modules = Object.assign({}, DEFAULT_MODULES, o.modules || {});
+  // p9 §5.2.6. Injectable for the same reason `modules` is: a test must be able to make the stage
+  // throw and prove the sweep still publishes.
+  const classifyStage = typeof o.classifyBlocked === 'function' ? o.classifyBlocked : classifyBlocked;
 
   let inflight = null;
   let timer = null;
@@ -205,6 +209,28 @@ function createCollector(opts) {
           handoffView = { handoffs: v.handoffs, handoffRecovery: v.handoffRecovery || null };
         }
       } catch (e) { warnings.push(`handoff publish: ${e && e.message ? e.message : e}`); }
+    }
+
+    // --- p9 §5.2.6. The classify stage sits BETWEEN the module loop and derive, and is AWAITED, so
+    // a published row never carries a half-resolved verdict. Publication is delayed by at most
+    // CLASSIFY_DEADLINE_MS — that bound is the contract, not "no delay".
+    //
+    // NOTHING MAY THROW OUT OF IT. A classifier outage that failed the sweep would take down the
+    // git, deploy, jira and spec facts alongside it, which inverts the partial-failure contract at
+    // the top of this file. So a whole-stage throw degrades to `unknown · stage failed` on every
+    // blocked session and the sweep publishes exactly as it would have.
+    const sessionRows = fragments.sessions && Array.isArray(fragments.sessions.sessions)
+      ? fragments.sessions.sessions : null;
+    if (sessionRows && sessionRows.some((s) => s && s.status === 'blocked')) {
+      try {
+        await classifyStage(sessionRows, { config, env: process.env, network: ro.fetch !== false, now: clock, radarDir: paths.dir });
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        for (const s of sessionRows) {
+          if (s && s.status === 'blocked') s.intent = { verdict: 'unknown', reason: 'stage failed', model: null, at: observedAt, inferred: true };
+        }
+        warnings.push(`classify: ${msg}`);
+      }
     }
 
     const state = derive({
