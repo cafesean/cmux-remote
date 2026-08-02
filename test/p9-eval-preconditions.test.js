@@ -331,6 +331,34 @@ test('AC3: the named binary comes from the normalized config, not a hardcoded de
   assertScoredNothing(r);
 });
 
+test('AC3: the refusal names WHICH provider could not be resolved, for every provider', () => {
+  // Naming only the path is not enough when two CLIs are selectable: "install it" and "install the
+  // right one" are different operator actions. Every provider is exercised, and none of them
+  // reaches a model — each run refuses at the binary that does not exist under a scratch HOME.
+  for (const id of classifyModule.PROVIDER_IDS) {
+    const dir = tmpdir();
+    const home = tmpdir();
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: id, repos: [] }));
+    const r = runEval(CORPUS, { radarDir: dir, home });
+    const bin = path.join.apply(path, [home].concat(classifyModule.PROVIDERS[id].binParts));
+    assert.equal(r.status, 3, `${id}: expected the no-classifier exit code:\n${r.stderr}`);
+    assert.match(r.stderr, /classifier binary missing/, `${id}: the two refusals were not kept distinct`);
+    assert.ok(r.stderr.includes(bin), `${id}: the refusal did not name the path:\n${r.stderr}`);
+    // The provider must be named OUTSIDE the binary path. Every provider id is a substring of its
+    // own default install path, so checking raw stderr would pass on a message that names neither —
+    // the path alone would satisfy it. Mutation-caught: this assertion was vacuous before the strip.
+    assert.ok(r.stderr.split(bin).join('<bin>').includes(id),
+      `${id}: the refusal names the provider only inside the binary path:\n${r.stderr}`);
+
+    // The header reported the run's identity before refusing, and never as `null`.
+    assert.match(r.stdout, new RegExp(`^provider:\\s+${id}$`, 'm'));
+    assert.match(r.stdout, /^model:\s+\S/m);
+    assert.equal(/^model:\s+null/m.test(r.stdout), false, `${id}: the header printed a null model`);
+    assert.match(r.stdout, /^shape:\s+(enforced by the CLI|asked for in the prompt only)/m);
+    assertScoredNothing(r);
+  }
+});
+
 test('AC3: resolveSettings falls through config to the shipped resolver, and reports the resolved model and effort', async () => {
   const { resolveSettings } = await evalMod();
   const dir = tmpdir();
@@ -373,6 +401,77 @@ test('AC3: resolveSettings falls through config to the shipped resolver, and rep
 
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: 'fixture-not-a-provider', repos: [] }));
   assert.equal((await resolveSettings({ RADAR_DIR: dir, HOME: home }, {})).provider, classifyModule.DEFAULT_PROVIDER);
+});
+
+test('AC3: claudeBin moves only the claude provider, never another provider binary', async () => {
+  const { resolveSettings } = await evalMod();
+  const dir = tmpdir();
+  const home = tmpdir();
+  const forged = path.join(path.sep, 'fixture', 'bin', 'some-other-cli');
+
+  // Sharing one config key across two CLIs would spawn the wrong binary with the other one's argv —
+  // a failure that reads as `classifier unreachable` forever while the binary it names is installed
+  // and perfectly healthy. Every non-default provider is checked, not just the one that exists today.
+  for (const id of classifyModule.PROVIDER_IDS.filter((p) => p !== 'claude')) {
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: id, claudeBin: forged, repos: [] }));
+    const s = await resolveSettings({ RADAR_DIR: dir, HOME: home }, {});
+    assert.equal(s.provider, id);
+    assert.notEqual(s.bin, forged, `claudeBin moved the ${id} binary`);
+    assert.equal(s.bin, path.join.apply(path, [home].concat(classifyModule.PROVIDERS[id].binParts)));
+  }
+
+  // The positive control: for claude it IS the fallback, or the assertions above prove only that
+  // the key is ignored everywhere.
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: 'claude', claudeBin: forged, repos: [] }));
+  assert.equal((await resolveSettings({ RADAR_DIR: dir, HOME: home }, {})).bin, forged);
+});
+
+test('AC3: every provider resolves a printable model label, including the ones that pin no model', async () => {
+  const { resolveSettings } = await evalMod();
+  const dir = tmpdir();
+  const home = tmpdir();
+
+  // `intent.model` is declared null on every UNKNOWN path, so a successful verdict recording null
+  // would forge the unknown marker. `modelLabel` is what the eval prints for the same reason it is
+  // what the sweep records: a header answering "which classifier produced this score" cannot say
+  // `null`. It must be a non-empty string for every provider, whether or not a model flag is passed.
+  for (const id of classifyModule.PROVIDER_IDS) {
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: id, repos: [] }));
+    const s = await resolveSettings({ RADAR_DIR: dir, HOME: home }, {});
+    assert.equal(typeof s.modelLabel, 'string', `${id}: modelLabel is not a string`);
+    assert.ok(s.modelLabel.trim().length > 0, `${id}: modelLabel is empty`);
+    // A pinned model labels itself; an unpinned one still labels itself as something.
+    if (s.model) assert.equal(s.modelLabel, s.model, `${id}: a pinned model must label itself`);
+  }
+
+  // And a pinned model on the provider that otherwise passes none collapses the two back together.
+  const unpinned = classifyModule.PROVIDER_IDS.find((id) => classifyModule.PROVIDERS[id].defaultModel === null);
+  if (unpinned) {
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: unpinned, classifierModel: 'fixture-pinned', repos: [] }));
+    const s = await resolveSettings({ RADAR_DIR: dir, HOME: home }, {});
+    assert.equal(s.model, 'fixture-pinned');
+    assert.equal(s.modelLabel, 'fixture-pinned');
+  }
+});
+
+test('the eval reports whether the answer shape is enforced by the CLI or only asked for in the prompt', async () => {
+  const { enforcesAnswerShape, resolveSettings } = await evalMod();
+  const dir = tmpdir();
+  const home = tmpdir();
+
+  // The claim is derived from the shipped argv builder, so it is checked against that same builder
+  // rather than against a list of provider names this test would have to maintain.
+  for (const id of classifyModule.PROVIDER_IDS) {
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: id, repos: [] }));
+    const s = await resolveSettings({ RADAR_DIR: dir, HOME: home }, {});
+    const argv = classifyModule.classifyArgv(s, 'fixture text');
+    assert.equal(enforcesAnswerShape(s), argv.includes(classifyModule.VERDICT_SCHEMA_PATH),
+      `${id}: the reported answer-shape enforcement disagrees with the invocation`);
+  }
+
+  // The schema is a shipped file, not a per-call temp file — a run that reports "enforced" while
+  // pointing at nothing would be the most confident possible lie about what was measured.
+  assert.equal(fs.existsSync(classifyModule.VERDICT_SCHEMA_PATH), true, 'the verdict schema file is not on disk');
 });
 
 test('AC3: the two ways of being unresolvable are separate refusals, and a working binary is neither', async () => {

@@ -60,7 +60,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { classify, CLASSIFY_PROMPT, TRANSPORT_SHAPE, resolveClassifier, probeBinary, VERDICTS } from '../radar/classify.js';
+import { classify, CLASSIFY_PROMPT, TRANSPORT_SHAPE, resolveClassifier, probeBinary, classifyArgv, VERDICT_SCHEMA_PATH, VERDICTS } from '../radar/classify.js';
 import { loadConfig } from '../radar/config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -237,6 +237,20 @@ export function defaultIsExecutable(p) {
   try { fs.accessSync(p, fs.constants.X_OK); return true; } catch (_) { return false; }
 }
 
+// Does the CLI enforce the answer shape, or does the prompt merely ask for it?
+//
+// DERIVED FROM THE SHIPPED ARGV, never from a list of provider names kept here. A provider that
+// gains schema enforcement starts reporting it without this file changing, and one that loses it
+// stops — which is the only way a second source of truth cannot drift.
+//
+// It is worth a line of the eval's own output because it changes what a score MEANS. Where the
+// shape is enforced at the CLI, an `unparseable` row is the transport or the schema file failing.
+// Where it is only asked for in the prompt, `unparseable` is a model that ignored an instruction —
+// a fact about the prompt being scored, and therefore part of the result.
+export function enforcesAnswerShape(settings) {
+  return classifyArgv(settings, '').includes(VERDICT_SCHEMA_PATH);
+}
+
 // The two refusals, in the order the sweep asks them: the free syscall first, the one process launch
 // second. `ok:false` carries the reason AND the path, because a refusal that does not name what it
 // could not resolve is one the operator cannot act on.
@@ -373,10 +387,16 @@ export async function main(argv, env, io) {
   const settings = await resolveSettings(environ, { radarDir: io && io.radarDir });
   out.write(`provider:   ${settings.provider}\n`);
   out.write(`classifier: ${settings.bin}\n`);
-  // A null model is the provider saying "pass no model flag and take the CLI's own default". It is
-  // reported as such rather than printed as `null`, because the two are different facts.
-  out.write(`model:      ${settings.model || '(the CLI default — no model flag is passed)'}, effort ${settings.effort}\n`);
+  // `modelLabel`, never `model`. A null `model` means "pass no model flag and let the CLI choose",
+  // which is a legitimate setting and an unreadable thing to print: a header whose whole job is to
+  // say which classifier produced this score cannot answer `null`. The label is always a non-empty
+  // string, and the parenthetical is what preserves the distinction the label alone would lose.
+  out.write(`model:      ${settings.modelLabel}${settings.model ? '' : ' (no model flag is passed — the CLI chooses)'}\n`);
+  out.write(`effort:     ${settings.effort}\n`);
   out.write(`flags:      ${settings.flags.length ? settings.flags.join(' ') : '(none)'}\n`);
+  out.write(`shape:      ${enforcesAnswerShape(settings)
+    ? 'enforced by the CLI — an unparseable answer is the transport or the schema, not the prompt'
+    : 'asked for in the prompt only — an unparseable answer is a model that ignored the instruction'}\n`);
   out.write(`version:    ${settings.version} (sha of provider + model + effort + prompt + transport)\n\n`);
 
   const resolved = await checkClassifier(settings, { run: io && io.run, isExecutable: io && io.isExecutable });
