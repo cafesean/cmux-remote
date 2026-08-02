@@ -55,6 +55,14 @@ function candidates(state, now) {
 
   for (const s of sessions) {
     if (!s || !s.key || !s.key.sessionId) continue;
+    // THE PUSH HALF OF THE §5.4 SHIELD. A vanished session is published so the collector's
+    // carry-forward keeps it sticky across sweeps — but the tab it was known by is closed, so
+    // paging the operator toward it would send them to a terminal that no longer exists. The
+    // session stays visible in the inbox, which is the surface that can actually still act on it.
+    // This filter and derive's `liveSessions` are the ONLY two: the carry-forward reader
+    // (`collector.js :: fragmentsFromState`) deliberately does not filter, and filtering it there
+    // would delete the very carry that makes a vanish survive the next sweep.
+    if (s.vanished === true) continue;
     const ref = `${s.key.machine}/${s.key.sessionId}`;
 
     if (s.status === 'blocked' && s.blockedSince) {
