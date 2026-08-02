@@ -658,17 +658,11 @@ function createHandoff(opts) {
       return err(422, 'selector_unresolved', { incidentId: incident('selector_unresolved', { selectors: fk.unresolved }) });
     }
 
-    // Workdir: |R| exactly 1 -> that repo's configured path; every other size -> polyrepoRoot.
-    const repoIds = new Set();
-    for (const sel of selectors) for (const r of reposForSelector(state, sel)) repoIds.add(r);
-    let workdir;
-    if (repoIds.size === 1) {
-      const rid = [...repoIds][0];
-      const repo = cfg('repos', []).find((r) => r.id === rid);
-      workdir = repo ? repo.path : null;
-    } else {
-      workdir = cfg('polyrepoRoot', null);
-    }
+    // Workdir: ALWAYS polyrepoRoot, even when the selection resolves to a single repo. The owner
+    // runs every session from the polyrepo root so all transcripts land in ONE project folder;
+    // a per-repo workdir would scatter them per repo. The seed names the repo, and the session
+    // cds itself. Unconfigured polyrepoRoot is an honest 422, never a guessed path.
+    const workdir = cfg('polyrepoRoot', null);
     let workdirOk = false;
     try { workdirOk = workdir != null && fs.statSync(workdir).isDirectory(); } catch (_) { workdirOk = false; }
     if (!workdirOk) return err(422, 'workdir_unresolved', { workdir: workdir == null ? '' : workdir });
