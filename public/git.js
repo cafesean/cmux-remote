@@ -46,9 +46,20 @@
     padding: 7px 12px; font: inherit; font-size: 12px; }
   `;
 
+  // STORY-010 (war-game M7b): the marking that rides p8-generated text for a repo the operator only
+  // browsed into. Verbatim from gitread.js's BROWSED_TEXT_MARK — a test asserts all three copies
+  // (server, bar, panel) are byte-identical, because two doors warning in two different words is
+  // the same defect as one door not warning.
+  const BROWSED_TEXT_MARK =
+    'browsed repo — running this text runs that repo\'s configured programs; the text shows the verb, not the hooks';
+
   function create(opts) {
     const { mount, jget, jpost, fillComposer, machine } = opts || {};
     if (!mount || !jget || !jpost) throw new Error('cmuxGit.create needs mount, jget, jpost');
+    // The status-line seam, injected exactly as the bar's is. Optional and defaulted to a no-op so
+    // a host that does not supply it still gets a working panel — but app.js does supply it, and
+    // without it the panel's own fills would be the one p8 surface that generates text silently.
+    const emitNote = typeof (opts && opts.note) === 'function' ? opts.note : function () {};
 
     const style = document.createElement('style');
     style.textContent = CSS;
@@ -68,14 +79,27 @@
     const elBody = el.querySelector('.gbody');
     const elCmds = el.querySelector('.gcmds');
 
-    const st = { repo: null, seg: 'changes', status: null, machineId: null, view: 'repos' };
+    const st = { repo: null, seg: 'changes', status: null, machineId: null, view: 'repos', src: 'git', notice: null };
     const getMachine = () => (typeof machine === 'function' ? machine() : machine) || st.machineId;
-    const api = (sub, qs) => '/api/cmux/git/' + sub + '?machine=' + encodeURIComponent(getMachine() || '')
+
+    // TWO DOORS, TWO READ SOURCES — bound at open(), held in PANEL state, never global.
+    // The ⎇ toolbar door reads p7's /api/cmux/git/*; the bar door reads p8's /api/cmux/gitread/*.
+    // The 'git' branch must keep emitting exactly what shipped — same base, same key order, same
+    // `repo=` key — because that disjointness is what makes "the ⎇ journey never touches p8" a
+    // property you can read off the requests rather than an argument. The read branch addresses by
+    // `dir=`, which is the only key gitread accepts. The source resets to p7's whenever the view
+    // returns to the repo list, which is and remains the ⎇ list.
+    const base = () => (st.src === 'read' ? '/api/cmux/gitread/' : '/api/cmux/git/');
+    const api = (sub, qs) => base() + sub + '?machine=' + encodeURIComponent(getMachine() || '')
       + (qs ? '&' + qs : '');
+    // The panel's anchor, spelled the way the bound source addresses it.
+    const anchorQs = () => (st.src === 'read' ? 'dir=' : 'repo=') + encodeURIComponent(st.repo);
 
     async function getJson(sub, qs) {
       const r = await jget(api(sub, qs));
-      if (!r.ok) return { error: 'http_' + r.status };
+      // The code rides along so a scope refusal can be told from a git failure (§7). The `error`
+      // string is unchanged, so every existing note reads exactly as it did.
+      if (!r.ok) return { error: 'http_' + r.status, status: r.status };
       return r.json().catch(() => ({ error: 'bad_json' }));
     }
 
@@ -83,6 +107,9 @@
 
     // ---- repo list -----------------------------------------------------------------------
     async function showRepos() {
+      // The list is the ⎇ list, whichever door opened the panel: returning here resets the read
+      // source to p7's (§6.6). Untouched otherwise.
+      st.src = 'git';
       st.view = 'repos'; st.repo = null;
       elTitle.textContent = 'Source control';
       elSegs.hidden = true; elCmds.replaceChildren();
@@ -129,10 +156,23 @@
     // ---- changes -------------------------------------------------------------------------
     async function showChanges() {
       note('Reading working tree…');
-      const d = await getJson('status', 'repo=' + encodeURIComponent(st.repo));
+      const d = await getJson('status', anchorQs());
+      // §7 governs the panel, not only the bar. p8's read gate can start refusing MID-SESSION, and
+      // then the §6.5 healing loop below cannot exit the state it lands in: the refresh 403s too,
+      // `canWrite` never updates, the controls rendered from the last good status stay live, every
+      // tap fails, and the note blames git for a scope decision. So a status 403 through the BAR's
+      // source leaves — panel closed, bar hidden. Gated on the bound source, so the ⎇ door keeps
+      // today's note-and-stay behaviour exactly.
+      if (st.src === 'read' && d.status === 403) return scopeLost();
       if (d.error) return note('git status failed (' + d.error + ')');
       st.status = d;
       elBody.replaceChildren();
+      // A refusal note raised by the write path survives the refresh that same path triggers —
+      // otherwise the healing read wipes the only explanation the operator was given.
+      if (st.notice) {
+        const n = document.createElement('div'); n.className = 'gnote'; n.textContent = st.notice;
+        st.notice = null; elBody.appendChild(n);
+      }
 
       if (d.inProgress && (d.inProgress.merge || d.inProgress.rebase)) {
         const w = document.createElement('div'); w.className = 'gwarn';
@@ -147,6 +187,14 @@
         + (b.ahead == null ? ' · ahead/behind unknown' : ` · ahead ${b.ahead}, behind ${b.behind}`);
       elBody.appendChild(head);
 
+      // §6.5: capability-honest, not optimistically armed. One line ABOVE the listing states the
+      // boundary, so the rows below can be missing their controls without being mysterious.
+      if (d.canWrite === false) {
+        const ro = document.createElement('div'); ro.className = 'gnote';
+        ro.textContent = 'Read-only here — per-file staging needs a repo from the ⎇ list.';
+        elBody.appendChild(ro);
+      }
+
       const groups = [
         ['Unmerged', (f) => f.unmerged],
         ['Staged', (f) => f.staged],
@@ -160,25 +208,38 @@
         any = true;
         const h = document.createElement('div'); h.className = 'ghead'; h.textContent = label + ' · ' + files.length;
         elBody.appendChild(h);
-        for (const f of files) elBody.appendChild(fileRow(f, label));
+        for (const f of files) elBody.appendChild(fileRow(f, label, d.canWrite));
       }
       if (!any) elBody.appendChild(Object.assign(document.createElement('div'), { className: 'gnote', textContent: 'Nothing to commit — working tree clean.' }));
       renderCommands();
     }
 
-    function fileRow(f, group) {
+    function fileRow(f, group, canWrite) {
       const row = document.createElement('div'); row.className = 'grow';
       const xy = document.createElement('span');
       xy.className = 'gxy' + (f.unmerged ? ' unmerged' : ''); xy.textContent = f.xy;
       const b = document.createElement('button'); b.type = 'button';
       b.textContent = f.from ? f.from + ' → ' + f.path : f.path;
       b.onclick = () => showDiff(f);
-      const act = document.createElement('button'); act.type = 'button'; act.className = 'gact';
       if (f.unmerged) {
-        // Enforced on the bridge too — this is the courtesy copy.
+        // Enforced on the bridge too — this is the courtesy copy. It survives a read-only render:
+        // it is INFORMATION about the file, not a control over it.
+        const act = document.createElement('button'); act.type = 'button'; act.className = 'gact';
         act.textContent = 'conflict'; act.disabled = true;
         act.title = 'git add on a conflicted file marks it resolved, conflict markers included';
-      } else if (group === 'Staged') {
+        row.append(xy, b, act);
+        return row;
+      }
+      // §6.5: `canWrite === false` — and ONLY that shape — removes the control. True or ABSENT
+      // renders what shipped, and absent is every ⎇-door status response, since the p7 route
+      // carries no such field. Absent rather than disabled-and-mysterious; the reason is one line
+      // above. Diff taps are reads and keep working.
+      if (canWrite === false) {
+        row.append(xy, b);
+        return row;
+      }
+      const act = document.createElement('button'); act.type = 'button'; act.className = 'gact';
+      if (group === 'Staged') {
         act.textContent = 'unstage'; act.onclick = () => write('unstage', f.path);
       } else {
         act.textContent = 'stage'; act.onclick = () => write('stage', f.path);
@@ -188,18 +249,27 @@
     }
 
     async function write(verb, path) {
+      // ALWAYS the p7 write routes, whichever door opened the panel: one write path in the system,
+      // and p7's fresh-enumeration equality gate is its sole authority.
       const r = await jpost('/api/cmux/git/' + verb + '?machine=' + encodeURIComponent(getMachine() || ''),
         { repo: st.repo, paths: [path] });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        return note(verb + ' refused: ' + (d.error || r.status));
+        note(verb + ' refused: ' + (d.error || r.status));
+        // `canWrite` was a point-in-time HINT and the anchor can close between status and tap
+        // (§6.5). Re-fetch through the BOUND source so the refreshed hint takes the controls away
+        // instead of leaving a row that fails on every tap. Only the read source can carry the
+        // field, and only the bar door binds it — the ⎇ door keeps today's note-and-stop, so its
+        // request stream stays byte-identical.
+        if (st.src === 'read') { st.notice = verb + ' refused: ' + (d.error || r.status); return showChanges(); }
+        return;
       }
       showChanges();
     }
 
     async function showDiff(f) {
       note('Reading diff…');
-      const d = await getJson('diff', 'repo=' + encodeURIComponent(st.repo)
+      const d = await getJson('diff', anchorQs()
         + '&path=' + encodeURIComponent(f.path) + (f.staged ? '&staged=1' : ''));
       elBody.replaceChildren();
       const back = document.createElement('div'); back.className = 'grow';
@@ -223,7 +293,7 @@
     // ---- branches / worktrees ---------------------------------------------------------------
     async function showBranches() {
       note('Reading branches…');
-      const d = await getJson('branches', 'repo=' + encodeURIComponent(st.repo));
+      const d = await getJson('branches', anchorQs());
       if (d.error) return note('git branch failed (' + d.error + ')');
       elBody.replaceChildren();
       for (const b of d.branches || []) {
@@ -241,7 +311,7 @@
 
     async function showWorktrees() {
       note('Reading worktrees…');
-      const d = await getJson('worktrees', 'repo=' + encodeURIComponent(st.repo));
+      const d = await getJson('worktrees', anchorQs());
       if (d.error) return note('git worktree failed (' + d.error + ')');
       elBody.replaceChildren();
       for (const w of d.worktrees || []) {
@@ -278,25 +348,65 @@
     }
 
     async function propose(verb, params) {
-      const r = await jpost('/api/cmux/git/command?machine=' + encodeURIComponent(getMachine() || ''), { verb, params });
+      // p7's body is {verb, params}; p8's is {verb, dir, params} — `dir` is the panel's anchor, and
+      // gitread re-resolves it at generation time rather than trusting anything the client holds.
+      const r = st.src === 'read'
+        ? await jpost(api('command'), { verb, dir: st.repo, params })
+        : await jpost(api('command'), { verb, params });
       if (!r.ok) return note('could not build that command');
       const d = await r.json().catch(() => ({}));
+      // The resolved identity rides back with p8's text (§6.6). If the anchor now resolves to a
+      // different repository, filling would hand the operator a command aimed somewhere they are
+      // not looking: note it and re-read status instead. p7 carries no identity, so it cannot check.
+      if (st.src === 'read' && d.repo !== st.repo) {
+        st.notice = 'that directory now resolves to a different repository';
+        st.seg = 'changes'; renderSegs();
+        return showChanges();
+      }
       if (!d.text) return note('could not build that command');
       const res = fillComposer ? fillComposer(d.text) : { ok: false, reason: 'no composer' };
       if (res && res.ok === false) return note('nothing filled: ' + (res.reason || 'no pane'));
+      // STORY-010: mark the text by provenance, at the point the operator reads it — through the
+      // injected status seam, never this panel's body, because close() is the next statement and
+      // takes the body with it. Only the p8 source carries the field at all; the ⎇ door's `d` has
+      // no `provenance`, so gating on the SOURCE keeps p7's journey byte-identical rather than
+      // marking every p7 fill by the fail-closed default. `d.text` went to fillComposer untouched.
+      if (st.src === 'read' && d.provenance !== 'workspace') emitNote(BROWSED_TEXT_MARK);
       close();
     }
 
     let onCloseCb = null;
+    let onScopeLostCb = null;
     function open(o) {
-      st.machineId = (o && o.machine) || st.machineId;
-      if (o && o.onClose) onCloseCb = o.onClose;
+      const opt = o || {};
+      st.machineId = opt.machine || st.machineId;
+      // CLOSE STATE IS PER-OPEN, NEVER INHERITED. The conditional assignment this replaces updated
+      // the callback only when an open SUPPLIED one — so a bar open that passed none inherited the
+      // ⎇ door's callback and closing the bar's panel exited Files to the terminal. Unconditional:
+      // every open states its own close behaviour, and neither door can observe the other's.
+      onCloseCb = typeof opt.onClose === 'function' ? opt.onClose : null;
+      onScopeLostCb = typeof opt.onScopeLost === 'function' ? opt.onScopeLost : null;
+      st.notice = null;
       el.classList.add('on');
+      if (opt.repo) {
+        // Bar door: land on THIS repo under its server-derived display name, reads bound to p8.
+        st.src = opt.src === 'read' ? 'read' : 'git';
+        return openRepo(opt.repo, opt.name || opt.repo);
+      }
+      // ⎇ toolbar door: no repo, no source — the list, p7, exactly as it shipped.
+      st.src = 'git';
       showRepos();
     }
     function close() {
       el.classList.remove('on');
       if (onCloseCb) onCloseCb();
+    }
+    // The read gate refused mid-session (§7). Nothing here can recover it, so the panel leaves and
+    // tells its opener to drop the bar rather than sit on controls the server will refuse forever.
+    function scopeLost() {
+      st.notice = null;
+      if (onScopeLostCb) onScopeLostCb();
+      close();
     }
     elBack.onclick = () => { if (st.view === 'repo') showRepos(); else close(); };
 

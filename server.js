@@ -323,6 +323,66 @@ async function handleApi(req, res, u) {
     return sendJson(res, 404, { error: 'not_found' });
   }
 
+  // Source-control READ routes (p8). A separate block beside the p7 one above, not an edit to it:
+  // the p7 block's allowlist and body rebuilds are its CONTRACT, and p7 clients still depend on
+  // them. This block states its own — `dir`-keyed reads, a probe whose client disconnect
+  // propagates upstream, and a command body carrying `dir`. ('/api/cmux/gitread/x' does not
+  // start with '/api/cmux/git/', so the two blocks never shadow each other.)
+  if (p.startsWith('/api/cmux/gitread/')) {
+    const sub = p.slice('/api/cmux/gitread/'.length);
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    if (req.method === 'GET') {
+      if (!['probe', 'status', 'branches', 'worktrees', 'diff'].includes(sub)) return sendJson(res, 404, { error: 'not_found' });
+      const qs = new URLSearchParams();
+      for (const k of ['dir', 'path', 'staged']) {
+        const v = u.searchParams.get(k);
+        if (v != null && v !== '') qs.set(k, v);
+      }
+      const q = qs.toString();
+      const pq = `/cmux/gitread/${sub}${q ? '?' + q : ''}`;
+      if (sub !== 'probe') return relay(res, bridge(m, pq, { timeout: 25000 }));
+      // The probe relay propagates CLIENT DISCONNECT upstream: the bridge's cancellation-aware
+      // queue can only unlink an abandoned waiter if the abandonment is observable bridge-side.
+      // bridge()'s own controller clobbers a passed signal, so the probe goes through a dedicated
+      // fetch whose controller aborts on EITHER the timeout or the caller leaving. Disconnect is
+      // observed on `res`, never `req`: since Node 16 a completed bodyless GET fires req 'close'
+      // while its response is still pending — only res 'close' with !res.writableEnded means the
+      // caller actually left. The timeout is an env seam so the timeout-fired settlement is
+      // testable through a real child (default 25000, like every other knob here).
+      // The knob is VALIDATED, not merely coerced: `Number('fast')` is NaN, `setTimeout(fn, NaN)`
+      // fires on the next tick, and a typo in the env would silently turn every probe into a 502.
+      // Anything that is not a positive finite number falls back to the default.
+      const knob = Number(process.env.GITREAD_PROBE_TIMEOUT_MS);
+      const probeTimeoutMs = Number.isFinite(knob) && knob > 0 ? knob : 25000;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), probeTimeoutMs);
+      const onResClose = () => { if (!res.writableEnded) ctrl.abort(); };
+      res.on('close', onResClose);
+      return relay(res, (async () => {
+        try {
+          return await fetch(`${m.baseUrl}${pq}`, {
+            headers: { 'x-bridge-secret': m.secret, ...accessHeaders(m) },
+            signal: ctrl.signal,
+          });
+        } finally { clearTimeout(timer); res.removeListener('close', onResClose); }
+      })());
+    }
+    if (req.method === 'POST' && sub === 'command') {
+      return readBody(req, (b) => {
+        if (!b) return sendJson(res, 400, { error: 'bad_json' });
+        // Key-by-key rebuild, like every relay here — nothing the client sends reaches the
+        // bridge unexamined, and `dir` (not `repo`) is this surface's addressing key.
+        const body = { verb: b.verb, dir: b.dir, params: b.params || {} };
+        return relay(res, bridge(m, '/cmux/gitread/command', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body), timeout: 25000,
+        }));
+      });
+    }
+    return sendJson(res, 404, { error: 'not_found' });
+  }
+
   // Compose-box completions (p7). Re-serialised, like the fs relay: the client cannot smuggle extra
   // parameters through to the bridge, and the caret text is length-capped on both sides.
   if (req.method === 'GET' && p === '/api/cmux/completions') {
@@ -564,6 +624,10 @@ const httpServer = http.createServer((req, res) => {
   // 404s, the defensive load path skips the feature, and it ships dark with its flag reading on.
   if (u.pathname === '/menuparse.js') return serveStatic(req, res, 'menuparse.js');
   if (u.pathname === '/git.js') return serveStatic(req, res, 'git.js');
+  // p8. Exactly the failure the note above describes, caught by the browser proof: index.html
+  // loads /gitbar.js, this allow-list did not, and the defensive mount in app.js turned the 404
+  // into "Files browses with no bar" — silently, with GIT_PANEL_ENABLED reading on.
+  if (u.pathname === '/gitbar.js') return serveStatic(req, res, 'gitbar.js');
   if (u.pathname === '/sw.js') return serveStatic(req, res, 'sw.js');
   if (u.pathname === '/manifest.webmanifest') return serveStatic(req, res, 'manifest.webmanifest');
   if (u.pathname === '/icon-180.png') return serveStatic(req, res, 'icon-180.png');

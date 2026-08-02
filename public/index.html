@@ -339,6 +339,34 @@
       flex: 1 1 auto; min-width: 0; }
     #fcrumb span { color: var(--fg); opacity: .8; touch-action: manipulation; }
     #fcrumb span:not(:last-child):after { content: '/'; color: var(--dim); margin: 0 3px; opacity: .6; }
+    /* ---- p8 source-control bar (specs.md §6) ----
+       Hidden means EMPTY, never [hidden]: gitbar.js's view clears the mount when the bar is not
+       visible, and `:empty` is what collapses it. Nothing here paints when the mount is empty —
+       the border and padding live on .gbrow, not on #gitbar — so a bar left attached and merely
+       emptied is genuinely invisible, not a zero-height strip with a rule under it. */
+    #gitbar { flex: 0 0 auto; }
+    #gitbar:empty { display: none; }
+    .gbrow, .gbsync { display: flex; align-items: center; gap: 7px; padding: 7px 10px;
+      border-bottom: 1px solid var(--line); font-size: 12px; font-family: var(--mono); }
+    .gbsync { border-bottom: 1px solid var(--line); }
+    .gbicon { flex: 0 0 auto; color: var(--dim); }
+    .gbname { flex: 0 1 auto; color: var(--fg); font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gbsep { flex: 0 0 auto; color: var(--dim); }
+    .gbbranch { flex: 1 1 auto; min-width: 0; color: var(--dim);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gbstate { flex: 0 0 auto; color: var(--warn); font-size: 10px; letter-spacing: .06em;
+      text-transform: uppercase; }
+    .gbbtn { flex: 0 0 auto; background: var(--panel2); color: var(--fg);
+      border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 12px;
+      touch-action: manipulation; }
+    .gbbtn:active { background: #223; border-color: var(--accent); }
+    .gbmsg { flex: 1 1 auto; min-width: 0; background: var(--panel2); color: var(--fg);
+      border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; font-size: 12px;
+      font-family: var(--mono); }
+    .gbnote { padding: 6px 10px; border-bottom: 1px solid var(--line);
+      font-size: 11px; font-family: var(--mono); color: var(--warn); }
+
     #flist { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; }
     .frow { display: flex; align-items: center; gap: 10px; padding: 11px 12px;
       border-bottom: 1px solid var(--line); font-size: 14px; touch-action: manipulation; }
@@ -446,6 +474,12 @@
           <input type="checkbox" id="fdotcb" checked /><span>.files</span>
         </label>
       </div>
+      <!-- p8 source-control bar mount. Deliberately NO `hidden` attribute: `#gitbar` is a flex item
+           with an explicit display, and an explicit display outranks the UA stylesheet's [hidden]
+           rule — the same trap `.fvbtn.fvicon[hidden]` above had to be patched for. Hiding here is
+           EMPTINESS, not an attribute: gitbar.js's view mounts nothing at all when the bar is
+           hidden, and `#gitbar:empty` collapses. Written with no whitespace inside so `:empty`
+           matches on first paint. --><div id="gitbar"></div>
       <div id="flist"></div>
       <div id="ffoot"></div>
     </div>
@@ -560,8 +594,14 @@
   <!-- p7 live-menu detector. Pure, dual-export (browser + node --test), and loaded BEFORE app.js so
        window.cmuxMenuParse exists when the first grid frame lands. If it 404s, app.js finds no
        parser and the chip bar simply never populates — the mirror is unaffected. -->
+  <!-- p8 source-control bar. Dual-export and loaded BEFORE app.js, which reads window.cmuxGitBar at
+       mount time. sw.js:52 sends any path that is not '/' straight to the network, so there is no
+       cache trap on the file itself; the shell '/' is cache-first with background revalidate
+       (sw.js:51-55), so an installed PWA picks this tag up on its next launch. If it 404s or throws,
+       app.js leaves the handle null and Files browses exactly as it does today. -->
   <script src="/menuparse.js?v=v1-p7-20260801a"></script>
   <script src="/git.js?v=v1-p7-20260801a"></script>
+  <script src="/gitbar.js?v=v1-p8-20260802a"></script>
   <script src="/radar.js?v=v1-p5radar-20260731a"></script>
   <script src="/app.js?v=v16-p7-20260801b"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
