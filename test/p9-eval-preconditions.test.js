@@ -1,20 +1,26 @@
 'use strict';
-// S-004 — the tier-1 half of the classifier eval: the preconditions, the credential assertion, and
-// the source rule that keeps the eval honest.
+// S-004 — the tier-1 half of the classifier eval: the preconditions, the classifier-resolution
+// gate, and the source rule that keeps the eval honest.
 //
-// WHAT THIS FILE IS FOR. `npm run test:eval:inbox` costs money and needs a key, so it cannot be a
-// unit test. What CAN be proved offline is everything that decides whether it is allowed to run at
-// all: that the corpus is still synthetic, that a drifted corpus refuses to be scored rather than
-// scored anyway, that a missing credential is named rather than guessed at, and that the prompt
-// being scored is the prompt that ships. Those are the parts that fail silently if unproved.
+// WHAT THIS FILE IS FOR. `npm run test:eval:inbox` costs money and needs a working `claude` CLI, so
+// it cannot be a unit test. What CAN be proved offline is everything that decides whether it is
+// allowed to run at all: that the corpus is still synthetic, that a drifted corpus refuses to be
+// scored rather than scored anyway, that an unresolvable classifier is NAMED rather than guessed at,
+// and that the prompt being scored is the prompt that ships. Those are the parts that fail silently
+// if unproved.
 //
-// NOTHING HERE TOUCHES THE NETWORK, AND THAT IS STRUCTURAL, NOT LUCK. The precondition layer and
-// the scoring layer are separate exports of scripts/eval-inbox.mjs: the precondition tests import
-// and call the first one, which reads a string and returns a verdict — no env, no credential, no
-// socket. The one test that exercises the scoring layer injects `http`. And every child-process run
-// below is arranged to exit BEFORE scoring: either a precondition fails, or the key env is unset.
-// The children are spawned with an env of exactly one variable, so a real key in the developer's
-// shell cannot leak in and turn a refusal into a billed run.
+// NOTHING HERE REACHES A MODEL, AND THAT IS STRUCTURAL, NOT LUCK. Three independent things hold it:
+//
+//   1. The precondition layer and the scoring layer are separate exports of scripts/eval-inbox.mjs.
+//      The precondition tests call the first, which reads a string and returns a verdict — no env,
+//      no binary, no process.
+//   2. Every in-process test that reaches the scoring layer injects `run`, the spawn seam, so
+//      `classify` never launches anything.
+//   3. Every CHILD process is spawned with an env of exactly two variables, RADAR_DIR and HOME, both
+//      pointing at empty temp directories. Under the CLI transport the classifier resolves to
+//      `$HOME/.local/bin/claude` when unconfigured, so a scratch HOME is what makes a child
+//      structurally incapable of finding a classifier — a real install in the developer's shell
+//      cannot leak in and turn a refusal into a billed run.
 //
 // EVERY FIXTURE IS INVENTED. The adversarial UUID marker is BUILT from hex digits inside this file
 // rather than written as a literal — a real-looking id pasted in as a negative test case is still a
@@ -48,6 +54,12 @@ after(() => { for (const d of dirs) { try { fs.rmSync(d, { recursive: true, forc
 
 const shippedEntries = () => JSON.parse(fs.readFileSync(CORPUS, 'utf8'));
 
+// The unconfigured fall-through, per resolveClassifier. Derived from the shipped provider table
+// rather than written as a literal, so a change to the default install path is a failure of the
+// eval's message, not of this helper.
+const DEFAULT_PROVIDER = classifyModule.PROVIDERS[classifyModule.DEFAULT_PROVIDER];
+const defaultBinUnder = (home) => path.join.apply(path, [home].concat(DEFAULT_PROVIDER.binParts));
+
 // Write a scratch corpus and hand back its path. `mutate` receives a deep copy of the shipped
 // corpus so every violation below is exactly one deliberate change away from a passing file.
 function scratchCorpus(mutate) {
@@ -60,10 +72,11 @@ function scratchCorpus(mutate) {
 }
 
 // Run the real script as a child. The env is built from nothing: exactly RADAR_DIR, so the config
-// lookup lands in an empty temp directory and no ambient credential exists to be found.
+// lookup lands in an empty temp directory, and HOME, so the unconfigured classifier resolves inside
+// that same emptiness and cannot exist.
 function runEval(corpusPath, opts) {
   const o = opts || {};
-  const env = Object.assign({ RADAR_DIR: o.radarDir || tmpdir() }, o.env || {});
+  const env = Object.assign({ RADAR_DIR: o.radarDir || tmpdir(), HOME: o.home || tmpdir() }, o.env || {});
   const r = spawnSync(process.execPath, [SCRIPT, '--corpus', corpusPath], { env, encoding: 'utf8' });
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
@@ -74,6 +87,39 @@ function assertScoredNothing(r) {
   assert.equal(/actual \\ pred/.test(r.stdout), false, 'a confusion matrix was printed');
   assert.equal(/^overall:/m.test(r.stdout), false, 'a score was printed');
   assert.equal(/^\s*MISS /m.test(r.stdout), false, 'per-entry results were printed');
+}
+
+// A stub for the spawn seam. It answers with the CLI's measured `--output-format json` envelope —
+// a JSON ARRAY of events ending in a `type:"result"` element whose `.result` is the answer text —
+// so the scoring layer is exercised through the shipped `readVerdict`, not around it.
+function envelope(verdict) {
+  return JSON.stringify([
+    { type: 'system', subtype: 'init', session_id: 'fixture-session' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'fixture' }] } },
+    { type: 'result', subtype: 'success', is_error: false, result: JSON.stringify({ verdict, reason: 'fixture' }), total_cost_usd: 0 },
+  ]);
+}
+
+const FIXTURE_SETTINGS = {
+  provider: classifyModule.DEFAULT_PROVIDER,
+  bin: path.join(path.sep, 'fixture', 'bin', 'claude'),
+  model: 'fixture-model',
+  effort: 'low',
+  flags: ['--fixture-flag'],
+};
+
+// The argv `classify` builds, read positionally. The tail is fixed by §5.2.2 —
+// `--allowed-tools "" --system-prompt <PROMPT> <TEXT>` — and the text is always last.
+function readArgv(args) {
+  return {
+    text: args[args.length - 1],
+    prompt: args[args.length - 2],
+    promptFlag: args[args.length - 3],
+    toolsValue: args[args.length - 4],
+    toolsFlag: args[args.length - 5],
+    model: args[args.indexOf('--model') + 1],
+    effort: args[args.indexOf('--effort') + 1],
+  };
 }
 
 // ---- AC 1 — the six preconditions pass, and each one violated refuses to score -------------------
@@ -105,10 +151,11 @@ test('AC1: the shipped corpus satisfies the story shape, entry by entry', () => 
 });
 
 test('AC1: the shipped corpus scores through the eval and refuses to score when a precondition is violated', () => {
-  // The control: the shipped corpus clears every precondition and stops at the credential, not
+  // The control: the shipped corpus clears every precondition and stops at the CLASSIFIER, not
   // before it. If this run refused earlier, the violations below would prove nothing.
   const control = runEval(CORPUS);
   assert.notEqual(control.status, 0);
+  assert.equal(control.status, 3, `expected the no-classifier exit code, got ${control.status}:\n${control.stderr}`);
   assert.equal(/precondition P\d FAILED/.test(control.stderr), false, control.stderr);
   assertScoredNothing(control);
 
@@ -251,39 +298,117 @@ test('AC2: every forbidden shape is detected, and none of them fires on the ship
   }
 });
 
-// ---- AC 3 — the credential is asserted BY NAME ----------------------------------------------------
+// ---- AC 3 — the classifier is asserted BY PATH -----------------------------------------------------
+// There is no credential under this transport, so the question changed: not "is the variable set?"
+// but "does a classifier binary resolve, and does it answer?". What did NOT change is the property
+// worth having — the refusal names the thing it could not resolve, and that name comes from the
+// normalized config rather than a default this file restates.
 
-test('AC3: with the key env unset the run exits non-zero naming the variable and reports no score', () => {
-  const r = runEval(CORPUS);
+test('AC3: with no classifier binary the run exits non-zero naming the path it could not resolve, and reports no score', () => {
+  const home = tmpdir();
+  const r = runEval(CORPUS, { home });
   assert.notEqual(r.status, 0);
-  assert.equal(r.status, 3, 'expected the no-credential exit code');
-  assert.match(r.stderr, /ANTHROPIC_API_KEY/);
+  assert.equal(r.status, 3, `expected the no-classifier exit code:\n${r.stderr}`);
+  assert.match(r.stderr, /classifier binary missing/);
+  // The PATH is named, not merely the failure — a refusal the operator cannot act on is a bug.
+  assert.ok(r.stderr.includes(defaultBinUnder(home)), `stderr did not name the resolved path:\n${r.stderr}`);
   assert.match(r.stderr, /nothing was scored/);
-  // Every precondition passed first — this refusal is the credential's, not a corpus failure.
+  // Every precondition passed first — this refusal is the classifier's, not a corpus failure.
   assert.match(r.stdout, /ok\s+P6/);
   assertScoredNothing(r);
 });
 
-test('AC3: the named variable comes from the normalized config, not a hardcoded default', () => {
+test('AC3: the named binary comes from the normalized config, not a hardcoded default', () => {
   const dir = tmpdir();
-  // §5.1.4 — the config names the variable and never carries the secret.
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierKeyRef: 'FIXTURE_CLASSIFIER_KEY', repos: [] }));
-  const r = runEval(CORPUS, { radarDir: dir });
+  const home = tmpdir();
+  const configured = path.join(path.sep, 'fixture', 'no-such-classifier', 'claude');
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierBin: configured, repos: [] }));
+  const r = runEval(CORPUS, { radarDir: dir, home });
   assert.equal(r.status, 3);
-  assert.match(r.stderr, /FIXTURE_CLASSIFIER_KEY/);
-  assert.equal(/ANTHROPIC_API_KEY/.test(r.stderr), false, 'fell back to the default despite a configured ref');
+  assert.match(r.stderr, /classifier binary missing/);
+  assert.ok(r.stderr.includes(configured), `stderr did not name the configured binary:\n${r.stderr}`);
+  assert.equal(r.stderr.includes(defaultBinUnder(home)), false, 'fell back to the default despite a configured bin');
   assertScoredNothing(r);
 });
 
-test('AC3: resolveKeyRef defaults to the shipped key ref and readKey never returns whitespace', async () => {
-  const { resolveKeyRef, readKey } = await evalMod();
+test('AC3: resolveSettings falls through config to the shipped resolver, and reports the resolved model and effort', async () => {
+  const { resolveSettings } = await evalMod();
   const dir = tmpdir();
-  assert.equal(await resolveKeyRef({ RADAR_DIR: dir }, {}), classifyModule.DEFAULT_KEY_REF);
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierKeyRef: '  FIXTURE_REF  ', repos: [] }));
-  assert.equal(await resolveKeyRef({ RADAR_DIR: dir }, {}), 'FIXTURE_REF');
-  assert.equal(readKey({ FIXTURE_REF: '   ' }, 'FIXTURE_REF'), null);
-  assert.equal(readKey({}, 'FIXTURE_REF'), null);
-  assert.equal(readKey({ FIXTURE_REF: ' fixture-key-value ' }, 'FIXTURE_REF'), 'fixture-key-value');
+  const home = tmpdir();
+
+  // Unconfigured: the three-step fall-through lands on the default install path and the shipped
+  // model/effort defaults — all of them the resolver's answer, none of them restated in the eval.
+  const bare = await resolveSettings({ RADAR_DIR: dir, HOME: home }, {});
+  assert.equal(bare.provider, classifyModule.DEFAULT_PROVIDER);
+  assert.equal(bare.bin, defaultBinUnder(home));
+  assert.equal(bare.model, DEFAULT_PROVIDER.defaultModel);
+  assert.equal(bare.effort, classifyModule.DEFAULT_EFFORT);
+  assert.deepEqual(bare.flags, DEFAULT_PROVIDER.defaultFlags);
+  assert.equal(bare.version, classifyModule.CLASSIFIER_VERSION);
+
+  // Configured: every field is taken from the file, and the version moves with them — an eval run
+  // under a different model must not claim the default classifier's identity.
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    classifierBin: '  /fixture/bin/claude  ',
+    classifierModel: 'fixture-model',
+    classifierEffort: 'high',
+    classifierFlags: ['--fixture-flag'],
+    repos: [],
+  }));
+  const configured = await resolveSettings({ RADAR_DIR: dir, HOME: home }, {});
+  assert.equal(configured.bin, '/fixture/bin/claude');
+  assert.equal(configured.model, 'fixture-model');
+  assert.equal(configured.effort, 'high');
+  assert.deepEqual(configured.flags, ['--fixture-flag']);
+  assert.notEqual(configured.version, bare.version);
+
+  // The provider is config too, and it reaches the eval. A provider the resolver does not know
+  // falls back rather than resolving to a binary nothing can drive.
+  const other = classifyModule.PROVIDER_IDS.find((id) => id !== classifyModule.DEFAULT_PROVIDER);
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: other, repos: [] }));
+  const switched = await resolveSettings({ RADAR_DIR: dir, HOME: home }, {});
+  assert.equal(switched.provider, other);
+  assert.equal(switched.bin, path.join.apply(path, [home].concat(classifyModule.PROVIDERS[other].binParts)));
+  assert.notEqual(switched.version, bare.version, 'the provider must move the classifier version');
+
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ classifierProvider: 'fixture-not-a-provider', repos: [] }));
+  assert.equal((await resolveSettings({ RADAR_DIR: dir, HOME: home }, {})).provider, classifyModule.DEFAULT_PROVIDER);
+});
+
+test('AC3: the two ways of being unresolvable are separate refusals, and a working binary is neither', async () => {
+  const { checkClassifier } = await evalMod();
+
+  // Not on disk: the free syscall answers, and nothing is ever spawned.
+  let spawned = 0;
+  const counting = async () => { spawned++; return { ok: true, code: 0, stdout: '2.0.0\n', stderr: '', error: null }; };
+  const missing = await checkClassifier(FIXTURE_SETTINGS, { isExecutable: () => false, run: counting });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reason, 'classifier binary missing');
+  assert.equal(missing.bin, FIXTURE_SETTINGS.bin);
+  assert.equal(spawned, 0, 'a missing binary must not be probed');
+
+  // On disk but mute: `--version` exits nonzero, or exits 0 printing nothing. Both are unusable.
+  for (const res of [
+    { ok: false, code: 1, stdout: '', stderr: 'boom', error: 'exit 1' },
+    { ok: true, code: 0, stdout: '   \n', stderr: '', error: null },
+  ]) {
+    const unusable = await checkClassifier(FIXTURE_SETTINGS, { isExecutable: () => true, run: async () => res });
+    assert.equal(unusable.ok, false);
+    assert.equal(unusable.reason, 'classifier binary unusable');
+    assert.equal(unusable.bin, FIXTURE_SETTINGS.bin);
+  }
+
+  // And the positive control, or the two refusals above would prove nothing.
+  const probeArgs = [];
+  const ok = await checkClassifier(FIXTURE_SETTINGS, {
+    isExecutable: () => true,
+    run: async (req) => { probeArgs.push(req.args); return { ok: true, code: 0, stdout: '2.0.0 (fixture)\n', stderr: '', error: null }; },
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.reason, null);
+  assert.equal(ok.version, '2.0.0 (fixture)');
+  // The probe reaches no model: it is `--version` and nothing else.
+  assert.deepEqual(probeArgs, [['--version']]);
 });
 
 // ---- AC 4 — one prompt, no second copy ------------------------------------------------------------
@@ -291,13 +416,30 @@ test('AC3: resolveKeyRef defaults to the shipped key ref and readKey never retur
 test('AC4: the eval imports CLASSIFY_PROMPT from radar/classify.js and scores that exact string', async () => {
   const mod = await evalMod();
   const src = fs.readFileSync(SCRIPT, 'utf8');
-  // The import is in the source, from the shipped module — not a local constant, not a re-read.
-  assert.match(src, /import\s*\{[^}]*\bCLASSIFY_PROMPT\b[^}]*\}\s*from\s*'\.\.\/radar\/classify\.js'/);
-  assert.match(src, /import\s*\{[^}]*\bVERDICT_SCHEMA\b[^}]*\}\s*from\s*'\.\.\/radar\/classify\.js'/);
-  assert.match(src, /import\s*\{[^}]*\bclassify\b[^}]*\}\s*from\s*'\.\.\/radar\/classify\.js'/);
-  // And what the eval scores is the module's own request builder: `classify` is called, so the
-  // prompt, the schema, the model and max_tokens all come from one place by construction.
+  // The imports are in the source, from the shipped module — not local constants, not re-reads.
+  // Under the CLI transport the list is the prompt, the classifier, and the two halves of
+  // resolution: nothing about which binary or which model is decided in this file.
+  for (const name of ['CLASSIFY_PROMPT', 'classify', 'resolveClassifier', 'probeBinary', 'TRANSPORT_SHAPE']) {
+    assert.match(src, new RegExp(`import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*from\\s*'\\.\\./radar/classify\\.js'`),
+      `the eval does not import ${name} from the shipped module`);
+  }
+  // And what the eval scores is the module's own invocation builder: `classify` is called, so the
+  // prompt, the argv, the fixed tool ban and the envelope predicate all come from one place.
   assert.match(src, /await classify\(\{ text: job\.e\.text \}/);
+  // No restated defaults. A model id or a flag written here is a second source of truth that can
+  // drift away from the classifier the sweep actually runs. Every provider's literals are hunted,
+  // not just the default one's, and the short ones are skipped because a two-character flag matches
+  // incidental prose rather than a restatement. Provider NAMES are deliberately not on this list:
+  // they belong in operator-facing help text, which is the one place naming them is the point.
+  const restated = [classifyModule.TRANSPORT_SHAPE];
+  for (const id of classifyModule.PROVIDER_IDS) {
+    const p = classifyModule.PROVIDERS[id];
+    restated.push(...p.defaultFlags);
+    if (p.defaultModel) restated.push(p.defaultModel);
+  }
+  for (const literal of restated.filter((s) => s.length > 4)) {
+    assert.equal(src.includes(literal), false, `the eval restates ${JSON.stringify(literal)} instead of importing it`);
+  }
   // The exported surface the scoring layer uses is the shipped one, not a re-declaration.
   assert.equal(mod.CORPUS_PATH, CORPUS);
 });
@@ -343,7 +485,7 @@ test('the scoring layer is separately callable, builds the confusion matrix, and
   const { scoreCorpus, formatMatrix, MIN_CORRECT } = await evalMod();
   const entries = shippedEntries();
 
-  // An injected transport: it answers with each entry's own label, except two deliberate errors —
+  // An injected spawn seam: it answers with each entry's own label, except two deliberate errors —
   // one on a needs-decision entry (the hard-zero class) and one on an offer-more entry.
   const wrong = new Map([
     [entries.find((e) => e.label === 'needs-decision').text, 'offer-more'],
@@ -351,19 +493,22 @@ test('the scoring layer is separately callable, builds the confusion matrix, and
   ]);
   const byText = new Map(entries.map((e) => [e.text, e.label]));
   let calls = 0;
-  const http = async (req) => {
+  const run = async (req) => {
     calls++;
-    const sent = JSON.parse(req.body);
-    // The request really is the shipped one: same prompt, same schema, same model.
-    assert.equal(sent.system, classifyModule.CLASSIFY_PROMPT);
-    assert.equal(sent.model, classifyModule.CLASSIFIER_MODEL);
-    assert.deepEqual(sent.output_config.format.schema, classifyModule.VERDICT_SCHEMA);
-    const text = sent.messages[0].content;
-    const verdict = wrong.get(text) || byText.get(text);
-    return { ok: true, status: 200, body: { stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify({ verdict, reason: 'fixture' }) }] } };
+    // The invocation really is the shipped one: same binary, same settings, same fixed tail.
+    assert.equal(req.bin, FIXTURE_SETTINGS.bin);
+    const a = readArgv(req.args);
+    assert.equal(a.prompt, classifyModule.CLASSIFY_PROMPT);
+    assert.equal(a.promptFlag, '--system-prompt');
+    assert.equal(a.toolsFlag, '--allowed-tools');
+    assert.equal(a.toolsValue, '', 'the tool ban must sit immediately before the system prompt');
+    assert.equal(a.model, FIXTURE_SETTINGS.model);
+    assert.equal(a.effort, FIXTURE_SETTINGS.effort);
+    assert.ok(req.args.includes('--fixture-flag'), 'the configured flags did not reach the invocation');
+    return { ok: true, code: 0, stdout: envelope(wrong.get(a.text) || byText.get(a.text)), stderr: '', error: null };
   };
 
-  const r = await scoreCorpus(entries, { key: 'fixture-key-not-a-credential', http });
+  const r = await scoreCorpus(entries, { settings: FIXTURE_SETTINGS, run });
   assert.equal(calls, entries.length);
   assert.equal(r.total, entries.length);
   assert.equal(r.correct, entries.length - 2);
@@ -382,14 +527,94 @@ test('the scoring layer is separately callable, builds the confusion matrix, and
   for (const v of classifyModule.VERDICTS.concat(['unknown'])) assert.ok(rendered.includes(v), `matrix has no ${v} column`);
 });
 
+test('the scoring layer forwards the resolved provider, so a configured CLI is the one that gets invoked', async () => {
+  const { scoreCorpus } = await evalMod();
+  const entries = shippedEntries().slice(0, 2);
+  const other = classifyModule.PROVIDER_IDS.find((id) => id !== classifyModule.DEFAULT_PROVIDER);
+
+  // Each provider builds a different argv from the same settings. Scoring under one and seeing the
+  // other's command line is the silent bug this asserts against: `classify` falls back to the
+  // default provider when handed none, so a dropped field reads as a working run that measured the
+  // wrong classifier.
+  const argvFor = async (provider) => {
+    const seen = [];
+    await scoreCorpus(entries, {
+      settings: Object.assign({}, FIXTURE_SETTINGS, { provider }),
+      run: async (req) => { seen.push(req.args); return { ok: true, code: 0, stdout: envelope('status-only'), stderr: '', error: null }; },
+    });
+    return seen[0];
+  };
+
+  const asDefault = await argvFor(classifyModule.DEFAULT_PROVIDER);
+  const asOther = await argvFor(other);
+  assert.notDeepEqual(asOther, asDefault, `provider ${other} produced the same argv as ${classifyModule.DEFAULT_PROVIDER}`);
+  assert.deepEqual(asDefault, classifyModule.classifyArgv(Object.assign({}, FIXTURE_SETTINGS), entries[0].text));
+  assert.deepEqual(asOther, classifyModule.classifyArgv(Object.assign({}, FIXTURE_SETTINGS, { provider: other }), entries[0].text));
+});
+
 test('an unknown verdict counts as a miss, and as a needs-decision miss when the entry was one', async () => {
   const { scoreCorpus } = await evalMod();
   const entries = shippedEntries().filter((e) => e.label === 'needs-decision').slice(0, 2);
-  // A transport that always fails: `classify` answers `unknown · classifier unreachable`.
-  const http = async () => ({ ok: false, status: 0, body: null });
-  const r = await scoreCorpus(entries, { key: 'fixture-key-not-a-credential', http });
+  // A transport that always fails: `classify` retries once, then answers `unknown · classifier
+  // unreachable`.
+  const run = async () => ({ ok: false, code: 1, stdout: '', stderr: '', error: 'exit 1' });
+  const r = await scoreCorpus(entries, { settings: FIXTURE_SETTINGS, run });
   assert.equal(r.correct, 0);
   assert.equal(r.needsDecisionMisses, 2);
   assert.equal(r.rows.every((row) => row.got === 'unknown'), true);
   assert.equal(r.matrix['needs-decision'].unknown, 2);
+});
+
+test('the whole runner scores end to end against a stubbed classifier, and the gate does the arithmetic', async () => {
+  const { main, EXIT_OK, EXIT_GATE_FAILED } = await evalMod();
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    classifierBin: FIXTURE_SETTINGS.bin,
+    classifierModel: FIXTURE_SETTINGS.model,
+    classifierEffort: FIXTURE_SETTINGS.effort,
+    classifierFlags: FIXTURE_SETTINGS.flags,
+    repos: [],
+  }));
+  const entries = shippedEntries();
+  const byText = new Map(entries.map((e) => [e.text, e.label]));
+  const firstNeedsDecision = entries.find((e) => e.label === 'needs-decision');
+
+  const capture = () => {
+    const chunks = [];
+    return { write: (s) => { chunks.push(s); return true; }, text: () => chunks.join('') };
+  };
+  const invoke = async (answer) => {
+    const stdout = capture();
+    const stderr = capture();
+    const code = await main([], { RADAR_DIR: dir, HOME: tmpdir() }, {
+      stdout,
+      stderr,
+      isExecutable: () => true,
+      run: async (req) => {
+        if (req.args.length === 1 && req.args[0] === '--version') {
+          return { ok: true, code: 0, stdout: '2.0.0 (fixture)\n', stderr: '', error: null };
+        }
+        return { ok: true, code: 0, stdout: envelope(answer(readArgv(req.args).text)), stderr: '', error: null };
+      },
+    });
+    return { code, stdout: stdout.text(), stderr: stderr.text() };
+  };
+
+  // A perfect classifier passes, and says so with the settings it actually ran under.
+  const perfect = await invoke((text) => byText.get(text));
+  assert.equal(perfect.code, EXIT_OK, perfect.stderr);
+  assert.match(perfect.stdout, /actual \\ pred/);
+  assert.match(perfect.stdout, /^overall:\s+16\/16/m);
+  assert.match(perfect.stdout, /^needs-decision misses: 0/m);
+  assert.match(perfect.stdout, /\nPASS\n/);
+  assert.ok(perfect.stdout.includes(FIXTURE_SETTINGS.bin), 'the run did not report which binary it used');
+  assert.ok(perfect.stdout.includes(FIXTURE_SETTINGS.model), 'the run did not report which model it used');
+
+  // One needs-decision miss fails the gate on its own, at 15/16 — well clear of the accuracy floor.
+  const oneMiss = await invoke((text) => (text === firstNeedsDecision.text ? 'offer-more' : byText.get(text)));
+  assert.equal(oneMiss.code, EXIT_GATE_FAILED);
+  assert.match(oneMiss.stdout, /^overall:\s+15\/16/m);
+  assert.match(oneMiss.stdout, /^needs-decision misses: 1/m);
+  assert.match(oneMiss.stdout, /^\s*MISS fixture-inbox-\d+\s+expected needs-decision, got offer-more/m);
+  assert.match(oneMiss.stdout, /\nFAIL\n/);
 });
