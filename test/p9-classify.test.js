@@ -410,6 +410,46 @@ test('AC1b - the codex provider invokes exec with a schema file and one fused po
 });
 
 // ================================================================================================
+// AC1c — the invariants EVERY provider owes, parameterized
+//
+// AC1 and AC1b pin each provider's argv literally, because the exact array is the thing that breaks
+// and a generic assertion would not notice. This is the complement: the rules that must hold for a
+// THIRD provider nobody has written yet. If adding one is really "a change to PROVIDERS and nothing
+// else", these are the obligations that change comes with.
+// ================================================================================================
+test('AC1c - every provider carries the prompt, ends on the text, and lets no configured flag reach the positional', async () => {
+  for (const id of PROVIDER_IDS) {
+    const p = PROVIDERS[id];
+    assert.equal(p.id, id, `${id}: the provider knows its own id`);
+    assert.ok(Array.isArray(p.binParts) && p.binParts.length, `${id}: names where its binary lives`);
+    assert.equal(typeof p.argv, 'function', `${id}: owns how to invoke`);
+    assert.equal(typeof p.parse, 'function', `${id}: owns how to read the answer back`);
+    assert.ok(Array.isArray(p.defaultFlags), `${id}: has a default flag set`);
+    assert.ok(p.defaultModel === null || typeof p.defaultModel === 'string', `${id}: a pinned model or an honest null`);
+
+    const settings = { provider: id, model: p.defaultModel, effort: 'low', flags: ['--fixture-configured-flag'] };
+    const argv = classifyArgv(settings, 'FIXTURE TRAILING TEXT');
+
+    assert.ok(argv.every((a) => typeof a === 'string'), `${id}: every argv element is a string`);
+    assert.ok(argv.some((a) => a.includes(CLASSIFY_PROMPT)), `${id}: the classify prompt is delivered somehow`);
+    assert.ok(argv[argv.length - 1].endsWith('FIXTURE TRAILING TEXT'), `${id}: the classified text ends the command line`);
+    // The configured flag must land strictly before the final positional, whatever tail the provider
+    // appends. Otherwise an operator flag becomes an argument to whatever precedes the text.
+    assert.ok(argv.indexOf('--fixture-configured-flag') > -1, `${id}: the configured flag is passed`);
+    assert.ok(argv.indexOf('--fixture-configured-flag') < argv.length - 1, `${id}: and never last`);
+    // No provider may reintroduce the credential this transport exists to avoid holding.
+    assert.equal(argv.indexOf('--bare'), -1, `${id}: --bare would force an API key back into existence`);
+    assert.equal(argv.indexOf('--dangerously-skip-permissions'), -1, `${id}: a classifier judges text, it does not act`);
+
+    // A null default model means NO model flag is passed at all — never the string "null".
+    if (p.defaultModel === null) {
+      assert.ok(!argv.includes('null'), `${id}: a null model is an omitted flag, not the word null`);
+      assert.ok(!argv.includes('undefined'), `${id}: nor undefined`);
+    }
+  }
+});
+
+// ================================================================================================
 // AC2 — the success predicate in order, and the exhaustive failure map
 // ================================================================================================
 test('AC2 - the success predicate runs in order and every failure maps to its stated unknown', async () => {
@@ -533,6 +573,13 @@ test('AC2b - the codex parse is liberal in what it accepts and strict in what it
   assert.deepEqual(await viaCodex(JSON.stringify({ type: 'item.completed', text: answer })), expected);
   assert.deepEqual(await viaCodex(JSON.stringify({ type: 'fixture.future.event.name', payload: answer })), expected);
   assert.deepEqual(await viaCodex('```json\n' + answer + '\n```'), expected, 'a fence is absorbed here too');
+  assert.deepEqual(await viaCodex(JSON.stringify({ type: 'item.completed', text: '```json\n' + answer + '\n```' })), expected,
+    'and a fence NESTED in an event field, which is where a CLI is most likely to put one');
+
+  // The event name is deliberately NOT what the parser keys on: the codex vocabulary moves between
+  // CLI versions, and a pinned name would fail silently into all-`unknown` — the model looking
+  // broken when the parser is what broke.
+  assert.deepEqual(await viaCodex(JSON.stringify({ type: 'some.name.that.does.not.exist.yet', result: answer })), expected);
 
   // The LAST valid verdict wins, over a realistic JSONL stream with noise on both sides.
   const stream = [
@@ -576,12 +623,30 @@ test('AC2b - the codex parse is liberal in what it accepts and strict in what it
   assert.equal(verdictOf('needs-decision'), null);
 
   // And `readVerdict` routes by provider: the SAME bytes read two ways. A claude envelope is not a
-  // codex one, and a parser that answered for both would be reading neither.
+  // codex one, and a parser that answered for both would be reading neither — which is what a
+  // single parse function with a branch would quietly become.
   const claudeEnvelope = cliEvents(answer);
+  const codexJsonl = [
+    JSON.stringify({ type: 'thread.started', thread_id: 'fixture-thread' }),
+    JSON.stringify({ type: 'item.completed', text: answer }),
+  ].join('\n');
   assert.deepEqual(readVerdict(claudeEnvelope, 'claude'), expected);
+  assert.deepEqual(readVerdict(codexJsonl, 'codex'), expected);
   assert.deepEqual(readVerdict(answer, 'codex'), expected);
   assert.deepEqual(readVerdict(answer, 'claude'), { verdict: 'unknown', reason: 'unparseable' },
     'a bare answer is not a claude envelope');
+  assert.deepEqual(readVerdict(codexJsonl, 'claude'), { verdict: 'unknown', reason: 'unparseable' },
+    'and codex-shaped JSONL is not one either — the claude parser must not accept the other CLI output');
+
+  // THE INVARIANT THAT HOLDS FOR BOTH: `unknown` is absent from VERDICTS on purpose, so no envelope
+  // from either CLI can talk a parser into returning a model-authored `unknown`. It stays this
+  // module's own word for "I could not get an answer" — never something a model gets to assert.
+  const modelSaysUnknown = JSON.stringify({ verdict: 'unknown', reason: 'I cannot tell' });
+  assert.deepEqual(readVerdict(cliEvents(modelSaysUnknown), 'claude'), { verdict: 'unknown', reason: 'unparseable' });
+  assert.deepEqual(readVerdict(modelSaysUnknown, 'codex'), { verdict: 'unknown', reason: 'unparseable' });
+  for (const id of PROVIDER_IDS) {
+    assert.equal(C.VERDICTS.indexOf('unknown'), -1, `${id}: unknown is not a verdict a model may return`);
+  }
   // An unrecognised provider id falls back to the default rather than throwing — a sweep that keeps
   // classifying beats one that dies on a typo.
   assert.deepEqual(readVerdict(claudeEnvelope, 'fixture-not-a-provider'), expected);
@@ -1152,6 +1217,87 @@ test('AC14 - a raw config classifier block reaches the command line end to end; 
   assert.equal(run2.classifyCalls[0].args[4], DEFAULT_MODEL);
   assert.equal(run2.classifyCalls[0].args[6], DEFAULT_EFFORT);
   assert.equal(readCache(cache2)[intentCacheKey(MACHINE, 'fixture-inbox-20', TS)].model, DEFAULT_MODEL);
+});
+
+// ================================================================================================
+// AC14b — WHAT WE SEND vs WHAT WE RECORD, for every provider
+//
+// `state.schema.json` declares `intent.model` as "null on every unknown path", and the intent object
+// is `additionalProperties:false` — so there is no second field available to disambiguate with.
+// That makes null a RESERVED MARKER, not merely a missing value. codex legitimately sends no `-m`
+// (`defaultModel: null`), so recording the argv value would write `model: null` on a perfectly good
+// verdict and forge the marker: a real codex answer would be indistinguishable from a classifier
+// that never answered, both in the cache and in what publishes.
+//
+// The invariant is therefore a PAIR, and it only means something asserted in both directions.
+// ================================================================================================
+test('AC14b - a successful verdict records a non-null model for every provider; every unknown records null', async () => {
+  const successFor = async (raw, expectLabel) => {
+    _resetClassifyState();
+    const dir = tmpdir();
+    const cachePath = path.join(dir, 'intent-cache.json');
+    const config = normalizeConfig(Object.assign({ classifierBin: BIN }, raw)).config;
+    const settings = resolveClassifier(config, { HOME: '/fixture/home' });
+    const run = stubRun(async () => (settings.provider === 'codex'
+      ? runOk(JSON.stringify({ verdict: 'needs-decision', reason: 'a direct question' }))
+      : verdictOut('needs-decision', 'a direct question')));
+    const s = blocked(dir, { sessionId: 'fixture-inbox-label' });
+    await classifyBlocked([s], baseDeps({ run, cachePath, config }));
+
+    assert.equal(s.intent.verdict, 'needs-decision', `${expectLabel}: the verdict published`);
+    assert.equal(s.intent.model, expectLabel, `${expectLabel}: the PUBLISHED model is the label`);
+    assert.notEqual(s.intent.model, null, `${expectLabel}: a real answer never wears the unknown marker`);
+    assert.equal(typeof s.intent.model, 'string');
+    assert.ok(s.intent.model.length, `${expectLabel}: and it is never the empty string either`);
+
+    // The key carries the RESOLVED version, which differs per provider — the whole point of the
+    // provider being in the digest.
+    const written = readCache(cachePath)[intentCacheKey(MACHINE, 'fixture-inbox-label', TS, settings.version)];
+    assert.ok(written, `${expectLabel}: the verdict was cached under the resolved version`);
+    assert.equal(written.model, expectLabel, `${expectLabel}: the CACHED model is the same label`);
+    return { run, settings };
+  };
+
+  // claude pins its model, so label and argv value coincide — the case that hides the bug.
+  const claudeRun = await successFor({}, 'claude-sonnet-5');
+  assert.ok(claudeRun.run.classifyCalls[0].args.includes('--model'), 'claude passes its pinned model');
+
+  // codex unpinned: sends NO model flag, records the provider's own label. This is the arm the
+  // invariant exists for — recording `settings.model` here would write null on a real answer.
+  const codexRun = await successFor({ classifierProvider: 'codex' }, 'codex:default');
+  assert.equal(codexRun.run.classifyCalls[0].args.indexOf('-m'), -1, 'codex unpinned sends no model flag at all');
+  assert.equal(codexRun.settings.model, null, 'and the argv value really is null');
+
+  // codex pinned: sends the model AND records it verbatim — the label is not a constant.
+  const pinned = await successFor({ classifierProvider: 'codex', classifierModel: 'fixture-pinned-model' }, 'fixture-pinned-model');
+  const pinnedArgs = pinned.run.classifyCalls[0].args;
+  assert.equal(pinnedArgs[pinnedArgs.indexOf('-m') + 1], 'fixture-pinned-model', 'a pinned model is sent as -m');
+
+  // THE OTHER HALF. `model: null` must still mean exactly what the schema says it means, on every
+  // unknown path, for every provider. If unknowns stopped writing null the marker would be just as
+  // broken — from the other end.
+  for (const provider of PROVIDER_IDS) {
+    _resetClassifyState();
+    const dir = tmpdir();
+    const config = normalizeConfig({ classifierProvider: provider, classifierBin: BIN }).config;
+    const rows = {
+      unparseable: blocked(dir, { sessionId: `fixture-${provider}-u1`, text: 'Unparseable probe. Which one?' }),
+      unreachable: blocked(dir, { sessionId: `fixture-${provider}-u2`, text: 'Unreachable probe. Which one?' }),
+      noText: blocked(dir, { sessionId: `fixture-${provider}-u3`, transcriptPath: path.join(dir, 'absent.jsonl') }),
+      noTs: blocked(dir, { sessionId: `fixture-${provider}-u4`, ts: 'not a date' }),
+    };
+    const byText = new Map([
+      ['Unparseable probe. Which one?', runOk('this is not a verdict in any envelope')],
+      ['Unreachable probe. Which one?', runExit(1)],
+    ]);
+    const run = stubRun(async (req) => byText.get(askedAbout(req)) || runExit(1));
+    const all = Object.values(rows);
+    await classifyBlocked(all, baseDeps({ run, cachePath: path.join(dir, 'intent-cache.json'), config }));
+    for (const s of all) {
+      assert.equal(s.intent.verdict, 'unknown', provider);
+      assert.equal(s.intent.model, null, `${provider}: every unknown path records the null marker`);
+    }
+  }
 });
 
 // ================================================================================================
