@@ -154,6 +154,28 @@ async function tempRadarDir(state) {
   return dir;
 }
 
+// Teardown for a radar dir that a REAL boot scan was allowed to touch.
+//
+// `radar.stop()` clears the timers; it does not join the work already dispatched. The p6 handoff
+// startup recovery is its own async chain and can still be writing into `<dir>/handoffs` after stop
+// returns, so `fsp.rm(recursive)` races it: the walk reads a directory as empty, a file lands, and
+// the rmdir fails ENOTEMPTY. That is a teardown race, not a product defect and not a timeout — it
+// surfaced roughly one full-suite run in six, only under load, and never in isolation, which is
+// exactly the profile that gets misread as "the suite is flaky" and waved through.
+//
+// Retrying is the honest fix: the tree really is still settling, so wait for it to stop settling.
+// A test that only removes the directory once is asserting the boot scan finished, which is a claim
+// it never meant to make.
+async function rmRadarDir(dir, tries) {
+  const n = tries || 25;
+  for (let i = 0; i < n; i++) {
+    try { await fsp.rm(dir, { recursive: true, force: true }); return; } catch (e) {
+      if ((e.code !== 'ENOTEMPTY' && e.code !== 'EBUSY' && e.code !== 'EPERM') || i === n - 1) throw e;
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  }
+}
+
 // ---- the fixtures themselves --------------------------------------------------------------------
 // The route tests are only worth what their inputs are worth: a row invented to suit the route
 // would let a route that reads the wrong shape pass. So the rows are validated against the shipped
@@ -325,7 +347,7 @@ test('AC2a: SCAN SWITCH — RADAR_SCAN_ON_START=0 past 60 s: no scan, no sweep, 
   } finally {
     radar.stop();
     await new Promise((r) => srv.close(r));
-    await fsp.rm(dir, { recursive: true, force: true });
+    await rmRadarDir(dir);
   }
 });
 
@@ -357,7 +379,7 @@ test('AC2b: SWITCH ABSENT — the boot scan fires and the 60s sweep timer arms, 
     assert.notStrictEqual(JSON.parse(after.toString()).generatedAt, GEN);
   } finally {
     radar.stop();
-    await fsp.rm(dir, { recursive: true, force: true });
+    await rmRadarDir(dir);
   }
 });
 
@@ -517,7 +539,7 @@ async function viewerRadar(over) {
   await fsp.writeFile(path.join(dir, 'config.json'), JSON.stringify(config));
   const c = stubCollector({ paths: { dir, config: path.join(dir, 'config.json') } });
   const m = await mount(c, Object.assign({ env: { LEADER_TOK: 'leader-secret' } }, (over && over.radar) || {}));
-  return { m, c, dir, cleanup: async () => { await m.close(); await fsp.rm(dir, { recursive: true, force: true }); } };
+  return { m, c, dir, cleanup: async () => { await m.close(); await rmRadarDir(dir); } };
 }
 
 test('AC7: a VIEWER proxies /inbox to the leader server-side and returns the body verbatim', async () => {
