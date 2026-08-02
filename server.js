@@ -387,6 +387,13 @@ async function handleApi(req, res, u) {
       if (!b) return sendJson(res, 400, { error: 'bad_json' });
       const m = findMachine(b.machine);
       if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      // This proxy re-serializes an allowlisted body, so any field it does not name is DROPPED.
+      // `expect_seq` is a safety precondition, and a silently dropped precondition is worse than a
+      // rejected one: the caller believes the send was guarded and it was not. Refuse it loudly
+      // instead. The p9 reply route talks to the bridge directly and never comes through here.
+      if (Object.prototype.hasOwnProperty.call(b, 'expect_seq')) {
+        return sendJson(res, 400, { error: 'expect_seq_unsupported' });
+      }
       relay(res, bridge(m, '/cmux/send', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ surface: b.surface, text: b.text, submit: b.submit }),
