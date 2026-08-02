@@ -33,6 +33,12 @@ const DEFAULTS = {
   discardKillMs: 5000,
   previewTtlMs: 120000,
   seedMaxBytes: 12288,
+  // ---- p9 §5.1.4. The NAME of the environment variable holding the classifier key, never the key.
+  // Same convention as `serverTokenRef`/`BRIDGE_SECRET`: this file is world-readable config, so it
+  // may only ever carry a pointer. `null` means the default, `ANTHROPIC_API_KEY`, resolved in
+  // classify.js. It belongs here rather than on mod-sessions' raw-config path because
+  // normalizeConfig is a WHITELIST — a key absent from this literal is silently dropped forever.
+  classifierKeyRef: null,
 };
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -115,6 +121,10 @@ function normalizeConfig(raw) {
     discardKillMs: num(raw.discardKillMs, DEFAULTS.discardKillMs, 250, 60000),
     previewTtlMs: num(raw.previewTtlMs, DEFAULTS.previewTtlMs, 5000, 3600000),
     seedMaxBytes: num(raw.seedMaxBytes, DEFAULTS.seedMaxBytes, 1024, 1048576),
+    // p9 §5.1.4 — `str` is exactly the spec's rule: a non-empty trimmed string wins, anything else
+    // (absent, empty, whitespace, a number, an object) takes the default. classify.js reads THIS,
+    // the normalized value; nothing reads the raw file for the credential ref.
+    classifierKeyRef: str(raw.classifierKeyRef, DEFAULTS.classifierKeyRef),
   };
 
   if (config.role === 'viewer' && !config.leaderBaseUrl) issues.push('role=viewer but leaderBaseUrl is unset');
