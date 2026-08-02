@@ -156,9 +156,11 @@ function readLastAssistantText(transcriptPath) {
 //      change (radar/config.js names the further levers);
 //   3. a small model at low effort by default, likewise config-driven.
 //
-// ⚠️ THE CODEX PATH IS UNVERIFIED AGAINST A LIVE RUN. Its flags come from `codex exec --help` on the
-// installed CLI; no live classification has been made with it. Its parser is written to survive that
-// ignorance, and it is deliberately not the default. One live probe promotes it.
+// BOTH PATHS ARE NOW VERIFIED AGAINST LIVE RUNS on codex-cli 0.146.0 and the local claude CLI. The
+// codex probe is what caught the parser bug documented on `scanStrings`: the answer arrives nested at
+// `event.item.text`, so the original one-level scan returned `unknown` for every classification while
+// every unit test passed. Worth remembering — the envelope was the one thing the tests could not
+// invent, and only a real invocation could tell us its shape.
 //
 // ONE RULE ORDERS EVERYTHING BELOW: the classifier's binary is resolved FIRST, before any network
 // or cache decision, and an unresolvable binary outranks every other rule including a failed
@@ -382,6 +384,28 @@ function verdictOf(parsed) {
   return { verdict: parsed.verdict, reason: parsed.reason };
 }
 
+// Every string reachable in a parsed JSONL event, tried as a verdict, LAST hit winning. Depth-bounded
+// because the input is untrusted-ish and a runaway walk on a 60-second sweep is a cost, not a crash.
+//
+// IT RECURSES, AND THAT IS THE WHOLE POINT — measured against the real CLI, codex nests the answer at
+// `event.item.text` inside a `type:"item.completed"` envelope, so a one-level scan of the event's own
+// string values finds nothing and every classification reads `unknown`. Walking to any depth is what
+// keeps this independent of an event vocabulary that moves between CLI versions.
+function scanStrings(node, depth) {
+  if (depth > 6 || node === null || typeof node !== 'object') return null;
+  let found = null;
+  for (const v of Array.isArray(node) ? node : Object.values(node)) {
+    if (typeof v === 'string') {
+      const hit = verdictOf(parseAnswer(v));
+      if (hit) found = hit;
+    } else if (v && typeof v === 'object') {
+      const hit = scanStrings(v, depth + 1);
+      if (hit) found = hit;
+    }
+  }
+  return found;
+}
+
 // ---- providers ----------------------------------------------------------------------------------
 // TWO CLIs, ONE CONTRACT. A provider owns exactly three decisions — how to invoke, how to read the
 // answer back, and where its binary lives when unconfigured. Nothing else may live here: the cache,
@@ -496,13 +520,8 @@ const PROVIDERS = {
         if (!line.trim()) continue;
         const direct = verdictOf(parseAnswer(line));
         if (direct) { found = direct; continue; }
-        const event = parseAnswer(line);
-        if (!event || typeof event !== 'object') continue;
-        for (const v of Object.values(event)) {
-          if (typeof v !== 'string') continue;
-          const nested = verdictOf(parseAnswer(v));
-          if (nested) found = nested;
-        }
+        const hit = scanStrings(parseAnswer(line), 0);
+        if (hit) found = hit;
       }
       return found || unknown('unparseable');
     },
