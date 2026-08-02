@@ -609,16 +609,23 @@ function cmuxStream(req, res, surface) {
 //     failure — timeout, signal, nonzero exit, late error — leaves the terminal side effect
 //     unproved and must say so instead of lying to the operator. The blanket `cmux_failed` is gone
 //     from this route.
+// Flags that say WHERE a send goes. `runSendCommand` refuses to adapt these away — see the comment
+// on the retry branch there.
+const TARGETING_FLAGS = new Set(['--surface', '--workspace', '--pane']);
 const SEND_CHAINS = new Map();
 // The per-surface queue. `fn` runs only once every earlier send for this surface has settled; a
 // rejection never poisons the chain, and the key is dropped when the queue drains so a long-lived
 // bridge does not accumulate one entry per surface it has ever written to.
 function serializeSend(surface, fn) {
-  const prev = SEND_CHAINS.get(surface) || Promise.resolve();
+  // KEYED CASE-INSENSITIVELY, because SURFACE_RE accepts either casing of a uuid. Two callers
+  // spelling the same surface differently must not land on two different chains — that would let
+  // one caller's send interleave another's check/write and defeat the whole precondition.
+  const key = String(surface).toLowerCase();
+  const prev = SEND_CHAINS.get(key) || Promise.resolve();
   const done = prev.then(fn);
   const settled = done.then(() => {}, () => {});
-  SEND_CHAINS.set(surface, settled);
-  settled.then(() => { if (SEND_CHAINS.get(surface) === settled) SEND_CHAINS.delete(surface); });
+  SEND_CHAINS.set(key, settled);
+  settled.then(() => { if (SEND_CHAINS.get(key) === settled) SEND_CHAINS.delete(key); });
   return done;
 }
 // The same 8 s budget the shared cmux() runner applies. Overridable ONLY so the post-dispatch
@@ -638,6 +645,17 @@ function runSendCommand(args, cb, dispatched, tries) {
     (err, stdout, stderr) => {
       const started = dispatched || child.pid !== undefined;
       const m = err && (tries || 0) < 3 && String(stderr || '').match(/unknown flag '(--[a-z-]+)'/);
+      // THE TARGETING FLAG IS NEVER ADAPTED AWAY. `adaptArgs` drops an unknown flag AND its value
+      // and retries, which is right for `--focus` and `--id-format` and catastrophic for
+      // `--surface`: the retry would be an UNTARGETED send, and cmux would type this text into
+      // whatever it considers the default target. That is the wrong-pane write every gate upstream
+      // exists to prevent, arrived at by a retry nobody asked for. If cmux ever rejects the flag
+      // that says WHERE, the answer is to stop, not to send somewhere else. The first attempt did
+      // dispatch, so this reports as post-dispatch and the route maps it to `send_unconfirmed` —
+      // the conservative direction, never a false "nothing was typed".
+      if (m && TARGETING_FLAGS.has(m[1])) {
+        return cb({ dispatched: started, detail: `cmux rejected ${m[1]}; refusing to retry untargeted` });
+      }
       if (m) {
         const next = adaptArgs(args, m[1]);
         if (next) return runSendCommand(next, cb, started, (tries || 0) + 1);
