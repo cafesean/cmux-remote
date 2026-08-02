@@ -1,18 +1,38 @@
 // eval-inbox.mjs — S-004. Score the SHIPPED classifier prompt against a synthesised labelled
 // corpus, and refuse to score at all unless the corpus is still what it claims to be.
 //
-// Run it with `npm run test:eval:inbox`. It is NOT part of `node --test test/*.test.js`: it makes
-// real API calls and costs real money. The tier-1 half of this story — the preconditions, the
-// credential assertion, the source rule below — is proved offline in test/p9-eval-preconditions.test.js
-// against the layers this file exports.
+// Run it with `npm run test:eval:inbox`. It is NOT part of `node --test test/*.test.js`: it runs
+// real classifications and costs real money. The tier-1 half of this story — the preconditions, the
+// classifier-resolution gate, the source rule below — is proved offline in
+// test/p9-eval-preconditions.test.js against the layers this file exports.
 //
 // ------------------------------------------------------------------------------------------------
-// THE ONE PROMPT. This file imports CLASSIFY_PROMPT, VERDICT_SCHEMA and the model from
-// radar/classify.js and restates none of them. It does not even rebuild the request: it calls the
-// shipped `classify()`, so what gets scored is byte-identical to what runs in a sweep, including
-// max_tokens and the success predicate. A second copy of the prompt would let the eval pass while
-// the shipped classifier fails, which is the one failure mode an eval must not have. A source
-// assertion in the tier-1 suite proves no second copy exists anywhere in the repo.
+// THE ONE PROMPT. This file imports CLASSIFY_PROMPT and the shipped `classify()` from
+// radar/classify.js and restates neither. It does not rebuild the invocation either: `classify`
+// builds the argv, so what gets scored is byte-identical to what runs in a sweep, including the
+// fixed `--allowed-tools ""` tail and the success predicate over the CLI envelope. A second copy of
+// the prompt would let the eval pass while the shipped classifier fails, which is the one failure
+// mode an eval must not have. A source assertion in the tier-1 suite proves no second copy exists
+// anywhere in the repo.
+//
+// ------------------------------------------------------------------------------------------------
+// THERE IS NO CREDENTIAL TO ASSERT, AND THAT CHANGES WHAT THIS FILE GATES ON.
+//
+// The classifier shells out to a local agent CLI in print mode; the only credential involved is
+// whatever that CLI is already logged in with. So the question "can this run happen?" is no longer
+// "is a variable set?" but "does a classifier binary resolve, and does it answer?" — the same two
+// questions `radar/handoff.js` asks of its dispatcher, and the same two `classifyBlocked` asks
+// before a sweep. Both are asked HERE with the shipped helpers rather than a local reimplementation,
+// so an eval run and a sweep can never disagree about which binary is the classifier.
+//
+// They stay two separate refusals because they are two separate operator actions: one installs the
+// CLI, the other repairs it.
+//
+// WHICH CLI IS ALSO CONFIG, so the resolved PROVIDER travels with the model, the effort and the
+// flags into every call this file makes. Dropping it would be the quietest possible bug: `classify`
+// falls back to the default provider when handed none, so an eval configured for one CLI would
+// build the other one's argv and spawn the configured binary with it — a score measured against a
+// classifier that is not the one being configured.
 //
 // ------------------------------------------------------------------------------------------------
 // WHY THE PRECONDITIONS COME FIRST, AND WHY THEY ARE THIS PARANOID.
@@ -31,8 +51,8 @@
 // identifier. Values no offline check can know are covered by the two backstops that already
 // exist: the per-entry manual review in the story's DoD, and the B1 scratch-clone sweep.
 //
-// The preconditions run BEFORE the credential is even looked at, and long before anything is sent
-// anywhere. A corpus that has drifted must never reach the wire.
+// The preconditions run BEFORE the classifier is resolved, and long before any process is spawned.
+// A corpus that has drifted must never reach a model.
 // ------------------------------------------------------------------------------------------------
 
 import fs from 'node:fs';
@@ -40,7 +60,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { classify, CLASSIFY_PROMPT, VERDICT_SCHEMA, CLASSIFIER_MODEL, CLASSIFIER_VERSION, DEFAULT_KEY_REF, VERDICTS } from '../radar/classify.js';
+import { classify, CLASSIFY_PROMPT, TRANSPORT_SHAPE, resolveClassifier, probeBinary, VERDICTS } from '../radar/classify.js';
 import { loadConfig } from '../radar/config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -59,7 +79,7 @@ export const MIN_NEEDS_DECISION = 2;
 export const EXIT_OK = 0;
 export const EXIT_GATE_FAILED = 1;
 export const EXIT_PRECONDITION = 2;
-export const EXIT_NO_CREDENTIAL = 3;
+export const EXIT_NO_CLASSIFIER = 3;
 
 export const ID_GRAMMAR = /^fixture-inbox-\d+$/;
 
@@ -86,7 +106,7 @@ export const FORBIDDEN_PATTERNS = [
 
 // ---- the precondition layer ---------------------------------------------------------------------
 // Pure, synchronous, offline, and separately importable: it takes the corpus file's TEXT and
-// answers with a verdict. It reads no environment, resolves no credential and opens no socket, so
+// answers with a verdict. It reads no environment, resolves no binary and spawns no process, so
 // the tier-1 suite can exercise every branch of it with nothing configured at all.
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -198,29 +218,44 @@ export function readCorpusText(file) {
   }
 }
 
-// ---- the credential, asserted by name -----------------------------------------------------------
-// The config names the variable and never carries the secret (§5.2.5), so the failure message can
-// name the variable safely — and must, because "no API key" without a name is a message the
-// operator cannot act on. The VALUE is never printed, interpolated or logged anywhere in this file.
+// ---- the classifier, resolved from the same config the sweep reads --------------------------------
+// `resolveClassifier` is imported, never reimplemented. That is the whole point of it being exported:
+// the three-step binary fall-through (classifierBin -> claudeBin -> the default install path) and the
+// model/effort/flags normalisation have exactly one definition, so the eval cannot score one
+// classifier while the collector runs another.
 
-export async function resolveKeyRef(env, opts) {
+export async function resolveSettings(env, opts) {
   const o = opts || {};
   const radarDir = o.radarDir || (env && env.RADAR_DIR) || path.join(os.homedir(), '.radar');
   const configPath = o.configPath || path.join(radarDir, 'config.json');
   const { config } = await loadConfig(configPath);
-  return (config && config.classifierKeyRef) || DEFAULT_KEY_REF;
+  return resolveClassifier(config, env || {});
 }
 
-export function readKey(env, ref) {
-  const raw = env ? env[ref] : undefined;
-  if (typeof raw !== 'string') return null;
-  const key = raw.trim();
-  return key || null;
+/** X_OK on the resolved path. Injectable so the missing-binary branch is provable without deleting anything real. */
+export function defaultIsExecutable(p) {
+  try { fs.accessSync(p, fs.constants.X_OK); return true; } catch (_) { return false; }
+}
+
+// The two refusals, in the order the sweep asks them: the free syscall first, the one process launch
+// second. `ok:false` carries the reason AND the path, because a refusal that does not name what it
+// could not resolve is one the operator cannot act on.
+export async function checkClassifier(settings, deps) {
+  const d = deps || {};
+  const isExecutable = typeof d.isExecutable === 'function' ? d.isExecutable : defaultIsExecutable;
+  if (!isExecutable(settings.bin)) {
+    return { ok: false, reason: 'classifier binary missing', bin: settings.bin, version: null };
+  }
+  const probed = await probeBinary(settings.bin, { run: d.run, timeoutMs: d.probeTimeoutMs });
+  if (!probed.ok) {
+    return { ok: false, reason: 'classifier binary unusable', bin: settings.bin, version: null };
+  }
+  return { ok: true, reason: null, bin: settings.bin, version: probed.version };
 }
 
 // ---- the scoring layer --------------------------------------------------------------------------
 // Separately importable and separately callable, so the tier-1 suite can run every precondition
-// without ever reaching this half of the file — no key, no network, no cost.
+// without ever reaching this half of the file — no binary, no process, no cost.
 
 const COLUMNS = VERDICTS.concat(['unknown']);
 
@@ -234,12 +269,12 @@ export function emptyMatrix() {
 }
 
 /**
- * Score the corpus with the SHIPPED classifier. `deps.http` is injectable purely so the scoring
- * layer is testable at all; the real run passes none and `classify` uses its own transport.
+ * Score the corpus with the SHIPPED classifier. `deps.run` is the spawn seam, injectable purely so
+ * the scoring layer is testable at all; the real run passes none and `classify` spawns for itself.
  */
 export async function scoreCorpus(entries, deps) {
   const d = deps || {};
-  const key = d.key;
+  const settings = d.settings || {};
   const concurrency = Number.isFinite(Number(d.concurrency)) ? Number(d.concurrency) : 4;
   const rows = new Array(entries.length);
   const queue = entries.map((e, i) => ({ e, i }));
@@ -248,7 +283,15 @@ export async function scoreCorpus(entries, deps) {
     for (;;) {
       const job = queue.shift();
       if (!job) return;
-      const verdict = await classify({ text: job.e.text }, { key, http: d.http });
+      const verdict = await classify({ text: job.e.text }, {
+        run: d.run,
+        provider: settings.provider,
+        bin: settings.bin,
+        model: settings.model,
+        effort: settings.effort,
+        flags: settings.flags,
+        timeoutMs: d.timeoutMs,
+      });
       rows[job.i] = {
         id: job.e.id,
         expected: job.e.label,
@@ -302,14 +345,14 @@ export async function main(argv, env, io) {
   const out = (io && io.stdout) || process.stdout;
   const err = (io && io.stderr) || process.stderr;
   const args = parseArgs(argv || []);
+  const environ = env || process.env;
 
   out.write(`corpus:     ${args.corpus}\n`);
-  out.write(`model:      ${CLASSIFIER_MODEL}\n`);
-  out.write(`classifier: ${CLASSIFIER_VERSION} (sha of model + prompt + schema)\n`);
   out.write(`prompt:     ${CLASSIFY_PROMPT.split('\n').length} lines, ${CLASSIFY_PROMPT.length} chars, imported from radar/classify.js\n`);
-  out.write(`schema:     ${Object.keys(VERDICT_SCHEMA.properties).join(', ')}\n\n`);
+  out.write(`transport:  ${TRANSPORT_SHAPE}\n\n`);
 
-  // 1 — preconditions. Before the credential, before the network, before anything is scored.
+  // 1 — preconditions. Before the classifier is resolved, before any process is spawned, before
+  // anything is scored.
   const read = readCorpusText(args.corpus);
   if (!read.ok) {
     err.write(`precondition P1 FAILED (corpus parses into {id, text, label} entries): cannot read ${args.corpus}: ${read.error}\n`);
@@ -325,17 +368,27 @@ export async function main(argv, env, io) {
     return EXIT_PRECONDITION;
   }
 
-  // 2 — the credential, BY NAME. The name is safe to print; the value is never touched.
-  const ref = await resolveKeyRef(env || process.env, {});
-  const key = readKey(env || process.env, ref);
-  if (!key) {
-    err.write(`eval-inbox: no classifier key. Set the ${ref} environment variable (the config names the variable, never the secret).\n`);
+  // 2 — the classifier, BY PATH. Everything printed here comes from the normalized config through
+  // the shipped resolver; nothing is a literal restated in this file.
+  const settings = await resolveSettings(environ, { radarDir: io && io.radarDir });
+  out.write(`provider:   ${settings.provider}\n`);
+  out.write(`classifier: ${settings.bin}\n`);
+  // A null model is the provider saying "pass no model flag and take the CLI's own default". It is
+  // reported as such rather than printed as `null`, because the two are different facts.
+  out.write(`model:      ${settings.model || '(the CLI default — no model flag is passed)'}, effort ${settings.effort}\n`);
+  out.write(`flags:      ${settings.flags.length ? settings.flags.join(' ') : '(none)'}\n`);
+  out.write(`version:    ${settings.version} (sha of provider + model + effort + prompt + transport)\n\n`);
+
+  const resolved = await checkClassifier(settings, { run: io && io.run, isExecutable: io && io.isExecutable });
+  if (!resolved.ok) {
+    err.write(`eval-inbox: ${resolved.reason}: ${resolved.bin}\n`);
+    err.write(`eval-inbox: install the ${settings.provider} CLI there, or name a working one with classifierBin in the radar config.\n`);
     err.write('eval-inbox: nothing was scored.\n');
-    return EXIT_NO_CREDENTIAL;
+    return EXIT_NO_CLASSIFIER;
   }
 
   // 3 — score. This is the part that costs money, and it is the last thing that happens.
-  const scored = await scoreCorpus(verdict.entries, { key });
+  const scored = await scoreCorpus(verdict.entries, { settings, run: io && io.run });
 
   out.write(formatMatrix(scored.matrix) + '\n\n');
   for (const r of scored.rows) {
