@@ -395,6 +395,51 @@ test('AC3a-c: option, env var, and option-with-env-unset all take the no-scan pa
   assert.deepStrictEqual(await drive({ env: { RADAR_SCAN_ON_START: '  0  ' } }), [], 'trimmed, per the contract');
 });
 
+// The MATCHED PAIR to `radar.start()/stop() drive the collector scheduler once each` in
+// test/radar-server.test.js. That test asserts the DEFAULT path arms the scheduler; this one asserts
+// the GATED path does not — same stub-collector event recording, same witness, same shape, so the
+// two read as one claim split across two files.
+//
+// The pairing is not decoration. That sibling test used to pass `scanOnStart: false` as incidental
+// boilerplate and still expect a scheduler; when the spec widened the flag to gate collector.start()
+// as well as the boot scan, the flag was retired from it. The coverage it had provided by accident
+// has to reappear somewhere it is the POINT rather than a side effect, or widening the flag would
+// have quietly deleted the only assertion touching the gated path.
+test('AC3 pair: with the switch on — by option OR by env var — radar.start() drives NO collector.start()', async () => {
+  const drive = (opts) => {
+    const events = [];
+    const c = stubCollector({ start: () => { events.push('start'); }, stop: () => { events.push('stop'); } });
+    const radar = createRadar(Object.assign({ createCollector: () => c, log: () => {} }, opts));
+    radar.start();
+    radar.start();
+    return { events, radar };
+  };
+
+  // (1) by option, on an env that carries no switch at all
+  const byOption = drive({ scanOnStart: false, env: {} });
+  assert.deepStrictEqual(byOption.events, [], 'the scheduler must never be armed');
+  // The lifecycle itself is NOT suppressed, and that distinction matters: radar must not look
+  // permanently un-started to an operator, and stop() must stay reachable. There is simply no timer
+  // left for it to clear.
+  assert.strictEqual(byOption.radar.isStarted(), true);
+  byOption.radar.stop();
+  assert.deepStrictEqual(byOption.events, ['stop']);
+  assert.strictEqual(byOption.radar.isStarted(), false);
+
+  // (2) by env var — the only channel a spawned server.js has, since it passes no options
+  const byEnv = drive({ env: { RADAR_SCAN_ON_START: '0' } });
+  assert.deepStrictEqual(byEnv.events, [], 'the env string must gate the scheduler exactly as the option does');
+  byEnv.radar.stop();
+  assert.deepStrictEqual(byEnv.events, ['stop']);
+
+  // (3) the control that keeps the pair honest — switch absent, the scheduler arms exactly once,
+  //     which is precisely what the sibling test in radar-server.test.js asserts on its own.
+  const control = drive({ env: {} });
+  assert.deepStrictEqual(control.events, ['start'], 'opt-out only: absent, this is main behaviour');
+  control.radar.stop();
+  assert.deepStrictEqual(control.events, ['start', 'stop']);
+});
+
 // ---- AC1 + AC3d: a REAL server.js child ----------------------------------------------------------
 //
 // server.js calls createRadar() with NO options, so the env var is the ONLY channel a shipped
