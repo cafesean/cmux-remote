@@ -200,7 +200,14 @@
     let last = -1;
     for (let i = v.rowSig.length - 1; i >= 0; i--) if (v.rowSig[i]) { last = i; break; }
     if (last < 0) { el.scrollTop = 0; return; }
-    const wantBottom = (last + 1) * lh + (padY || 0);
+    // Rows WRAP on narrow panes (#screen is pre-wrap, and the 7px font floor / user zoom can make
+    // a row wider than the pane), so (index * lineHeight) undercounts pixels and the "tail" lands
+    // mid-content — the reader is yanked up off the bottom on every repaint. Measure the row's
+    // real box instead; the arithmetic stays only as a fallback for a not-yet-painted node.
+    const node = el.childNodes[last];
+    const wantBottom = node && node.getBoundingClientRect
+      ? node.getBoundingClientRect().bottom - el.getBoundingClientRect().top + el.scrollTop
+      : (last + 1) * lh + (padY || 0);
     const target = Math.max(0, Math.min(el.scrollHeight, wantBottom - el.clientHeight));
     if (Math.abs(el.scrollTop - target) < 1) return;
     // Our own scroll fires a scroll EVENT, and the listener would read "not at the bottom" — the
