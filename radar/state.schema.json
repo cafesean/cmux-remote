@@ -27,13 +27,19 @@
         "mergeable": { "type": "integer", "minimum": 0 },
         "orphans": { "type": "integer", "minimum": 0 },
         "staleWorktrees": { "type": "integer", "minimum": 0 },
-        "handoffsLive": { "type": "integer", "minimum": 0, "description": "p6: handoffs.length — the ONE count p6 adds. Every p5 count is computed BEFORE suppression (spec §6.6)." }
+        "handoffsLive": { "type": "integer", "minimum": 0, "description": "p6: handoffs.length — the ONE count p6 adds. Every p5 count is computed BEFORE suppression (spec §6.6)." },
+        "inbox": { "type": "integer", "minimum": 0, "description": "p9 (spec §5.4): inbox.length — from the LIST, never from a display array. Present in properties but NOT in required, so snapshots predating p9 (the committed fixtures among them) stay valid." }
       }
     },
     "repos": { "type": "object", "additionalProperties": { "$ref": "#/$defs/repo" } },
     "epics": { "type": "array", "items": { "$ref": "#/$defs/epic" } },
     "sessions": { "type": "array", "items": { "$ref": "#/$defs/session" } },
     "attention": { "type": "array", "items": { "$ref": "#/$defs/attention" } },
+    "inbox": {
+      "type": "array",
+      "description": "p9 (spec §5.3/§5.4): every session actually waiting on the operator, oldest-first, uncapped and ungrouped. The ONE derivation that reads the full sessions[] — a vanished session keeps its row (read-only) while every other derivation is shielded from it. Root is closed, so the key must be declared here; it is NOT in root.required, so pre-p9 snapshots stay valid.",
+      "items": { "$ref": "#/$defs/inboxItem" }
+    },
     "handoffs": {
       "type": "array",
       "description": "p6 (spec §4.6): ONLY handoffs that hold fact keys — the live set. Terminal handoffs are absent entirely; they live in the ledger. Consumed by the derivation for suppression, never rendered.",
@@ -262,6 +268,72 @@
       "type": "object",
       "required": ["kind"],
       "properties": { "kind": { "enum": ["jump", "context", "close", "tag", "runbook", "expand"] } }
+    },
+    "inboxItem": {
+      "type": "object",
+      "description": "p9 (spec §5.3). Closed: the row contract is exact, and a field that leaked in from the source session — `tabStatus` above all — would invite a consumer to read workspace-scoped provenance as per-tab readiness.",
+      "additionalProperties": false,
+      "required": ["sessionKey", "blockedSince", "lastStopAt", "cacheExpiresAt", "cacheApprox", "notificationType", "turn", "repo", "worktree", "epic", "question", "intent", "surface", "surfaceReason", "answerable", "actions"],
+      "properties": {
+        "sessionKey": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["machine", "sessionId"],
+          "properties": { "machine": { "type": "string" }, "sessionId": { "type": "string" } }
+        },
+        "blockedSince": { "type": "string" },
+        "lastStopAt": { "$ref": "#/$defs/nullableString" },
+        "cacheExpiresAt": { "$ref": "#/$defs/nullableString" },
+        "cacheApprox": { "const": true, "description": "Always approximate: the prompt-cache TTL drops to 5 min under overage and radar cannot see which regime it is in." },
+        "notificationType": { "type": "string" },
+        "turn": {
+          "type": "object",
+          "description": "The turn identity token a reply must echo (spec §5.5). blockedSince is the row's own value verbatim.",
+          "additionalProperties": false,
+          "required": ["blockedSince", "assistantTs"],
+          "properties": { "blockedSince": { "type": "string" }, "assistantTs": { "$ref": "#/$defs/nullableString" } }
+        },
+        "repo": { "$ref": "#/$defs/nullableString" },
+        "worktree": { "$ref": "#/$defs/nullableString" },
+        "epic": { "$ref": "#/$defs/nullableString" },
+        "question": { "type": "string", "description": "The COMPLETE last assistant text, never truncated here; '' when there is none. Truncation is a rendering concern." },
+        "intent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verdict", "reason", "model", "at", "inferred"],
+          "properties": {
+            "verdict": { "enum": ["needs-decision", "unknown"], "description": "Only the two verdicts that reach the queue; offer-more and status-only are filtered out by buildInbox." },
+            "reason": { "$ref": "#/$defs/nullableString" },
+            "model": { "$ref": "#/$defs/nullableString", "description": "null on every unknown path." },
+            "at": { "type": "string" },
+            "inferred": { "const": true }
+          }
+        },
+        "surface": {
+          "type": ["object", "null"],
+          "description": "EXACTLY four fields. tabStatus and every other source-surface field are not projected.",
+          "additionalProperties": false,
+          "required": ["workspace", "tabRef", "tabUuid", "via"],
+          "properties": {
+            "workspace": { "$ref": "#/$defs/nullableString" },
+            "tabRef": { "$ref": "#/$defs/nullableString" },
+            "tabUuid": { "type": "string" },
+            "via": { "enum": ["recorded", "cwd"] }
+          }
+        },
+        "surfaceReason": { "$ref": "#/$defs/nullableString" },
+        "answerable": { "type": "boolean" },
+        "actions": {
+          "type": "array",
+          "description": "[{kind:'reply'}] when answerable, [] otherwise. There is no dismiss.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind"],
+            "properties": { "kind": { "const": "reply" } }
+          }
+        }
+      }
     },
     "jiraDriftItem": {
       "type": "object",
