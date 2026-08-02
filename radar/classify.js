@@ -36,8 +36,10 @@
 // byte exists for.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const childProcess = require('child_process');
 const store = require('./store');
 const { RETENTION_MS } = require('./eventlog');
 
@@ -124,15 +126,50 @@ function readLastAssistantText(transcriptPath) {
 // ================================================================================================
 // §5.2.2 – §5.2.6 — the classifier, the intent cache, and the bounded stage.
 //
-// ONE RULE ORDERS EVERYTHING BELOW: the credential is resolved FIRST, before any network or cache
-// decision, and its absence outranks every other rule including a failed transcript read. The
-// reason is not tidiness. An absent key with cache reads still permitted would keep serving the
-// previous run's `offer-more` and `status-only` verdicts for up to 48 hours — which is to say it
-// would keep SUPPRESSING rows, silently, from a classifier that is not running. Suppression is the
-// one direction this feature is not allowed to fail in (principle 2), so no-key means: read the
-// transcript anyway (`lastAssistant` is honest data and may publish as null), touch no cache,
-// attach `unknown · no credential` to every blocked session, and leave the entries on disk.
-// `no transcript text` is therefore a reason that can only ever appear when a credential resolved.
+// THE TRANSPORT IS A LOCAL AGENT CLI IN PRINT MODE, NOT AN HTTP API — and WHICH CLI is an operator
+// choice. This project does not call a model API directly and holds no API key for one;
+// `radar/handoff.js` already establishes the house pattern — resolve a binary from config, check it
+// is executable, probe `--version`, and fail with a distinct code for each of those two ways of
+// being unresolvable. This module mirrors that resolution and adds print mode, for either of two
+// providers (see PROVIDERS for the argv each one builds and the envelope each one returns):
+//
+//   claude -p --output-format json --model <m> --effort <e> <flags…>
+//          --allowed-tools "" --system-prompt <CLASSIFY_PROMPT> <TEXT>
+//   codex  exec --json -c model_reasoning_effort="<e>" --output-schema <schema> <flags…>
+//          <CLASSIFY_PROMPT + TEXT>
+//
+// so the only credential involved is whatever the chosen CLI is already logged in with. That is also
+// why claude's `--bare` is disqualified despite looking like the obvious cost fix: `claude --help`
+// states that under `--bare`, "Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper (OAuth
+// and keychain are never read)" — it would reintroduce the exact API key this transport removes.
+// codex's equivalent lever, `--ignore-user-config`, has no such catch: its help states auth still
+// comes from CODEX_HOME. That, plus `--output-schema` enforcing the answer shape at the CLI rather
+// than asking the prompt nicely for it, is why codex is the better host for this job — claude is
+// merely the DEFAULT, for continuity with handoff.js.
+//
+// COST IS A FIRST-CLASS CONSTRAINT HERE, NOT AN AFTERTHOUGHT. `collector.js` sweeps every 60
+// seconds over every blocked session, so an untuned invocation is a standing bill: a single probe
+// with default settings loaded the whole plugin/skill/MCP environment and cost real money in
+// cache-creation tokens alone. Three things hold that down, and all three are deliberate:
+//   1. the intent cache (§5.2.4) — one paid verdict per session-turn, good for 48 h;
+//   2. the default flags — per provider, and CONFIG-DRIVEN so the set can be retuned without a code
+//      change (radar/config.js names the further levers);
+//   3. a small model at low effort by default, likewise config-driven.
+//
+// ⚠️ THE CODEX PATH IS UNVERIFIED AGAINST A LIVE RUN. Its flags come from `codex exec --help` on the
+// installed CLI; no live classification has been made with it. Its parser is written to survive that
+// ignorance, and it is deliberately not the default. One live probe promotes it.
+//
+// ONE RULE ORDERS EVERYTHING BELOW: the classifier's binary is resolved FIRST, before any network
+// or cache decision, and an unresolvable binary outranks every other rule including a failed
+// transcript read. The reason is not tidiness. An absent classifier with cache reads still
+// permitted would keep serving the previous run's `offer-more` and `status-only` verdicts for up to
+// 48 hours — which is to say it would keep SUPPRESSING rows, silently, from a classifier that is
+// not running. Suppression is the one direction this feature is not allowed to fail in (principle
+// 2), so an unresolvable binary means: read the transcript anyway (`lastAssistant` is honest data
+// and may publish as null), touch no cache, attach `unknown · classifier binary missing` (or
+// `· classifier binary unusable`) to every blocked session, and leave the entries on disk.
+// `no transcript text` is therefore a reason that can only ever appear when the binary resolved.
 //
 // THE SECOND RULE IS THAT THE DEADLINE HAS TEETH. The collector awaits this stage, so a hung
 // classifier is a hung sweep — and a sweep that never publishes is worse than one that publishes
@@ -141,38 +178,48 @@ function readLastAssistantText(transcriptPath) {
 // the deadline — including from a transport that ignores the abort signal — is discarded WHOLE. It
 // mutates no session, writes no cache entry and starts no cooldown, because every side effect
 // checks the stage generation that spawned it before applying. There is no background completion
-// and no provisional-then-updated row.
+// and no provisional-then-updated row. Under this transport the deadline also KILLS THE CHILD
+// PROCESS rather than merely ignoring its answer: a classifier that outlives its stage is a cost
+// leak as well as a correctness one.
 // ================================================================================================
 
-const API_URL = 'https://api.anthropic.com/v1/messages';
-const API_VERSION = '2023-06-01';
-const MODEL = 'claude-opus-5';
+// Which CLI does the classifying. Both are agent CLIs already installed on an operator's machine and
+// already authenticated; neither needs an API key held by radar. `claude` is the default only because
+// `radar/handoff.js` already spawns it, so a machine that can dispatch a handoff can classify with no
+// extra setup — NOT because it is the better host for this job. It is not; see PROVIDERS.
+const DEFAULT_PROVIDER = 'claude';
+const DEFAULT_EFFORT = 'low';
 
-// §5.2.2, and this number is LOAD-BEARING. Thinking is on by default on this model when `thinking`
-// is omitted, and `max_tokens` caps thinking PLUS response text together. A small budget truncates
-// before the JSON closes: `stop_reason: "max_tokens"`, an unparseable body, `unknown` for every
-// session — the exact all-noise feed this feature exists to remove, with an API bill attached.
-const MAX_TOKENS = 2048;
+// The transport contract, hashed into CLASSIFIER_VERSION. Bump the trailing number whenever the
+// invocation or the output-parsing rule changes in a way that could change what a verdict MEANS —
+// that bump is what invalidates 48 hours of cached verdicts produced under the old contract.
+const TRANSPORT_SHAPE = 'cli-print-mode/2';
 
-const HTTP_TIMEOUT_MS = 8000;          // one attempt's own timeout (§5.2.2 failure table)
+// One attempt's own timeout, and it is deliberately EQUAL to the stage deadline rather than shorter.
+// A CLI classification is a process launch plus a model turn, so "slow" is normal in a way it never
+// was over HTTP. If this timeout fired first, ordinary slowness would report `classifier
+// unreachable` and arm a 5-minute cooldown — punishing the sweep for the classifier being busy. Set
+// equal, the STAGE deadline wins every slowness race instead, which reports `deadline`, starts no
+// cooldown, and simply retries on the next sweep. What still fails fast — a spawn error, a nonzero
+// exit — is exactly what a second attempt can plausibly fix.
+const ATTEMPT_TIMEOUT_MS = 20000;
+const PROBE_TIMEOUT_MS = 5000;         // `--version`, which reaches no model and costs nothing
 const CLASSIFY_DEADLINE_MS = 20000;    // the whole stage's bound (§5.2.6)
 const COOLDOWN_MS = 5 * 60 * 1000;     // the negative cooldown window (§5.2.4)
 const POOL_SIZE = 4;                   // at most four concurrent classifications
-const DEFAULT_KEY_REF = 'ANTHROPIC_API_KEY';
+
+// The classified text travels as an argv element, so it is bounded twice: §5.2.1 already caps the
+// transcript read at 256 KB, and this caps what reaches the command line. Exceeding ARG_MAX is a
+// spawn failure — E2BIG — which would read as `classifier unreachable` forever for one unlucky
+// session. The TAIL is what survives a trim, never the head: §5.2.1's whole premise is that the
+// operative sentence is at the end of the turn, and a message long enough to trim is one whose
+// question is certainly not in its first 32 KB.
+const MAX_PROMPT_BYTES = 32768;
+const TRIM_MARKER = '[…earlier output trimmed…]\n';
 
 // `unknown` is deliberately NOT in this list. It is only ever this module's own answer, never a
 // value the model is allowed to return and never a value that can be cached.
 const VERDICTS = ['needs-decision', 'offer-more', 'status-only'];
-
-const VERDICT_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['verdict', 'reason'],
-  properties: {
-    verdict: { type: 'string', enum: VERDICTS.slice() },
-    reason: { type: 'string' },
-  },
-};
 
 // §5.2.3. This exact string is scored against the labelled corpus in S-004 and is hashed into
 // CLASSIFIER_VERSION, so editing it invalidates every cached verdict — which is the point.
@@ -182,6 +229,10 @@ const VERDICT_SCHEMA = {
 // sentence is "Want me to also wire the retry path?" — a question mark, an offer, and nothing
 // blocked. And the tie-break is asymmetric ON PURPOSE (principle 2): a question wrongly hidden is
 // a session that waits forever, a report wrongly shown is one line the operator skims past.
+// A THIRD CLAUSE EARNS ITS PLACE UNDER THIS TRANSPORT: the output contract. Over HTTP the answer
+// shape was enforced on the wire by a json_schema, and the prompt could stay silent about it. A CLI
+// in print mode returns whatever the model wrote, so the shape has to be ASKED for — and asked for
+// precisely, because the whole feature reads as `unknown` if the model wraps its JSON in prose.
 const CLASSIFY_PROMPT = [
   'Decide whether this Claude Code session is blocked on its operator.',
   '',
@@ -200,19 +251,36 @@ const CLASSIFY_PROMPT = [
   'When genuinely torn between needs-decision and offer-more, answer needs-decision. A missed',
   'question costs more than a shown one.',
   '',
+  'Reply with one JSON object and nothing else: no preamble, no explanation, no code fence.',
+  'It has exactly two keys. verdict is one of needs-decision, offer-more, status-only.',
   'reason is one short sentence naming the evidence you decided on.',
+  'Use no tools. Do not read any file. Decide only from the text below.',
 ].join('\n');
 
-// §5.2.4. Exposed as a pure function so the pinned-digest test can hand it the three known inputs
+// §5.2.4. Exposed as a pure function so the pinned-digest test can hand it the four known inputs
 // without monkey-patching module constants. The separator is a single ASCII space (0x20).
-function classifierVersion(model, prompt, schema) {
+//
+// ITS INPUTS ARE EXACTLY WHAT DETERMINES WHAT A VERDICT MEANS, and under this transport that is no
+// longer a fixed list of module constants: the provider, the model and the effort level all come
+// from config, so a module-constant digest would let an operator switch CLI or model and keep
+// serving 48 hours of verdicts the new classifier never produced. The version is therefore computed
+// PER STAGE from the resolved settings; `CLASSIFIER_VERSION` below is that same computation over the
+// defaults, which is what an unconfigured collector actually runs.
+//
+// THE PROVIDER IS IN THE DIGEST AND THAT IS NOT COSMETIC. Two CLIs asked the same question with the
+// same prompt still answer as different models behind different harnesses. Leaving the provider out
+// would let a switch from claude to codex silently inherit two days of the other one's verdicts.
+function classifierVersion(provider, model, effort, prompt, transport) {
   return crypto.createHash('sha256')
-    .update(String(model) + ' ' + String(prompt) + ' ' + JSON.stringify(schema))
+    .update(String(provider) + ' ' + String(model) + ' ' + String(effort) + ' ' + String(prompt) + ' ' + JSON.stringify(transport))
     .digest('hex')
     .slice(0, 12);
 }
 
-const CLASSIFIER_VERSION = classifierVersion(MODEL, CLASSIFY_PROMPT, VERDICT_SCHEMA);
+const transportOf = (flags) => ({ shape: TRANSPORT_SHAPE, flags: flags.slice() });
+
+// CLASSIFIER_VERSION is defined below PROVIDERS, because it is now computed FROM the default
+// provider's own model and flags rather than from free-standing constants.
 
 // §5.2.4 — the ONE key encoding, used identically for cache lookup, cache write, the negative
 // cooldown and single-flight.
@@ -229,109 +297,303 @@ const intentCacheKey = (machine, sessionId, ts, version) =>
   JSON.stringify([machine, sessionId, ts, version === undefined ? CLASSIFIER_VERSION : version]);
 
 // ---- transport ---------------------------------------------------------------------------------
-// radar/http.js hardcodes `method:'GET'` and passes no body, so it cannot be reused here. This is
-// classify's own transport and stays local to this file rather than widening the shared client.
+// A child process, not a socket. `radar/http.js` is GET-only and irrelevant here; what this needs is
+// the shape `handoff.js` already uses for `claude` — spawn, collect stdout, never throw.
 //
-// Shape: { ok, status, body } on any completed request; { ok:false, status:0 } when the request
-// never completed. It never throws — a dead classifier is a fact to report, not an exception.
-async function defaultHttp(req) {
-  const doFetch = globalThis.fetch;
-  if (typeof doFetch !== 'function') return { ok: false, status: 0, body: null, error: 'no fetch implementation (node >= 18 required)' };
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), HTTP_TIMEOUT_MS);
-  // The stage's signal and this attempt's timeout must BOTH be able to kill the request. A listener
-  // added after a signal has already fired never replays, so an already-aborted signal is checked
-  // first rather than merely subscribed to.
-  const outer = req.signal;
-  const onAbort = () => ac.abort();
-  if (outer) {
-    if (outer.aborted) ac.abort();
-    else outer.addEventListener('abort', onAbort, { once: true });
-  }
-  try {
-    const res = await doFetch(req.url, { method: req.method, headers: req.headers, body: req.body, signal: ac.signal });
-    let body = null;
-    try { body = await res.json(); } catch (_) { body = null; }
-    return { ok: res.ok, status: res.status, body };
-  } catch (e) {
-    return { ok: false, status: 0, body: null, error: e && e.message ? e.message : String(e) };
-  } finally {
-    clearTimeout(timer);
-    if (outer) { try { outer.removeEventListener('abort', onAbort); } catch (_) { /* already gone */ } }
-  }
+// Shape: { ok, code, stdout, stderr, error }. `ok` is true only on a clean exit 0 — a spawn failure,
+// a nonzero exit, a timeout and a kill are all `ok:false` with `error` naming which. It never
+// throws: a dead classifier is a fact to report, not an exception that ends a sweep.
+//
+// THE SIGNAL IS THE POINT. Node's `spawn` accepts an AbortSignal and kills the child when it fires,
+// so the stage deadline does not merely stop caring about the answer — it stops the process that was
+// going to produce it. The per-attempt `timeout` is the backstop for a child that outlives even
+// that, and `killSignal` stays SIGTERM so the CLI gets to shut down its own children.
+function defaultRun(req) {
+  const spawn = typeof req.spawn === 'function' ? req.spawn : childProcess.spawn;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (r) => { if (!settled) { settled = true; resolve(r); } };
+
+    let child;
+    try {
+      child = spawn(req.bin, req.args, {
+        signal: req.signal,
+        timeout: req.timeoutMs,
+        killSignal: 'SIGTERM',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      return finish({ ok: false, code: null, stdout: '', stderr: '', error: e && e.message ? e.message : String(e) });
+    }
+
+    let out = '';
+    let err = '';
+    // A classifier answer is a few hundred bytes; anything unbounded here is a memory leak wearing a
+    // buffer. Past the cap the tail is dropped — the JSON we need is at the start of a sane answer,
+    // and an answer this long is not a sane one.
+    const cap = (s, chunk) => (s.length >= MAX_PROMPT_BYTES ? s : s + String(chunk));
+    if (child.stdout) child.stdout.on('data', (c) => { out = cap(out, c); });
+    if (child.stderr) child.stderr.on('data', (c) => { err = cap(err, c); });
+
+    child.on('error', (e) => finish({ ok: false, code: null, stdout: out, stderr: err, error: e && e.message ? e.message : String(e) }));
+    child.on('close', (code, sig) => finish({
+      ok: code === 0 && !sig,
+      code,
+      signal: sig || null,
+      stdout: out,
+      stderr: err,
+      error: code === 0 && !sig ? null : (sig ? `killed by ${sig}` : `exit ${code}`),
+    }));
+  });
 }
 
 // ---- classify ----------------------------------------------------------------------------------
 
 const unknown = (reason) => ({ verdict: 'unknown', reason });
 
-// The success predicate, §5.2.2, IN ORDER. Structured output constrains the generated text, not the
-// HTTP envelope, so every step is explicit. Step 2 is checked BEFORE `content` is read — a refusal
-// can carry an empty content array, and a reader that indexes into it first throws instead of
-// answering `refused`.
-function readVerdict(body) {
-  const obj = body && typeof body === 'object' ? body : null;
-  const stop = obj ? obj.stop_reason : undefined;
-  if (stop === 'refusal') return unknown('refused');          // 2
-  if (stop === 'max_tokens') return unknown('truncated');     // 3
+function classifyArgv(settings, text) {
+  return providerOf(settings.provider).argv(settings, text);
+}
 
-  const content = obj ? obj.content : null;                   // 4
-  if (!Array.isArray(content) || content.length === 0) return unknown('unparseable');
-  let block = null;
-  for (const b of content) { if (b && typeof b === 'object' && b.type === 'text') { block = b; break; } }
-  if (!block || typeof block.text !== 'string') return unknown('unparseable');
+// Keep the TAIL. See MAX_PROMPT_BYTES.
+function boundText(text) {
+  if (Buffer.byteLength(text, 'utf8') <= MAX_PROMPT_BYTES) return text;
+  const buf = Buffer.from(text, 'utf8');
+  return TRIM_MARKER + buf.slice(buf.length - MAX_PROMPT_BYTES).toString('utf8');
+}
 
-  let parsed;                                                 // 5
-  try { parsed = JSON.parse(block.text); } catch (_) { return unknown('unparseable'); }
+// The model was asked for bare JSON and usually gives it. A fence is the one deviation common enough
+// to be worth absorbing rather than failing on — it costs a regex here and saves an `unknown` row
+// there. Anything else is genuinely unparseable.
+function parseAnswer(raw) {
+  const text = String(raw == null ? '' : raw).trim();
+  const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n?```$/.exec(text);
+  try { return JSON.parse(fenced ? fenced[1] : text); } catch (_) { return undefined; }
+}
 
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return unknown('unparseable');
-  if (VERDICTS.indexOf(parsed.verdict) === -1) return unknown('unparseable');   // 6
-  if (typeof parsed.reason !== 'string') return unknown('unparseable');
+// THE ANSWER PREDICATE, shared by both providers and deliberately strict. Whatever a CLI wraps its
+// output in, an answer only counts if it is an object carrying a verdict from the closed enum and a
+// string reason. `unknown` is absent from VERDICTS on purpose, so no envelope can talk this function
+// into returning one — `unknown` stays this module's own word for "I could not get an answer".
+function verdictOf(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (VERDICTS.indexOf(parsed.verdict) === -1) return null;
+  if (typeof parsed.reason !== 'string') return null;
   return { verdict: parsed.verdict, reason: parsed.reason };
 }
 
-// One classification operation: up to TWO HTTP attempts, and only a transport-class failure (non-2xx,
-// timeout, network error) is retried. A refusal, a truncation and an unparseable body are ANSWERS —
-// retrying them buys a second identical answer and a second bill.
+// ---- providers ----------------------------------------------------------------------------------
+// TWO CLIs, ONE CONTRACT. A provider owns exactly three decisions — how to invoke, how to read the
+// answer back, and where its binary lives when unconfigured. Nothing else may live here: the cache,
+// the cooldown, the deadline, the precedence rule and single-flight are transport-agnostic and stay
+// that way, which is what makes adding a third CLI a change to this object and nothing else.
+//
+// The honest comparison, because it decides which one an operator should pick:
+//
+//   codex is the better host for THIS job. `--output-schema` enforces the answer shape at the CLI
+//   rather than asking the prompt nicely for it, and `--ignore-user-config` drops the ambient
+//   config that makes an agent CLI expensive to invoke WITHOUT forcing an API key — its own help
+//   states auth still comes from CODEX_HOME. claude's equivalent cost lever, `--bare`, does the
+//   opposite: it makes auth strictly ANTHROPIC_API_KEY, reintroducing the very credential this
+//   transport exists to avoid holding. So claude is the default for continuity with handoff.js,
+//   not for merit.
+const PROVIDERS = {
+  // Measured against the real CLI: `-p --output-format json` returns a JSON ARRAY of events —
+  // system/init, one or more assistant, sometimes a rate-limit event, and a final `type:"result"`
+  // carrying the answer in `.result`. The LAST result element wins: a run that emitted two has
+  // answered twice and the last is the one it finished on. A bare object is the degenerate
+  // one-element case the CLI's own help calls "json (single result)" — the same envelope read two
+  // ways, not two answers to one question.
+  claude: {
+    id: 'claude',
+    binParts: ['.local', 'bin', 'claude'],
+    // Null means "do not pass a model flag and let the CLI choose". claude is pinned because the
+    // digest has to mean something; a floating default would silently change what a cached verdict
+    // was worth.
+    defaultModel: 'claude-sonnet-5',
+    defaultFlags: ['--strict-mcp-config', '--no-session-persistence'],
+
+    // `--allowed-tools ""` is FIXED and sits immediately before `--system-prompt`, and both facts
+    // are load-bearing. Fixed, because a classifier that can run tools is a classifier that can
+    // spend money and touch the disk on the strength of text it was asked to judge. Positioned
+    // there, because `claude --help` declares `--allowed-tools <tools…>` VARIADIC: an option-list
+    // flag left adjacent to the trailing positional would swallow the transcript text as another
+    // tool name. Every operator-supplied flag lands before it, so no configured flag can reach the
+    // positional either.
+    argv(settings, text) {
+      const argv = ['-p', '--output-format', 'json'];
+      if (settings.model) argv.push('--model', settings.model);
+      argv.push('--effort', settings.effort);
+      return argv
+        .concat(settings.flags)
+        .concat(['--allowed-tools', '', '--system-prompt', CLASSIFY_PROMPT, text]);
+    },
+
+    parse(res) {
+      const envelope = parseAnswer(res.stdout);
+      if (envelope === undefined) return unknown('unparseable');
+      const events = Array.isArray(envelope) ? envelope : [envelope];
+      let result = null;
+      for (const e of events) if (e && typeof e === 'object' && e.type === 'result') result = e;
+      if (!result) return unknown('unparseable');
+      // Everything the envelope can say other than a clean success collapses to `unparseable`. A
+      // refusal and a truncation were distinguishable over HTTP through `stop_reason` and are not
+      // distinguishable here — inventing a distinction the wire cannot support would be a reason
+      // string that lies.
+      if (result.is_error === true) return unknown('unparseable');
+      if (result.subtype !== 'success') return unknown('unparseable');
+      return verdictOf(parseAnswer(result.result)) || unknown('unparseable');
+    },
+  },
+
+  // ⚠️ THE CODEX ENVELOPE IS UNVERIFIED AGAINST A LIVE RUN. Its flags come from `codex exec --help`
+  // on the installed CLI, but no live classification has been made with it — the operator is at the
+  // top of a weekly limit and a single live probe on the other provider measured half a dollar. The
+  // PARSER IS WRITTEN TO SURVIVE THAT IGNORANCE (see parse below), and codex is deliberately not the
+  // default. One live probe promotes it; until then claude is the measured path.
+  codex: {
+    id: 'codex',
+    binParts: ['.local', 'bin', 'codex'],
+    // Deliberately null: this project's standing convention for codex is to omit `-m` and take the
+    // CLI's own current default rather than pin a model name that ages badly.
+    defaultModel: null,
+    // `--ephemeral` writes no session file per classified row, `--skip-git-repo-check` lets the
+    // classifier run from anywhere, `--ignore-user-config` drops the ambient config that is most of
+    // the cost, and read-only sandbox is the codex spelling of "this thing judges text, it does not
+    // act". These are defaults, not fixtures — an operator can replace them.
+    defaultFlags: ['--ephemeral', '--skip-git-repo-check', '--ignore-user-config', '-s', 'read-only'],
+
+    // codex has no `--system-prompt`, so the instruction and the text travel as ONE positional
+    // prompt. The separator is a blank line, which is also what the prompt's own last line assumes
+    // when it says to decide from "the text below".
+    //
+    // `--output-schema` is the reason to prefer this provider: the answer shape is enforced by the
+    // CLI instead of requested by the prompt. The schema is a STATIC FILE shipped beside this
+    // module — never a per-call temp file, because a temp file written on the hot path of a sweep
+    // that runs every 60 seconds is a leak waiting to happen.
+    argv(settings, text) {
+      const argv = ['exec', '--json'];
+      if (settings.model) argv.push('-m', settings.model);
+      argv.push('-c', 'model_reasoning_effort="' + settings.effort + '"');
+      argv.push('--output-schema', VERDICT_SCHEMA_PATH);
+      return argv.concat(settings.flags).concat([CLASSIFY_PROMPT + '\n\n' + text]);
+    },
+
+    // `--json` emits JSONL, and the EVENT VOCABULARY IS A MOVING TARGET across CLI versions — so
+    // pinning an event name here would be a guess that fails silently on the next upgrade, turning
+    // every session `unknown` with no signal that the parser, not the model, is what broke.
+    //
+    // Instead: scan every line, and let the LAST payload that yields a valid verdict win. This is
+    // liberal in what it accepts and still strict in what it returns, because `verdictOf` admits
+    // only the closed enum plus a string reason — reasoning traces, tool chatter and prose cannot
+    // masquerade as an answer. A line's payload is tried both as the whole line and as any string
+    // field one level in, which covers "the answer is the line" and "the answer is a field on an
+    // event" without needing to know which one this version does.
+    parse(res) {
+      const lines = String(res.stdout == null ? '' : res.stdout).split('\n');
+      let found = null;
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const direct = verdictOf(parseAnswer(line));
+        if (direct) { found = direct; continue; }
+        const event = parseAnswer(line);
+        if (!event || typeof event !== 'object') continue;
+        for (const v of Object.values(event)) {
+          if (typeof v !== 'string') continue;
+          const nested = verdictOf(parseAnswer(v));
+          if (nested) found = nested;
+        }
+      }
+      return found || unknown('unparseable');
+    },
+  },
+};
+
+const PROVIDER_IDS = Object.keys(PROVIDERS);
+
+// An unknown provider id resolves to the default rather than throwing. normalizeConfig already
+// rejects and reports a bad id; this is the second half of that defence, and a sweep that keeps
+// classifying with the default beats a sweep that dies on a typo.
+const providerOf = (id) => PROVIDERS[id] || PROVIDERS[DEFAULT_PROVIDER];
+
+const VERDICT_SCHEMA_PATH = path.join(__dirname, 'verdict.schema.json');
+
+// The digest an UNCONFIGURED collector runs under — the default provider's own model and flags, not
+// a separate set of constants that could drift away from what the provider actually sends.
+const CLASSIFIER_VERSION = classifierVersion(
+  DEFAULT_PROVIDER,
+  PROVIDERS[DEFAULT_PROVIDER].defaultModel,
+  DEFAULT_EFFORT,
+  CLASSIFY_PROMPT,
+  transportOf(PROVIDERS[DEFAULT_PROVIDER].defaultFlags),
+);
+
+function readVerdict(res, provider) {
+  const r = typeof res === 'string' ? { stdout: res } : (res || { stdout: '' });
+  return providerOf(provider).parse(r);
+}
+
+// One classification operation: up to TWO runs, and only a transport-class failure (spawn error,
+// nonzero exit, kill, timeout) is retried. An unparseable answer is an ANSWER — retrying it buys a
+// second identical answer and a second bill.
 async function classify(input, deps) {
   const d = deps || {};
   const text = input && typeof input.text === 'string' ? input.text : '';
   if (!text.trim()) return unknown('no transcript text');
 
-  const key = d.key;
-  if (typeof key !== 'string' || !key) return unknown('no credential');
+  const bin = d.bin;
+  if (typeof bin !== 'string' || !bin) return unknown('classifier binary missing');
 
-  const http = typeof d.http === 'function' ? d.http : defaultHttp;
+  const run = typeof d.run === 'function' ? d.run : defaultRun;
   const signal = d.signal;
+  const provider = PROVIDERS[d.provider] ? d.provider : DEFAULT_PROVIDER;
+  const p = PROVIDERS[provider];
+  const settings = {
+    provider,
+    model: typeof d.model === 'string' && d.model ? d.model : p.defaultModel,
+    effort: typeof d.effort === 'string' && d.effort ? d.effort : DEFAULT_EFFORT,
+    flags: Array.isArray(d.flags) ? d.flags : p.defaultFlags,
+  };
 
   const request = {
-    url: API_URL,
-    method: 'POST',
-    headers: {
-      'x-api-key': key,
-      'anthropic-version': API_VERSION,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      output_config: { effort: 'low', format: { type: 'json_schema', schema: VERDICT_SCHEMA } },
-      system: CLASSIFY_PROMPT,
-      messages: [{ role: 'user', content: text }],
-    }),
+    bin,
+    args: classifyArgv(settings, boundText(text)),
+    timeoutMs: Number.isFinite(Number(d.timeoutMs)) ? Number(d.timeoutMs) : ATTEMPT_TIMEOUT_MS,
     signal,
   };
 
   for (let attempt = 0; attempt < 2; attempt++) {
-    // Retrying past an abort would put a fresh request on the wire for a stage that is already over.
+    // Retrying past an abort would launch a fresh process for a stage that is already over — the
+    // precise cost leak the deadline exists to close.
     if (signal && signal.aborted) return unknown('classifier unreachable');
     let res = null;
-    try { res = await http(request); } catch (_) { res = null; }
-    const status = res ? Number(res.status) : NaN;
-    if (!Number.isFinite(status) || status < 200 || status >= 300) continue;   // 1 — transport class
-    return readVerdict(res.body);
+    try { res = await run(request); } catch (_) { res = null; }
+    if (!res || res.ok !== true) continue;                    // transport class — a second try may fix it
+    return readVerdict(res, provider);
   }
   return unknown('classifier unreachable');
+}
+
+// §5.2.5, second half. `handoff.js` proves a binary in two steps and so does this: `accessSync` is
+// free and synchronous, `--version` costs one process launch and reaches no model. They are separate
+// reasons because they are separate operator actions — one installs claude, the other repairs it.
+async function probeBinary(bin, o) {
+  const opts = o || {};
+  const run = typeof opts.run === 'function' ? opts.run : defaultRun;
+  let res = null;
+  try {
+    res = await run({
+      bin,
+      args: ['--version'],
+      timeoutMs: Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : PROBE_TIMEOUT_MS,
+      signal: opts.signal,
+    });
+  } catch (_) { res = null; }
+  if (!res || res.ok !== true) return { ok: false, version: null };
+  const version = String(res.stdout == null ? '' : res.stdout).trim();
+  // handoff.js treats empty `--version` output as unusable, and for the same reason: a PATH shim
+  // that exits 0 and prints nothing is not the binary we asked for.
+  return version ? { ok: true, version } : { ok: false, version: null };
 }
 
 // ---- the intent cache, the cooldown, and single-flight -------------------------------------------
@@ -355,17 +617,53 @@ function isFreshEntry(v, now) {
   return age >= 0 && age < RETENTION_MS;
 }
 
-// §5.2.5. The config names the variable; it never carries the secret.
-function resolveCredential(config, env) {
-  const ref = (config && typeof config.classifierKeyRef === 'string' && config.classifierKeyRef.trim())
-    ? config.classifierKeyRef.trim()
-    : DEFAULT_KEY_REF;
-  const raw = env ? env[ref] : undefined;
-  if (typeof raw !== 'string') return null;
-  // Trimmed because a key sourced from a dotenv file routinely arrives with a trailing newline and
-  // a credential with surrounding whitespace is never the valid one.
-  const key = raw.trim();
-  return key || null;
+// §5.2.5. Everything the transport needs, resolved from the NORMALIZED config in one place — the
+// stage reads it, and so does the eval script, so what gets scored is what runs.
+//
+// The binary falls through THREE steps: `classifierBin`, then `claudeBin`, then the same
+// `$HOME/.local/bin/claude` default `handoff.js` resolves to. The middle step is the one that
+// matters day to day — a machine with claude installed somewhere unusual names it once, and both the
+// dispatcher and the classifier find it. The third keeps that convenience from becoming a hard
+// dependency: with no config at all this still resolves, and the answer is honest either way
+// because the next thing that happens to it is an executability check.
+function resolveClassifier(config, env) {
+  const c = config && typeof config === 'object' ? config : {};
+  const pick = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const home = (env && typeof env.HOME === 'string' && env.HOME) ? env.HOME : os.homedir();
+
+  const provider = PROVIDERS[pick(c.classifierProvider)] ? pick(c.classifierProvider) : DEFAULT_PROVIDER;
+  const p = PROVIDERS[provider];
+
+  // `claudeBin` is honoured as the middle step ONLY for the claude provider. Pointing the codex
+  // provider at the configured claude binary because they share a config key would spawn the wrong
+  // CLI with the other one's argv — a failure that reads as "classifier unreachable" forever while
+  // the binary it names is installed and healthy.
+  const legacyBin = provider === 'claude' ? pick(c.claudeBin) : null;
+  const bin = pick(c.classifierBin) || legacyBin || path.join.apply(path, [home].concat(p.binParts));
+
+  // A configured model wins; otherwise the provider's own default, which may be null meaning "pass
+  // no model flag and let the CLI decide".
+  //
+  // ⚠️ An unpinned model is a real trade-off, stated here rather than discovered later: the digest
+  // below hashes the model as sent, so `null` keeps hashing to the same version even if the CLI's
+  // own default moves under us — and 48 hours of verdicts from the old default keep being served.
+  // An operator who needs that invalidation to be automatic must pin `classifierModel`.
+  const model = pick(c.classifierModel) || p.defaultModel;
+  const effort = pick(c.classifierEffort) || DEFAULT_EFFORT;
+  const flags = Array.isArray(c.classifierFlags)
+    ? c.classifierFlags.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
+    : p.defaultFlags.slice();
+  // WHAT WE SEND AND WHAT WE RECORD ARE NOT THE SAME STRING, and conflating them corrupts a
+  // published invariant. `model` is the argv value and may legitimately be null ("omit -m"), but
+  // state.schema.json documents `intent.model` as "null on every unknown path" — so writing a null
+  // model on a SUCCESSFUL verdict would forge the unknown marker, and a real codex answer would be
+  // indistinguishable from a classifier that never answered. `modelLabel` is therefore always a
+  // non-empty string: the pinned model when there is one, else the provider whose default ran.
+  const modelLabel = model || (provider + ':default');
+  return {
+    provider, bin, model, modelLabel, effort, flags,
+    version: classifierVersion(provider, model, effort, CLASSIFY_PROMPT, transportOf(flags)),
+  };
 }
 
 const unknownIntent = (reason, at) => ({ verdict: 'unknown', reason, model: null, at, inferred: true });
@@ -402,6 +700,9 @@ async function flushCache(cachePath, writes, now) {
 // own entries is not housekeeping: a later sweep that joined a stale promise from an abort-ignoring
 // transport would publish `unknown · deadline` for that key forever, because `deadline` deliberately
 // starts no cooldown and so never backs off.
+//
+// The `ac.abort()` here is also what KILLS the children — the signal is handed to `spawn`, so ending
+// the generation ends the processes, not merely our interest in them.
 function endGeneration(gen, ac) {
   if (!gen.alive) return;
   gen.alive = false;
@@ -416,10 +717,14 @@ async function classifyBlocked(sessions, deps) {
   const d = deps || {};
   const nowFn = typeof d.now === 'function' ? d.now : Date.now;
   const env = d.env || process.env;
-  const http = typeof d.http === 'function' ? d.http : defaultHttp;
+  const run = typeof d.run === 'function' ? d.run : defaultRun;
   const network = d.network !== false;
   const deadlineMs = Number.isFinite(Number(d.deadlineMs)) ? Number(d.deadlineMs) : CLASSIFY_DEADLINE_MS;
   const cachePath = d.cachePath || path.join(d.radarDir || store.defaultRadarDir(), 'intent-cache.json');
+  // Injected only so the "binary is missing" branch is provable without deleting anything real.
+  const isExecutable = typeof d.isExecutable === 'function'
+    ? d.isExecutable
+    : (p) => { try { fs.accessSync(p, fs.constants.X_OK); return true; } catch (_) { return false; } };
 
   const blocked = list.filter((s) => s && s.status === 'blocked');
   if (!blocked.length) return sessions;
@@ -450,10 +755,43 @@ async function classifyBlocked(sessions, deps) {
     delete s.intent;
   }
 
-  // PRECEDENCE. Before any network or cache decision. See the block comment at the top.
-  const credential = resolveCredential(d.config, env);
-  if (!credential) {
-    for (const s of blocked) s.intent = unknownIntent('no credential', sweepAt);
+  // PRECEDENCE, STEP 1. Before any network or cache decision. See the block comment at the top.
+  // `accessSync` costs nothing and spawns nothing, so the cheapest of the two dependency checks is
+  // also the first — a machine without claude installed never launches a process to find that out.
+  const settings = resolveClassifier(d.config, env);
+  if (!isExecutable(settings.bin)) {
+    for (const s of blocked) s.intent = unknownIntent('classifier binary missing', sweepAt);
+    return sessions;
+  }
+
+  const gen = { id: ++generationSeq, alive: true };
+  const ac = typeof AbortController === 'function' ? new AbortController() : null;
+  const writes = new Map();
+  let expired = false;
+
+  // The deadline is armed HERE, before the probe, because the probe is a child process too and a
+  // stage bound that does not cover every process it starts is not a bound.
+  let fire = null;
+  const stageDone = new Promise((r) => { fire = r; });
+  const timer = setTimeout(() => { expired = true; endGeneration(gen, ac); fire(); }, deadlineMs);
+  const closeStage = () => {
+    clearTimeout(timer);
+    if (!expired) endGeneration(gen, ac);
+    for (const s of blocked) if (!s.intent) s.intent = unknownIntent('deadline', sweepAt);
+  };
+
+  // PRECEDENCE, STEP 2. One `--version` per stage — not per session, and not memoised across
+  // sweeps: a binary that broke since the last sweep must be reported as broken on this one, and
+  // one free process launch per 60 s is the honest price of that. It happens before the cache is
+  // read so an unusable classifier bypasses the cache exactly as a missing one does.
+  const probe = probeBinary(settings.bin, { run, signal: ac ? ac.signal : undefined, timeoutMs: d.probeTimeoutMs });
+  probe.catch(() => {});
+  const probed = await Promise.race([probe.then((r) => r, () => ({ ok: false })), stageDone.then(() => null)]);
+  if (expired || probed === null) { closeStage(); return sessions; }
+  if (!probed.ok) {
+    clearTimeout(timer);
+    endGeneration(gen, ac);
+    for (const s of blocked) s.intent = unknownIntent('classifier binary unusable', sweepAt);
     return sessions;
   }
 
@@ -461,11 +799,6 @@ async function classifyBlocked(sessions, deps) {
   const corrupt = !read.ok;
   const cache = (read.ok && read.value && typeof read.value === 'object' && !Array.isArray(read.value))
     ? read.value : {};
-
-  const gen = { id: ++generationSeq, alive: true };
-  const ac = typeof AbortController === 'function' ? new AbortController() : null;
-  const writes = new Map();
-  let expired = false;
 
   const attach = (s, intent) => { if (gen.alive) s.intent = intent; };
 
@@ -476,7 +809,9 @@ async function classifyBlocked(sessions, deps) {
     // timestamp-less turn of a session into one entry. Refuse rather than cache a collision.
     if (!la.ts) { attach(s, unknownIntent('no valid timestamp', sweepAt)); return; }
 
-    const k = intentCacheKey(s.key && s.key.machine, s.key && s.key.sessionId, la.ts);
+    // The version comes from the RESOLVED settings, not the module default: a config that names a
+    // different model or effort must not serve verdicts the default classifier produced.
+    const k = intentCacheKey(s.key && s.key.machine, s.key && s.key.sessionId, la.ts, settings.version);
 
     const hit = cache[k];
     if (isFreshEntry(hit, nowFn())) {
@@ -484,7 +819,8 @@ async function classifyBlocked(sessions, deps) {
       return;
     }
 
-    // A key resolved, so `fetch:false` finally gets to speak: cache reads are disk, not network, and
+    // The binary resolved, so `fetch:false` finally gets to speak. `claude -p` reaches the network
+    // on every call, so an offline sweep must not launch it; cache reads are disk, not network, and
     // a miss is honestly unreachable — but "we did not ask" must not be penalised like "it did not
     // answer", so no cooldown starts here.
     if (!network) { attach(s, unknownIntent('classifier unreachable', sweepAt)); return; }
@@ -496,7 +832,16 @@ async function classifyBlocked(sessions, deps) {
     let rec = inflight.get(k);
     if (!rec || rec.gen !== gen) {
       const created = { gen, promise: null };
-      created.promise = classify({ text: la.text }, { http, key: credential, signal: ac ? ac.signal : undefined });
+      created.promise = classify({ text: la.text }, {
+        run,
+        provider: settings.provider,
+        bin: settings.bin,
+        model: settings.model,
+        effort: settings.effort,
+        flags: settings.flags,
+        timeoutMs: d.attemptTimeoutMs,
+        signal: ac ? ac.signal : undefined,
+      });
       inflight.set(k, created);
       // IDENTITY-SAFE cleanup: delete only while the map still holds THIS promise. An expired
       // generation's late `finally` must never remove a newer generation's live entry for the key.
@@ -520,16 +865,14 @@ async function classifyBlocked(sessions, deps) {
       return;                                    // never cache unknown
     }
 
-    const at = new Date(nowFn()).toISOString();  // the API-response time, for a live verdict
-    const value = { verdict: r.verdict, reason: r.reason, model: MODEL, at };
+    const at = new Date(nowFn()).toISOString();  // the answer time, for a live verdict
+    // `modelLabel`, never `model` — see resolveClassifier. A successful verdict must never write the
+    // null that state.schema.json reserves for "no classifier answered".
+    const value = { verdict: r.verdict, reason: r.reason, model: settings.modelLabel, at };
     writes.set(k, value);
     cache[k] = value;
     attach(s, Object.assign({}, value, { inferred: true }));
   }
-
-  let fire = null;
-  const stageDone = new Promise((r) => { fire = r; });
-  const timer = setTimeout(() => { expired = true; endGeneration(gen, ac); fire(); }, deadlineMs);
 
   const queue = blocked.slice();
   const worker = async () => {
@@ -562,9 +905,12 @@ function _resetClassifyState() { cooldowns.clear(); inflight.clear(); }
 module.exports = {
   readLastAssistantText,
   classify, classifyBlocked,
-  classifierVersion, intentCacheKey, defaultHttp,
-  CLASSIFY_PROMPT, VERDICT_SCHEMA, CLASSIFIER_VERSION, CLASSIFY_DEADLINE_MS,
-  CLASSIFIER_MODEL: MODEL, CLASSIFY_MAX_TOKENS: MAX_TOKENS, COOLDOWN_MS, POOL_SIZE,
-  DEFAULT_KEY_REF, VERDICTS,
+  classifierVersion, intentCacheKey, transportOf,
+  defaultRun, resolveClassifier, probeBinary, classifyArgv, readVerdict,
+  PROVIDERS, PROVIDER_IDS, providerOf, verdictOf,
+  CLASSIFY_PROMPT, CLASSIFIER_VERSION, CLASSIFY_DEADLINE_MS,
+  DEFAULT_PROVIDER, DEFAULT_EFFORT, TRANSPORT_SHAPE, VERDICT_SCHEMA_PATH,
+  ATTEMPT_TIMEOUT_MS, PROBE_TIMEOUT_MS, MAX_PROMPT_BYTES,
+  COOLDOWN_MS, POOL_SIZE, VERDICTS,
   _resetClassifyState,
 };
