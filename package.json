@@ -17,7 +17,8 @@
     "bridge": "node bridge.js",
     "server": "node server.js",
     "radar": "node radar/radar-cli.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:browser": "node test/p8-browser-run.mjs"
   },
   "keywords": [
     "cmux",

@@ -27,7 +27,17 @@
   } catch (_) {}
   const authHeaders = (h = {}) => (TOKEN ? { ...h, Authorization: 'Bearer ' + TOKEN } : h);
   const noCacheUrl = (url) => url + (url.includes('?') ? '&' : '?') + '_=' + Date.now().toString(36) + Math.random().toString(36).slice(2);
-  const jget = (url) => fetch(noCacheUrl(url), { headers: authHeaders({ 'cache-control': 'no-cache' }), credentials: 'same-origin', cache: 'no-store' });
+  // `opts` carries ONE thing: {signal}. Every existing caller passes a url alone and is unaffected —
+  // auth, credentials and cache stay byte-identical, and `signal: undefined` is what fetch already
+  // sees today. It exists because JavaScript silently ignores extra arguments: gitbar's model aborts
+  // its superseded probe through this helper (specs.md §5.3), and without the forward it would abort
+  // a token object while the HTTP request — and the git children behind it — ran to completion.
+  // `|| undefined` rather than the spec's bare `opts && opts.signal`: RequestInit.signal is a
+  // NULLABLE AbortSignal in WebIDL, so `null` is fine but any other falsy value — jget(url, 0) —
+  // throws a TypeError out of fetch itself. gitbar's own no-AbortController fallback publishes
+  // `{signal: null}` (gitbar.js:90), so falsy signals genuinely reach here. Normalising costs
+  // nothing and a real signal is an object, so it is never normalised away.
+  const jget = (url, opts) => fetch(noCacheUrl(url), { headers: authHeaders({ 'cache-control': 'no-cache' }), credentials: 'same-origin', cache: 'no-store', signal: (opts && opts.signal) || undefined });
   const jpost = (url, body) => fetch(url, { method: 'POST', credentials: 'same-origin', headers: authHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(body) });
   function promptToken() { const t = cleanToken(prompt('Access token')); if (t) { try { localStorage.setItem('cmux_token', t); } catch (_) {} location.reload(); } }
 
@@ -2541,11 +2551,98 @@
       gitUI = window.cmuxGit.create({
         mount: $('wrap'), jget, jpost, fillComposer,
         machine: () => state.machine,
+        // The same status-line seam the bar gets (§7: the bar itself or the existing status line,
+        // never a toast). The panel closes the instant it fills, so its own body cannot carry a
+        // note the operator would still be able to read — this one outlives the panel.
+        note: (msg) => setStatus(msg, true, 6000),
       });
     }
   } catch (e) { gitUI = null; if (window.console) console.error('git panel failed to mount', e); }
   if (!gitUI && elGitBtn && elGitBtn.parentNode) elGitBtn.remove();
   if (gitUI && elGitBtn) elGitBtn.onclick = (e) => { e.stopPropagation(); toggleGit(); };
+
+  // ---- p8: the source-control bar in the file explorer (specs.md §4, §6) ------
+  // Same defensive mount again, for the same reason as radar and the panel: if gitbar.js is missing,
+  // stale, or throws on create, `gitBarModel` stays null, nothing below ever runs, and Files browses
+  // exactly as it does today. A source-control add-on degrades to no source control, never to no
+  // mirror.
+  let gitBarModel = null, gitBarView = null;
+
+  // §6.3. After a fill the operator must land on a LIVE terminal, and `exitFilesMode()` cannot
+  // deliver one: it disconnects the observer, drops the body classes and sets tabType — it never
+  // calls selectTab, so nothing resumes polling after setFilesMode's teardownPanes(). toggleFiles
+  // warns about exactly this above its own exit branch, and that branch IS the correct path, so this
+  // calls it rather than keeping a second copy that can drift out of agreement with it.
+  function leaveFiles() {
+    if (state.tabType !== 'files' && state.tabType !== 'viewer') return;
+    toggleFiles();
+  }
+
+  // The bar's door into the p7 panel (§6.6). Two things are the point here:
+  //  * the panel binds to the identity the model resolved on its fresh probe — this function is
+  //    handed {repo, name, src} and passes them through untouched; it never consults state;
+  //  * `onClose` is passed EXPLICITLY on every open. The shipped panel replaces its stored callback
+  //    only when one is supplied (git.js:293), so omitting it here would inherit the ⎇ toolbar
+  //    door's callback and close a bar-opened panel into the terminal. This door came from Files and
+  //    returns to Files, at the directory it was opened from — captured now, because Files is torn
+  //    down while the panel is up.
+  //  * `onScopeLost` is passed here and NOWHERE ELSE. §7 says every failure hides the bar, and a
+  //    mid-session read-gate refusal is the one failure the panel discovers rather than the bar: the
+  //    panel leaves, and without this the bar it was opened from would survive the scope loss and go
+  //    on offering controls the server will refuse forever. The ⎇ toolbar door must not carry it —
+  //    that door has no bar behind it, and §6.6's two-door disjointness is what keeps "the ⎇ journey
+  //    never touches p8 code" assertable from the source.
+  function openPanel(o) {
+    if (!gitUI || !o || !o.repo) return;
+    const back = state.files && state.files.path;
+    try {
+      exitFilesMode();
+      if (state.browser && state.browser.surface) exitBrowserMode();
+      exitRadarMode();
+      teardownPanes();
+      setStatus('');
+      state.tabType = 'git';
+      gitUI.open({
+        repo: o.repo, name: o.name, src: o.src,
+        machine: state.machine,
+        onClose: () => { if (back) enterDir(back); else openFiles(); },
+        // hide() is NOT enough here, and the difference is the whole defect: onScopeLost fires
+        // BEFORE onClose, onClose re-enters the directory, and enterDir ends in at() — which on a
+        // display-cache hit repaints the bar with no request at all. A hidden bar would be back one
+        // synchronous line later, still offering controls the read gate now refuses. scopeLost()
+        // evicts the refused identity as well, so the re-entry is a miss (§5.2, §7).
+        onScopeLost: () => { if (gitBarModel) gitBarModel.scopeLost(); },
+      });
+    } catch (e) {
+      // Restoring `tabType` alone would strand the operator on a blank screen: exitFilesMode() has
+      // already dropped the body classes, so #files is display:none and the panes are torn down.
+      // The only honest recovery is the one close() performs — put them back in the listing.
+      if (window.console) console.error('git panel open from bar failed', e);
+      if (back) enterDir(back); else openFiles();
+      return;
+    }
+    renderTabs();
+  }
+
+  try {
+    if (window.cmuxGitBar && typeof window.cmuxGitBar.createGitBarModel === 'function') {
+      gitBarModel = window.cmuxGitBar.createGitBarModel({
+        jget, jpost,
+        machine: () => state.machine,
+        nowMs: Date.now,
+        fillComposer, leaveFiles, openPanel,
+        // §7: reasons render through the existing #status line (already lifted to z-index 4 over the
+        // Files pane) and ride the published state as the bar's own note line. Never a toast.
+        note: (msg) => setStatus(msg, true, 6000),
+      });
+      gitBarView = window.cmuxGitBar.createGitBar({
+        model: gitBarModel, doc: document, mount: $('gitbar'),
+      });
+    }
+  } catch (e) {
+    gitBarModel = null; gitBarView = null;
+    if (window.console) console.error('source-control bar failed to mount', e);
+  }
 
   function toggleRadar() {
     if (!radarUI) return;
@@ -2729,6 +2826,10 @@
 
   async function openFiles() {
     setFilesMode('files');
+    // The roots screen has no current directory, so there is nothing the bar could be standing in.
+    // hide() is an invalidating transition (§5.3): it also aborts and bumps the generation, so a
+    // probe still in flight from the directory we just left cannot resurrect a bar here.
+    if (gitBarModel) gitBarModel.hide();
     elCrumb.replaceChildren();
     elFlist.replaceChildren();
     elFfoot.textContent = 'Loading…';
@@ -2868,6 +2969,10 @@
     }
     history.pushState({ p4dir: p }, '', '#files=' + encodeURIComponent(p));
     loadPage(true);
+    // LAST, and never awaited: the listing is already painted by the time git is asked anything, so
+    // a slow, queued or refused probe cannot delay a single row. at() also aborts the probe of the
+    // directory we just left, which is what keeps a stale answer from overwriting this one (§5.3).
+    if (gitBarModel) gitBarModel.at(p);
   }
 
   // A symlink row: ask the server to list it; if it is really a file, open it in the viewer.
@@ -2884,7 +2989,14 @@
     if (st.p4dir) return enterDir(st.p4dir);
     if (state.tabType === 'viewer') {
       // leaving the viewer returns to the directory that was open behind it
-      if (state.files.path) { setFilesMode('files'); renderTabs(); return; }
+      if (state.files.path) {
+        setFilesMode('files');
+        // openFile hid the bar on the way in, and this path repaints the listing without going
+        // through enterDir — so without this the bar would stay gone for the rest of the visit.
+        // Within the display-cache TTL this costs no request (§5.2).
+        if (gitBarModel) gitBarModel.at(state.files.path);
+        renderTabs(); return;
+      }
       return openFiles();
     }
     if (state.tabType === 'files') return openFiles();
@@ -2979,6 +3091,9 @@
 
   async function openFile(p) {
     setFilesMode('viewer');
+    // The viewer covers the listing, so the bar is off screen — and a probe pending from the
+    // directory behind it must not publish into a screen with no current directory (§5.3).
+    if (gitBarModel) gitBarModel.hide();
     const base = p.split('/').pop();
     elFvtitle.textContent = base;
     elFvbody.textContent = 'Loading…';

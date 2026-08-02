@@ -171,6 +171,64 @@ function sendGitError(res, e) {
   if (e && e.name === 'GitPanelError') return send(res, e.status || 400, { error: e.code });
   send(res, 500, { error: 'git_failed' });
 }
+// Source-control READ routes (p8). A separate module and a separate construction — gitpanel.js and
+// its block above are never edited (specs.md §2.2). Same defensive shape: a broken gitread must
+// degrade to "no bar", never to "no mirror".
+let gitRead = null;
+if (GIT_PANEL_ENABLED) {
+  try {
+    gitRead = require('./gitread').createGitRead({
+      workspaceCwds: cmuxWorkspaceCwds,
+      jail: (p) => fsBrowse._jail(p),
+      assertRepo: (p) => (gitPanel ? gitPanel.assertRepo(p) : Promise.reject(new Error('git_panel_disabled'))),
+      writesEnabled: GIT_WRITES_ENABLED,
+      log: (rec) => console.log(`gitread ${JSON.stringify(rec)}`),
+    });
+    console.log('gitread: enabled');
+  } catch (e) {
+    gitRead = null;
+    console.error(`gitread: failed to load, continuing without it: ${(e && e.message) || e}`);
+  }
+}
+function cmuxGitRead(req, res, u, sub) {
+  if (!gitRead) return send(res, 404, { error: 'git_panel_disabled' });
+  const dir = u.searchParams.get('dir') || '';
+  const done = (p) => p.then((r) => send(res, 200, r)).catch((e) => sendGitError(res, e));
+  if (req.method === 'GET') {
+    // probe (specs.md §5.2): the ONLY route behind the admission semaphore, and the only one whose
+    // waiter must die with its caller. The binding is to THIS request's RESPONSE stream — `res`
+    // 'close' with `!res.writableEnded` is the sole predicate that means the caller actually left.
+    // Since Node 16 a completed bodyless GET fires `req` 'close' while its response is still
+    // pending, so a `req` binding would mark EVERY ordinary queued probe dead. onCancel returns the
+    // detach, which gitread runs on admission or settlement — no listener outlives its waiter.
+    if (sub === 'probe') {
+      return done(gitRead.probe(dir, {
+        onCancel: (cancel) => {
+          const onResClose = () => { if (!res.writableEnded) cancel(); };
+          res.on('close', onResClose);
+          return () => res.removeListener('close', onResClose);
+        },
+      }));
+    }
+    if (sub === 'status') return done(gitRead.status(dir));
+    if (sub === 'branches') return done(gitRead.branches(dir));
+    if (sub === 'worktrees') return done(gitRead.worktrees(dir));
+    if (sub === 'diff') return done(gitRead.diff(dir, u.searchParams.get('path') || '', u.searchParams.get('staged') === '1'));
+  }
+  // Generated command TEXT (p8). A NEW handler, async from its first line — never the p7 shape
+  // `send(res, 200, { text: gitPanel.command(...) })`, which is synchronous and would serialise a
+  // Promise as {"text":{}} and turn the now-normal 403 into an unhandled rejection, fatal on
+  // Node ≥ 15 and taking the BRIDGE down with it (specs.md §4.1). Every rejection — refusal,
+  // bad_ref, not_on_branch — travels the promise chain into sendGitError; nothing escapes.
+  // The text is NOT executed here: it is handed back for the operator to read and decide.
+  if (req.method === 'POST' && sub === 'command') {
+    return cmuxReadBody(req, (b) => {
+      if (!b) return send(res, 400, { error: 'bad_json' });
+      done(gitRead.command(String(b.verb || ''), b.dir, b.params || {}));
+    });
+  }
+  return send(res, 404, { error: 'not_found' });
+}
 function cmuxGit(req, res, u, sub) {
   if (!gitPanel) return send(res, 404, { error: 'git_panel_disabled' });
   const repo = u.searchParams.get('repo') || '';
@@ -1261,6 +1319,7 @@ function handleCmux(req, res) {
   if (req.method === 'GET' && p === '/cmux/tree') return cmuxTree(res);
   if (req.method === 'GET' && p === '/cmux/completions') return cmuxCompletions(res, u);
   if (p.startsWith('/cmux/git/')) return cmuxGit(req, res, u, p.slice('/cmux/git/'.length));
+  if (p.startsWith('/cmux/gitread/')) return cmuxGitRead(req, res, u, p.slice('/cmux/gitread/'.length));
   if (req.method === 'GET' && p === '/cmux/session-events') return cmuxSessionEvents(res, u);
 
   // ----- pane layout (multi-pane mirror) -----
