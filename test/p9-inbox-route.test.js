@@ -61,6 +61,8 @@ function inboxRow(over) {
     worktree: null,
     epic: null,
     question: 'Should the retry budget be per request or per batch?',
+    title: 'Retry budget shape',
+    titleSource: 'ai',
     intent: { verdict: 'needs-decision', reason: 'ends on a direct question', model: 'fixture-model', at: '2026-01-02T03:00:04.000Z', inferred: true },
     surface: { workspace: 'fixture-workspace', tabRef: 'tab-2', tabUuid: 'fixture-tab-uuid-1', via: 'recorded' },
     surfaceReason: null,
@@ -78,6 +80,8 @@ function unknownRow(over) {
     turn: { blockedSince: '2026-01-02T03:01:00.000Z', assistantTs: null },
     lastStopAt: null,
     question: 'Ready when you are.',
+    title: null,
+    titleSource: null,
     intent: { verdict: 'unknown', reason: 'no credential', model: null, at: '2026-01-02T03:01:04.000Z', inferred: true },
   }, over || {}));
 }

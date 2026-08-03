@@ -94,6 +94,8 @@ export function inboxRow(over) {
     worktree: null,
     epic: null,
     question: 'Should the retry budget be per request or per batch?',
+    title: 'Retry budget shape',
+    titleSource: 'ai',
     intent: {
       verdict: 'needs-decision', reason: 'ends on a direct question',
       model: 'fixture-model', at: '2026-01-02T03:00:04.000Z', inferred: true,
@@ -116,6 +118,8 @@ export const FIXTURE_ROWS = [
     repo: 'sample-service',
     epic: 'PROJ-201',
     question: LONG_QUESTION,
+    title: 'fixture-renamed-by-operator',
+    titleSource: 'custom',
   }),
   inboxRow({
     sessionKey: { machine: MACHINE, sessionId: 'fixture-inbox-2' },
@@ -124,6 +128,8 @@ export const FIXTURE_ROWS = [
     turn: { blockedSince: '2026-01-02T03:30:00.000Z', assistantTs: null },
     repo: 'sample-tools',
     question: 'Ready when you are.',
+    title: null,
+    titleSource: null,
     intent: {
       verdict: 'unknown', reason: 'no credential',
       model: null, at: '2026-01-02T03:30:04.000Z', inferred: true,
@@ -137,6 +143,8 @@ export const FIXTURE_ROWS = [
     turn: { blockedSince: '2026-01-02T03:50:00.000Z', assistantTs: '2026-01-02T03:49:12.000Z' },
     repo: 'sample-web',
     question: 'Do you want the migration split into two steps, or one?',
+    title: 'Split the migration in two',
+    titleSource: 'ai',
     surface: { workspace: 'fixture-workspace', tabRef: 'w0/t3', tabUuid: 'fixture-tab-uuid-3', via: 'recorded' },
   }),
 ];

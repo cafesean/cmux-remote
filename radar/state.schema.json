@@ -273,7 +273,7 @@
       "type": "object",
       "description": "p9 (spec §5.3). Closed: the row contract is exact, and a field that leaked in from the source session — `tabStatus` above all — would invite a consumer to read workspace-scoped provenance as per-tab readiness.",
       "additionalProperties": false,
-      "required": ["sessionKey", "blockedSince", "lastStopAt", "cacheExpiresAt", "cacheApprox", "notificationType", "turn", "repo", "worktree", "epic", "question", "intent", "surface", "surfaceReason", "answerable", "actions"],
+      "required": ["sessionKey", "blockedSince", "lastStopAt", "cacheExpiresAt", "cacheApprox", "notificationType", "turn", "repo", "worktree", "epic", "question", "title", "titleSource", "intent", "surface", "surfaceReason", "answerable", "actions"],
       "properties": {
         "sessionKey": {
           "type": "object",
@@ -297,6 +297,8 @@
         "worktree": { "$ref": "#/$defs/nullableString" },
         "epic": { "$ref": "#/$defs/nullableString" },
         "question": { "type": "string", "description": "The COMPLETE last assistant text, never truncated here; '' when there is none. Truncation is a rendering concern." },
+        "title": { "$ref": "#/$defs/nullableString", "description": "The session topic — an operator rename or the automatic titler, COMPLETE and untruncated; null when the transcript tail carried neither." },
+        "titleSource": { "type": ["string", "null"], "enum": ["custom", "ai", null], "description": "Provenance of title: custom = explicit rename (authoritative, wins over a later ai-title), ai = automatic titler. null iff title is null." },
         "intent": {
           "type": "object",
           "additionalProperties": false,

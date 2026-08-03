@@ -303,7 +303,7 @@ test('inbox: one emitted row matches specs.md 5.3 field-by-field, and the surfac
   assert.deepStrictEqual(Object.keys(r).sort(), [
     'actions', 'answerable', 'blockedSince', 'cacheApprox', 'cacheExpiresAt', 'epic', 'intent',
     'lastStopAt', 'notificationType', 'question', 'repo', 'sessionKey', 'surface', 'surfaceReason',
-    'turn', 'worktree',
+    'title', 'titleSource', 'turn', 'worktree',
   ]);
   for (const k of Object.keys(r)) assert.notStrictEqual(r[k], undefined, `row.${k} is not undefined`);
 
@@ -456,4 +456,69 @@ test('inbox: every emitted row carries intent.inferred === true, whatever produc
 
   assert.strictEqual(rows.length, 5);
   for (const r of rows) assert.strictEqual(r.intent.inferred, true, `${r.sessionKey.sessionId} carries inferred: true`);
+});
+
+// ---- the topic title ------------------------------------------------------------------------------
+
+// A queue of questions with no topics is unreadable past the first row: every entry is prose. The
+// title answers "what is this about" where the question only says how the last turn ended.
+test('inbox: the session title and its source are projected onto the row', () => {
+  const s = session({ key: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-titled' } });
+  s.sessionTitle = { text: 'Synthetic topic for the fixture', source: 'ai' };
+  const [r] = buildInbox([s], NOW);
+  assert.strictEqual(r.title, 'Synthetic topic for the fixture');
+  assert.strictEqual(r.titleSource, 'ai');
+});
+
+test('inbox: an operator rename is distinguishable from the automatic titler', () => {
+  const s = session({ key: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-renamed' } });
+  s.sessionTitle = { text: 'fixture-renamed-by-hand', source: 'custom' };
+  const [r] = buildInbox([s], NOW);
+  assert.strictEqual(r.titleSource, 'custom', 'the UI must be able to style a rename differently');
+});
+
+// The title is VALIDATED, not trusted — same reason inboxIntent synthesizes rather than copies. Each
+// case below is a shape a hand-built state file or a half-run stage can really produce, and every one
+// must degrade to `null` rather than reach a renderer as junk.
+test('inbox: a missing, blank or unrecognised title degrades to null on BOTH fields', () => {
+  const cases = [
+    ['absent', undefined],
+    ['null', null],
+    ['not an object', 'a bare string'],
+    ['empty text', { text: '', source: 'ai' }],
+    ['whitespace text', { text: '   \n\t ', source: 'ai' }],
+    ['non-string text', { text: 12345, source: 'ai' }],
+    ['unknown source', { text: 'real text, unknown provenance', source: 'telepathy' }],
+    ['missing source', { text: 'real text, no provenance' }],
+  ];
+  for (const [label, value] of cases) {
+    const s = session({ key: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-badtitle' } });
+    if (value === undefined) delete s.sessionTitle; else s.sessionTitle = value;
+    const [r] = buildInbox([s], NOW);
+    assert.strictEqual(r.title, null, `${label}: title must be null`);
+    assert.strictEqual(r.titleSource, null, `${label}: titleSource must be null`);
+    // Never undefined: the route serialises this row and an undefined key vanishes from the JSON,
+    // which a client reading `row.title` cannot distinguish from a title it failed to parse.
+    assert.notStrictEqual(r.title, undefined);
+    assert.notStrictEqual(r.titleSource, undefined);
+  }
+});
+
+// Dropping the text WITH an unrecognised source is deliberate: a UI that styles a rename differently
+// from a machine guess must never be handed a third thing it has no rule for.
+test('inbox: an unrecognised source drops the TEXT too, never just the label', () => {
+  const s = session({ key: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-oddsource' } });
+  s.sessionTitle = { text: 'plausible looking topic', source: 'guessed-by-something-new' };
+  const [r] = buildInbox([s], NOW);
+  assert.strictEqual(r.title, null);
+});
+
+// Truncation is a rendering concern (trap 12) — the same rule `question` follows.
+test('inbox: a long title is carried COMPLETE, never truncated by the projection', () => {
+  const long = 'topic '.repeat(200).trim();
+  const s = session({ key: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-longtitle' } });
+  s.sessionTitle = { text: long, source: 'ai' };
+  const [r] = buildInbox([s], NOW);
+  assert.strictEqual(r.title, long);
+  assert.strictEqual(r.title.length, long.length);
 });

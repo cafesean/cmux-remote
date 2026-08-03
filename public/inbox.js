@@ -205,6 +205,18 @@
     };
   }
 
+  // The row's topic, or null. Validated here as well as in derive because this module is also handed
+  // payloads by a stub in the harness and, in principle, by any server claiming to speak §5.3 — and a
+  // renderer that trusts `titleSource` blind would style an unknown provenance as an operator rename.
+  // Truncation is CSS's job (one line, ellipsis), never a substring: cutting the text here would put
+  // a lie in the DOM that a copy-paste would carry away.
+  function rowTitle(row) {
+    const text = row && typeof row.title === 'string' ? row.title.trim() : '';
+    if (!text) return null;
+    const source = row.titleSource === 'custom' || row.titleSource === 'ai' ? row.titleSource : 'ai';
+    return { text: text, source: source };
+  }
+
   function relativeAge(isoString, now) {
     const t = Date.parse(isoString);
     if (!isFinite(t)) return '';
@@ -742,7 +754,17 @@
     '#inbox .imeta{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;font-size:11px;color:var(--faint);margin-bottom:5px}',
     '#inbox .iage{color:var(--dim);font-family:var(--mono)}',
     '#inbox .imark{border:1px solid var(--line);border-radius:999px;padding:1px 7px;color:var(--dim);font-size:10.5px}',
+    // ONE LINE, ellipsised in CSS rather than substring'd in JS — the full text stays in the DOM, so
+    // a copy-paste and a screen reader both get the real title. min-width:0 is required for
+    // text-overflow to engage on a flex/grid child.
+    '#inbox .itopic{font-size:13px;font-weight:600;color:var(--dim);margin-bottom:3px;',
+    '  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '#inbox .itopic-own{color:var(--fg)}',
     '#inbox .iq{font-size:13px;line-height:1.45;color:var(--fg);overflow-wrap:anywhere}',
+    // With a topic above it the question is supporting detail, so it stops competing for the eye:
+    // dimmed and clamped to two lines. Without a topic `.iq` is unchanged and stays the headline.
+    '#inbox .itopic + .iq{color:var(--faint);display:-webkit-box;-webkit-line-clamp:2;',
+    '  -webkit-box-orient:vertical;overflow:hidden}',
     // The card. The question pane scrolls and is NEVER clamped — no line-clamp, no text-overflow:
     // the whole question has to be reachable, which is the entire reason the card exists.
     '#inbox .icard{flex:1 1 auto;display:flex;flex-direction:column;min-height:0}',
@@ -899,6 +921,18 @@
         const marks = rowMarkers(row);
         if (marks.label) meta.appendChild(mk('span', 'imark', marks.label));
         btn.appendChild(meta);
+        // The topic, when the session has one. It goes ABOVE the question because it answers the
+        // question a scanning operator asks first — "which of my sessions is this?" — where the
+        // question text only says how the last turn ended. A row with no title is unchanged: the
+        // question stands alone, exactly as it did before titles existed.
+        const topic = rowTitle(row);
+        if (topic) {
+          const h = mk('div', 'itopic', topic.text);
+          // An operator's own rename is authoritative and gets the stronger treatment; the automatic
+          // titler's guess is dimmed, so a wrong machine title never reads as a label you chose.
+          if (topic.source === 'custom') h.className = 'itopic itopic-own';
+          btn.appendChild(h);
+        }
         btn.appendChild(mk('div', 'iq', rowQuestion(row && row.question)));
         btn.onclick = function () { openCard(row); };
         list.appendChild(btn);
@@ -990,7 +1024,13 @@
       if (!row) { renderNotice(instr); syncSend(instr); return; }
       const where = rowWhere(row);
       const marks = rowMarkers(row);
-      title.textContent = where || ((row.sessionKey && row.sessionKey.machine) || 'Waiting');
+      // Header precedence: the session's own topic, then where it lives, then its machine. Opening a
+      // card must not lose the label the row was recognised BY in the list — a header that switches
+      // from a topic to a repo name reads as having opened something else.
+      const topic = rowTitle(row);
+      title.textContent = (topic && topic.text)
+        || where
+        || ((row.sessionKey && row.sessionKey.machine) || 'Waiting');
       // The FULL question, untouched. textContent, so metacharacters are text.
       questionEl.textContent = (row && typeof row.question === 'string') ? row.question : '';
       clearHeadMarks();
@@ -1206,6 +1246,7 @@
     surfaceSignature: surfaceSignature,
     readOnlyCopy: readOnlyCopy,
     rowMarkers: rowMarkers,
+    rowTitle: rowTitle,
     relativeAge: relativeAge,
     rowQuestion: rowQuestion,
     rowWhere: rowWhere,
