@@ -107,7 +107,11 @@ test('inbox: three blocked sessions with distinct blockedSince come back oldest-
 
 // ---- inclusion: verdict --------------------------------------------------------------------------
 
-test('inbox: only needs-decision and unknown reach the queue; offer-more and status-only do not', () => {
+// EVERY verdict reaches the queue; the verdict is a badge, not a gate. A session that finished, said
+// what it did and went quiet is still waiting on the operator — excluding it made the inbox answer
+// "Nothing waiting." while sessions sat idle for a reply. What bounds the queue is `status === blocked`
+// plus a live `cacheExpiresAt`, both proved by their own tests above.
+test('inbox: every verdict reaches the queue, in blockedSince order, verdict carried as a badge', () => {
   const rows = buildInbox([
     session({ key: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-needs' }, blockedSince: at(-40), intent: intent('needs-decision') }),
     session({ key: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-unknown' }, blockedSince: at(-30), intent: intent('unknown', { model: null }) }),
@@ -115,7 +119,12 @@ test('inbox: only needs-decision and unknown reach the queue; offer-more and sta
     session({ key: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-status' }, blockedSince: at(-10), intent: intent('status-only') }),
   ], NOW);
 
-  assert.deepStrictEqual(ids(rows), ['fixture-inbox-needs', 'fixture-inbox-unknown']);
+  assert.deepStrictEqual(ids(rows),
+    ['fixture-inbox-needs', 'fixture-inbox-unknown', 'fixture-inbox-offer', 'fixture-inbox-status']);
+  // The verdict must survive onto the row, or the badge has nothing to render and the widening just
+  // produces four rows a human cannot triage.
+  assert.deepStrictEqual(rows.map((r) => r.intent.verdict),
+    ['needs-decision', 'unknown', 'offer-more', 'status-only']);
 });
 
 test('inbox: MISSING intent is synthesized field-by-field, never copied through as undefined', () => {

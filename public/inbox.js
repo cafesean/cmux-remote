@@ -45,6 +45,8 @@
 
   const UNCLASSIFIED_LABEL = 'unclassified';
   const INFERRED_LABEL = 'inferred';
+  const OFFER_LABEL = 'offered more';
+  const STATUS_LABEL = 'no question';
 
   // A blocked session waiting at a permission prompt is waiting on a MENU, not on text (trap 20), so
   // it is read-only even when its tab is alive and recorded. An allowlist, never a pattern.
@@ -184,13 +186,22 @@
   // `unknown` rows are SHOWN, marked unclassified — never hidden, because a classifier that could not
   // reach its model must not silently swallow work that is genuinely waiting. `needs-decision` is an
   // inference and says so; it is never presented as measured.
+  // Since the queue stopped gating on verdict, `offer-more` and `status-only` rows arrive here too —
+  // and an unlabelled row is worse than an excluded one, because it gives a human nothing to triage
+  // on. Each verdict therefore gets its own chip, and the two new ones say what they are NOT: the
+  // session is waiting, but not on an answer.
   function rowMarkers(row) {
     const verdict = (row && row.intent && row.intent.verdict) || 'unknown';
+    const label = verdict === 'unknown' ? UNCLASSIFIED_LABEL
+      : verdict === 'needs-decision' ? INFERRED_LABEL
+      : verdict === 'offer-more' ? OFFER_LABEL
+      : verdict === 'status-only' ? STATUS_LABEL
+      : '';
     return {
       verdict: verdict,
       unclassified: verdict === 'unknown',
       inferred: verdict === 'needs-decision',
-      label: verdict === 'unknown' ? UNCLASSIFIED_LABEL : (verdict === 'needs-decision' ? INFERRED_LABEL : ''),
+      label: label,
     };
   }
 

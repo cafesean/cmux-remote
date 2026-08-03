@@ -352,9 +352,22 @@ function flattenAttention(list) {
 // or kill, so it belongs in the inbox as a read-only row. Every other derivation is shielded, which
 // is what makes publishing vanished rows a no-op for attention[] and counts.blocked.
 
-// Verdicts that mean "an operator has to look at this". `offer-more` and `status-only` are the
-// classifier saying the session is not waiting on a decision, so they never reach the queue.
-const INBOX_VERDICTS = ['needs-decision', 'unknown'];
+// THE CLASSIFIER LABELS THE QUEUE, IT DOES NOT GATE IT.
+//
+// This list was ['needs-decision', 'unknown'], on the reading that `offer-more` and `status-only`
+// mean "not waiting on a decision". Measured against real sessions that reading is wrong: a session
+// that finishes, reports what it did and stops IS waiting on the operator — it just isn't waiting on
+// an ANSWER. Excluding those made the inbox read as broken, because the common case (a session that
+// completed and went quiet) produced "Nothing waiting." while two sessions sat idle for a reply.
+//
+// So every verdict reaches the queue and the verdict travels with the row as a BADGE. What actually
+// bounds this list is the pair of gates above it — `status === 'blocked'` and a live `cacheExpiresAt`
+// — which is why widening it is not a flood: on live state at the time of the change, 79 tracked
+// sessions and 19 carrying a `blockedSince` yielded exactly ONE row.
+//
+// Ordering deliberately does NOT change: rows stay ascending by `blockedSince`, which S-008's AC
+// pins as "the server's order, never re-sorted by the client". Priority is the badge's job.
+const INBOX_VERDICTS = ['needs-decision', 'offer-more', 'status-only', 'unknown'];
 
 // The notification types that mean the session is waiting on TEXT. A permission prompt is waiting on
 // a MENU (trap 20), so it is read-only however well its surface resolved.
