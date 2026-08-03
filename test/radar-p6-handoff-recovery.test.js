@@ -352,7 +352,7 @@ test('open discard: a late transcript does NOT revoke it — no adopted_auto, th
   w.killBox.impl = lethalKill(w);
   await w.api.sweep();
   const recs = ledger(w.dir).filter((x) => x.t === 'status' && x.id === plans[0].handoffId);
-  assert.ok(!recs.some((x) => x.reason === 'adopted_auto' || x.reason === 'adopted_operator'), 'Sean pressed discard; a late transcript does not revoke it');
+  assert.ok(!recs.some((x) => x.reason === 'adopted_auto' || x.reason === 'adopted_operator'), 'the operator pressed discard; a late transcript does not revoke it');
   assert.strictEqual(recs.pop().to, 'discarded');
 });
 

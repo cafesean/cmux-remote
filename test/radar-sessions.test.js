@@ -127,7 +127,13 @@ test('clearing path 2/3: a later Stop clears blocked', async () => {
   assert.strictEqual(s.blockedSince, null);
 });
 
-test('clearing path 3/3: the session vanishing from the bridge tree clears blocked', async () => {
+// p9 §5.1.3 REPLACED the third clearing path. A blocked session whose tab closes used to be dropped
+// from sessions[] outright, which also cleared its block. It is now PUBLISHED with vanished: true —
+// carry-forward is rebuilt solely from published state, so a drop is a fact forgotten next sweep,
+// and the operator's question does not stop existing because a terminal did. The row still leaves
+// on the two real clearing events and on ABANDON_MS. Keeping vanished rows off the attention board
+// is derive's `liveSessions` shield (S-005), not this module's job.
+test('clearing path 3/3: a tab vanishing from the tree publishes the session as vanished, not dropped', async () => {
   const events = [ev({ ts: NOW - min(9), event: 'Notification', notificationType: 'permission_prompt' })];
   const roots = { roots: [{ kind: 'workspace', label: 'app', path: '/repo/app-web' }] };
   const present = {
@@ -139,13 +145,20 @@ test('clearing path 3/3: the session vanishing from the bridge tree clears block
   assert.strictEqual(s.status, 'blocked');
   assert.strictEqual(s.surface.tabUuid, 'UUID-A');
 
-  // The tab is closed: the same events, a tree that no longer contains UUID-A. The session leaves
-  // the board entirely, which is what "clears" means for a terminal that no longer exists.
+  // The tab is closed: the same events, a tree that no longer contains UUID-A.
   const gone = { workspaces: [{ ref: 'workspace:2', title: 'app', tabs: [{ id: 'UUID-Z', ref: 'surface:9', type: 'terminal', statusCovered: true }] }] };
   const after = await collect({ events, tree: gone, roots }, { prev: before.fragment });
-  assert.deepStrictEqual(after.fragment.sessions, [], 'the vanished session is gone');
-  const state = derive({ now: NOW, collectorId: 'machine-a', sources: { sessions: { status: 'ok' } }, fragments: { sessions: after.fragment } });
-  assert.deepStrictEqual(state.attention.filter((a) => a.type === 'blocked'), [], 'and so is its attention item');
+  const v = one(after.fragment);
+  assert.strictEqual(v.vanished, true);
+  assert.strictEqual(v.surface, null, 'no Jump target — the tab it named is gone');
+  assert.strictEqual(v.surfaceReason, 'recorded-tab-gone');
+  assert.strictEqual(v.status, 'blocked', 'the session is still waiting on a human');
+
+  // And it does leave, on a real clearing event, tab or no tab.
+  const answered = await collect(
+    { events: events.concat([ev({ ts: NOW - min(1), event: 'UserPromptSubmit' })]), tree: gone, roots },
+    { prev: after.fragment });
+  assert.deepStrictEqual(answered.fragment.sessions, [], 'answered -> gone, with no tab to vanish from');
 });
 
 test('blocked -> cleared -> blocked again ends BLOCKED (order matters, not membership)', async () => {
@@ -265,7 +278,7 @@ test('an unambiguous cwd -> workspace -> single terminal join yields a Jump targ
     roots: wsRoots,
   });
   const s = one(fragment);
-  assert.deepStrictEqual(s.surface, { workspace: 'workspace:2', tabRef: 'surface:1', tabUuid: 'UUID-A', tabStatus: 'Running' });
+  assert.deepStrictEqual(s.surface, { workspace: 'workspace:2', tabRef: 'surface:1', tabUuid: 'UUID-A', tabStatus: 'Running', via: 'cwd' });
   const state = derive({ now: NOW, collectorId: 'machine-a', sources: { sessions: { status: 'ok' } }, fragments: { sessions: fragment } });
   const blocked = state.attention.find((a) => a.type === 'blocked');
   assert.deepStrictEqual(blocked.actions, [{ kind: 'jump', machine: 'machine-b', tabRef: 'surface:1', tabUuid: 'UUID-A' }]);
@@ -495,7 +508,7 @@ test('a session BELOW a workspace root joins it — roots are parent directories
     roots: wsRoots,
   });
   const s = one(fragment);
-  assert.deepStrictEqual(s.surface, { workspace: 'workspace:2', tabRef: 'surface:1', tabUuid: 'UUID-A', tabStatus: 'Running' });
+  assert.deepStrictEqual(s.surface, { workspace: 'workspace:2', tabRef: 'surface:1', tabUuid: 'UUID-A', tabStatus: 'Running', via: 'cwd' });
   assert.strictEqual(s.surfaceReason, null, 'a resolved surface carries no reason');
 });
 

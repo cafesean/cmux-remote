@@ -6,9 +6,9 @@
 // thing, repo/epic mapping, and a session with no cwd is still a first-class session.
 //
 // BLOCKED IS NARROW AND CLEARS THREE WAYS. It is set only by a Notification whose notification_type
-// is permission_prompt or idle_prompt (or by the PermissionRequest hook, which the installed CLI
-// does expose). Every other notification subtype — auth_success, the rest — is INERT: it neither
-// sets nor clears. Blocked then clears on:
+// is one of the three in BLOCKING_NOTIFICATIONS (or by the PermissionRequest hook, which the
+// installed CLI does expose). Every other notification subtype — auth_success, the rest — is INERT:
+// it neither sets nor clears. Blocked then clears on:
 //     (a) any later UserPromptSubmit   — the operator answered
 //     (b) any later Stop               — the turn ended without them
 //     (c) the session vanishing from the bridge tree — the tab is gone
@@ -41,8 +41,9 @@ const CACHE_TTL_MS = 60 * 60 * 1000;           // prompt-cache window, APPROXIMA
 const ABANDON_MS = 4 * 60 * 60 * 1000;         // 4h
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:8799';
 
-// The only notification subtypes that mean "a human has to do something".
-const BLOCKING_NOTIFICATIONS = new Set(['permission_prompt', 'idle_prompt']);
+// The only notification subtypes that mean "a human has to do something". An ALLOWLIST, never a
+// pattern: roughly twenty subtypes exist and every one not named here must stay inert.
+const BLOCKING_NOTIFICATIONS = new Set(['permission_prompt', 'idle_prompt', 'agent_needs_input']);
 // Hook events that clear a block, whatever set it.
 const CLEARING_EVENTS = new Set(['UserPromptSubmit', 'Stop']);
 
@@ -100,6 +101,16 @@ function defaultHttp(url, opts) {
   const o = opts || {};
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), o.timeoutMs || 8000);
+  // A caller-owned signal (the reply route's request scope) composes with the private timeout, so
+  // either can cancel the in-flight fetch. `aborted` is checked BEFORE listening: a listener added
+  // after a signal has already fired never replays, and a client can disconnect before this call.
+  const outer = o.signal || null;
+  const onAbort = () => ctl.abort();
+  let listening = false;
+  if (outer) {
+    if (outer.aborted) ctl.abort();
+    else { outer.addEventListener('abort', onAbort, { once: true }); listening = true; }
+  }
   return fetch(url, { headers: o.headers || {}, signal: ctl.signal })
     .then(async (r) => {
       const text = await r.text();
@@ -107,7 +118,11 @@ function defaultHttp(url, opts) {
       try { json = JSON.parse(text); } catch (_) { /* non-JSON body -> treated as failure below */ }
       return { ok: r.ok, status: r.status, json };
     })
-    .finally(() => clearTimeout(timer));
+    .finally(() => {
+      clearTimeout(timer);
+      // Removed only when it was added, so add/remove counts balance on the pre-aborted path too.
+      if (listening) outer.removeEventListener('abort', onAbort);
+    });
 }
 
 // ---- event folding --------------------------------------------------------------------------------
@@ -130,9 +145,16 @@ function foldSession(machine, sessionId, events) {
     lastEventAt = ev.ts;
     if (ev.transcriptPath) transcriptPath = ev.transcriptPath;   // secondary identity, latest wins
     if (ev.cwd) cwd = ev.cwd;
-    // Latest wins: a session survives being moved between tabs, and the newest event is the truth.
-    if (ev.surfaceId) surfaceId = ev.surfaceId;
-    if (ev.tabId) tabId = ev.tabId;
+    // TURN-TRUTHFUL, PER FIELD. Every event replaces BOTH recorded values — each becomes that
+    // event's value, or null when that event omitted it. Nothing is carried across an omission,
+    // because the two fields are captured independently (CMUX_SURFACE_ID / CMUX_TAB_ID) and there
+    // is no both-or-neither producer invariant to lean on. Carrying either one forward inherits a
+    // stale pane: an identity-less turn would keep a whole dead surface, and a surface-only turn
+    // would keep an old tabId that joinRecorded falls through to — joining a tab this session no
+    // longer occupies. This one pair is what publication, the reply route's identity contest and
+    // its recorded-only join all consume, so a field the latest event omitted is unreachable.
+    surfaceId = ev.surfaceId || null;
+    tabId = ev.tabId || null;
     if (ev.event === 'UserPromptSubmit') { lastSubmitAt = ev.ts; blockedSince = null; notificationType = null; continue; }
     if (ev.event === 'Stop') { lastStopAt = ev.ts; blockedSince = null; notificationType = null; continue; }
     if (ev.event === 'Notification') {
@@ -242,12 +264,16 @@ function surfaceCandidate(idx, cwd) {
   return bestKey === null ? null : { key: bestKey, candidates: idx.byCwd.get(bestKey) };
 }
 
-function surfaceOf(ws, tab) {
+// `via` is the join's PROVENANCE, and it is published because downstream nothing else can tell an
+// exact recorded join from a cwd guess. A consumer that writes into a terminal may only ever act on
+// `recorded`; without this field a heuristic row would advertise an action the write path refuses.
+function surfaceOf(ws, tab, via) {
   return {
     workspace: ws.ref || null,
     tabRef: tab.ref || null,
     tabUuid: tab.id,
     tabStatus: tab.statusCovered === false ? 'unknown' : (str(tab.status) || 'unknown'),
+    via,
   };
 }
 
@@ -261,7 +287,7 @@ function joinRecorded(idx, recorded) {
   for (const id of [recorded.surfaceId, recorded.tabId]) {
     if (!id) continue;
     const hit = idx.byUuid.get(id);
-    if (hit) return { surface: surfaceOf(hit.ws, hit.tab), reason: null, recorded: true };
+    if (hit) return { surface: surfaceOf(hit.ws, hit.tab, 'recorded'), reason: null, recorded: true };
   }
   // It named a tab and the tree does not have it: the tab is closed. Saying so beats falling back
   // to a cwd guess that would point Jump at whatever terminal replaced it.
@@ -290,55 +316,83 @@ function joinSurface(idx, cwd, cwdSessionCount, recorded) {
   const tab = terminals[0];
   if (!tab.id) return { surface: null, reason: 'no-tab-uuid' };                // UUID is the only stable identity
   // `statusCovered === false` means the 60-tab cap bit and nobody asked cmux about this tab.
-  return { surface: surfaceOf(ws, tab), reason: null };
+  return { surface: surfaceOf(ws, tab, 'cwd'), reason: null };
 }
 
 // ---- per-machine collection -----------------------------------------------------------------------
 
-async function collectMachine(bridge, ctx) {
-  const { now, http, timeoutMs, paths, network } = ctx;
+// The event-fetch half of collectMachine, on its own so a caller that needs the session facts and
+// NOTHING else — the reply route, deciding whether a session is still waiting — can read them
+// without also pulling the tree and the workspace roots.
+//
+// ALL FOUR FIELDS ARE POPULATED ON BOTH PATHS. A read that succeeded while omitting history is not
+// a complete read, and the one predicate every caller shares — `error` set, `skipped > 0`, or
+// `more === true` means not authoritative — can only be applied if the metadata survives the trip.
+// That includes the bridge's HTTP 200 `{events: [], more: false, error: 'events_unreadable'}`: a
+// success envelope reporting a failed read.
+async function readMachineEvents(bridge, ctx) {
+  const c = ctx || {};
+  const now = c.now == null ? Date.now() : c.now;
+  const http = typeof c.http === 'function' ? c.http : defaultHttp;
+  const since = now - eventlog.RETENTION_MS;
+  const none = (error) => ({ events: null, skipped: 0, more: false, error });
+
+  if (bridge.local) {
+    try {
+      const dir = (c.paths && c.paths.events) || eventlog.eventsDir();
+      const r = await eventlog.readEvents({ eventsDir: dir, since });
+      return { events: r.events, skipped: r.skipped || 0, more: r.more === true, error: null };
+    } catch (e) { return none(`local events: ${e && e.message ? e.message : String(e)}`); }
+  }
+
   const secret = bridge.secretRef ? (process.env[bridge.secretRef] || '') : '';
   const headers = secret ? { 'x-bridge-secret': secret } : {};
-  const since = now - eventlog.RETENTION_MS;
+  try {
+    // `signal` is the caller's, composed with the transport's own timeout: a disconnected client
+    // must kill the request in flight, not merely suppress the calls that would have followed.
+    const r = await http(`${bridge.baseUrl}/cmux/session-events?since=${since}`,
+      { headers, timeoutMs: c.timeoutMs, signal: c.signal });
+    if (!r || !r.ok || !r.json || !Array.isArray(r.json.events)) {
+      return none(`session-events: ${r && r.status ? `HTTP ${r.status}` : 'unreachable'}`);
+    }
+    return {
+      events: r.json.events.map((e) => eventlog.normalizeEvent(e, null)).filter(Boolean),
+      skipped: Number(r.json.skipped) > 0 ? Math.floor(Number(r.json.skipped)) : 0,
+      more: r.json.more === true,
+      error: str(r.json.error),
+    };
+  } catch (e) { return none(`session-events: ${e && e.message ? e.message : String(e)}`); }
+}
+
+async function collectMachine(bridge, ctx) {
+  const { http, timeoutMs, network } = ctx;
+  const secret = bridge.secretRef ? (process.env[bridge.secretRef] || '') : '';
+  const headers = secret ? { 'x-bridge-secret': secret } : {};
 
   // `fetch: false` (the collector's no-network scan mode) suppresses every HTTP call. The local
   // machine's events still come off disk — that is not the network — but nothing is PROBED, so
   // the machine reports `unknown`, never `offline`. "We did not ask" and "it did not answer" are
   // different facts and radar is not allowed to conflate them.
   if (network === false || bridge.implicit) {
-    let events = null;
-    let eventsError = null;
-    if (bridge.local) {
-      try {
-        const r = await eventlog.readEvents({ eventsDir: paths.events, since });
-        events = r.events;
-      } catch (e) { eventsError = `local events: ${e && e.message ? e.message : String(e)}`; }
-    }
-    return { bridge, events, eventsError, tree: null, roots: null, treeError: null, networkSkipped: true };
+    // A configured REMOTE bridge is not read at all here — reading it is the HTTP call this mode
+    // exists to suppress. The local log is disk, not network, so it is still read.
+    const r = bridge.local ? await readMachineEvents(bridge, ctx) : null;
+    return {
+      bridge, events: r ? r.events : null, eventsError: r ? r.error : null,
+      tree: null, roots: null, treeError: null, networkSkipped: true,
+    };
   }
 
   // ---- events. The whole retained window, re-folded every sweep. No cursor to corrupt, and the
   // endpoint's at-least-once duplicates cost nothing because folding is idempotent.
-  let events = null;
-  let eventsError = null;
-  if (bridge.local) {
-    try {
-      const r = await eventlog.readEvents({ eventsDir: paths.events, since });
-      events = r.events;
-    } catch (e) { eventsError = `local events: ${e && e.message ? e.message : String(e)}`; }
-  } else {
-    try {
-      const r = await http(`${bridge.baseUrl}/cmux/session-events?since=${since}`, { headers, timeoutMs });
-      if (!r || !r.ok || !r.json || !Array.isArray(r.json.events)) {
-        eventsError = `session-events: ${r && r.status ? `HTTP ${r.status}` : 'unreachable'}`;
-      } else {
-        events = r.json.events.map((e) => eventlog.normalizeEvent(e, null)).filter(Boolean);
-        // `more` = the page hit the cap. The remainder is older-than-this-page material we will
-        // pick up next sweep; we say so rather than pretending the fold is complete.
-        if (r.json.more) ctx.warnings.push(`${bridge.id}: session-events page truncated`);
-      }
-    } catch (e) { eventsError = `session-events: ${e && e.message ? e.message : String(e)}`; }
-  }
+  const read = await readMachineEvents(bridge, ctx);
+  const events = read.events;
+  const eventsError = read.error;
+  // `more` = the page hit the cap. The remainder is older-than-this-page material we will pick up
+  // next sweep; we say so rather than pretending the fold is complete. Only the remote transport
+  // pages, so only it warns — the local reader's own cap reaches gate-1 callers through
+  // readMachineEvents' metadata instead.
+  if (!bridge.local && read.more) ctx.warnings.push(`${bridge.id}: session-events page truncated`);
 
   // ---- tree + workspace cwds. Only used for the surface join and vanish detection; their absence
   // degrades those two things and NOTHING else.
@@ -361,6 +415,29 @@ async function collectMachine(bridge, ctx) {
 }
 
 // ---- assembly ---------------------------------------------------------------------------------
+
+// A session is cleared out of `blocked` ONLY by UserPromptSubmit or Stop. A session that is killed
+// emits neither, so without the ABANDON_MS floor it stays blocked forever — the board accumulated a
+// 13-hour-old "waiting" row that permanently owned the urgent slot. Past that floor we stop
+// claiming it is waiting on anyone: the prompt cache died long ago, so nothing is recoverable by
+// answering it, and a corpse in the queue trains the eye to ignore the queue.
+//
+// Exported because the reply route must decide "is this session still waiting?" from a fold of the
+// live event log, and two implementations of that question would eventually disagree.
+function sessionStatusOf(f, now) {
+  if (f.blockedSince != null) return (now - f.blockedSince) > ABANDON_MS ? 'abandoned' : 'blocked';
+  // idle is a LIVE state. It means "this session is sitting there", never "this session is
+  // finished" — nothing in radar may render it as completion.
+  return (f.lastEventAt != null && now - f.lastEventAt <= RUNNING_WINDOW_MS) ? 'running' : 'idle';
+}
+
+// A surface carried through a tree outage keeps its own provenance. A PRE-p9 snapshot has none, and
+// inventing one would bless an identity nothing ever proved, so that surface is dropped instead —
+// the row rides read-only until a fresh tree re-joins it and mints a real `via`.
+function carriedSurface(prevSession) {
+  const s = prevSession ? prevSession.surface || null : null;
+  return s && s.via ? s : null;
+}
 
 function sessionsForMachine(raw, ctx) {
   const { now, config, aliases, prevByMachine } = ctx;
@@ -408,36 +485,43 @@ function sessionsForMachine(raw, ctx) {
     // would remove the Jump button, which is attention churn caused purely by the outage.
     const joined = idx.ok
       ? joinSurface(idx, f.cwd, f.cwd ? cwdCount.get(trimSlash(f.cwd)) : 0, { surfaceId: f.surfaceId, tabId: f.tabId })
-      : { surface: (prevSession ? prevSession.surface || null : null), reason: 'tree-unavailable' };
-    const surface = joined.surface;
-    const surfaceReason = surface ? null : joined.reason;
+      : { surface: carriedSurface(prevSession), reason: 'tree-unavailable' };
+    let surface = joined.surface;
+    let surfaceReason = surface ? null : joined.reason;
+
+    const status = sessionStatusOf(f, now);
+    const blocked = status === 'blocked';
 
     // Vanished from the tree = the tab we knew this session by is closed. Keyed on the PREVIOUS
-    // surface, never the freshly joined one: the cwd heuristic would otherwise re-point a dead
-    // session at whatever terminal now occupies that workspace, and Jump would open a stranger's
-    // tab. Only ever concluded from a tree we actually got.
+    // surface, never the freshly joined one, and only ever concluded from a tree we actually got.
+    //
+    // The row is PUBLISHED rather than dropped. Carry-forward is rebuilt solely from the published
+    // sessions, so a vanish held in process is forgotten by the very next sweep — publishing it is
+    // what makes it survive sweeps and restarts. Only a still-blocked session is worth keeping;
+    // any other status emits nothing, exactly as before.
+    //
+    // STICKY AGAINST HEURISTICS, NEVER AGAINST A FRESH EXACT IDENTITY: recovery is one recorded
+    // join, because a session that legitimately moved or resumed into a new tab must not stay
+    // frozen — while the cwd heuristic must never re-point a dead session at whatever terminal now
+    // occupies its workspace.
+    let vanished = false;
     if (idx.ok) {
       const prevUuid = prevSession && prevSession.surface && prevSession.surface.tabUuid;
-      if (prevUuid && !idx.uuids.has(prevUuid)) continue;      // dropped -> blocked cleared with it
+      if ((prevSession && prevSession.vanished === true) || (prevUuid && !idx.uuids.has(prevUuid))) {
+        if (!blocked) continue;
+        const fresh = joinRecorded(idx, { surfaceId: f.surfaceId, tabId: f.tabId });
+        if (fresh && fresh.surface) { surface = fresh.surface; surfaceReason = null; }
+        else { surface = null; surfaceReason = 'recorded-tab-gone'; vanished = true; }
+      }
+    } else if (prevSession && prevSession.vanished === true && blocked) {
+      // A missing tree cannot re-prove a tab either way, and un-vanishing on an outage would push
+      // the row back into every shielded consumer — attention churn caused purely by the outage.
+      vanished = true;
     }
 
     const map = mapCwd(f.cwd, config, aliases);
-    // A session is cleared out of `blocked` ONLY by UserPromptSubmit or Stop. A session that is
-    // killed emits neither, so without this it stays blocked forever — the board accumulated a
-    // 13-hour-old "waiting" row that permanently owned the urgent slot. Past ABANDON_MS we stop
-    // claiming it is waiting on anyone: the prompt cache died long ago, so nothing is recoverable
-    // by answering it, and a corpse in the queue trains the eye to ignore the queue.
-    const abandoned = f.blockedSince != null && (now - f.blockedSince) > ABANDON_MS;
-    const blocked = f.blockedSince != null && !abandoned;
-    const status = blocked
-      ? 'blocked'
-      : abandoned
-      ? 'abandoned'
-      // idle is a LIVE state. It means "this session is sitting there", never "this session is
-      // finished" — nothing in radar may render it as completion.
-      : (f.lastEventAt != null && now - f.lastEventAt <= RUNNING_WINDOW_MS ? 'running' : 'idle');
 
-    sessions.push({
+    const row = {
       key: { machine: machineId, sessionId: f.sessionId },
       transcriptPath: f.transcriptPath,
       surface,
@@ -452,6 +536,9 @@ function sessionsForMachine(raw, ctx) {
       notificationType: blocked ? f.notificationType : null,
       lastEventAt: iso(f.lastEventAt),
       lastSubmitAt: iso(f.lastSubmitAt),
+      // When this session's turn last ENDED, which is the moment it started waiting. Folded since
+      // v1; published because a consumer ordering a queue of waiting sessions needs it.
+      lastStopAt: iso(f.lastStopAt),
       // The prompt cache is ~60 min from the last submit, but the TTL drops to 5 min under usage
       // overage. We cannot see which regime we are in, so this is ALWAYS approximate and always
       // flagged as such — the UI renders "≈". An asserted deadline here would be a lie with a
@@ -460,7 +547,10 @@ function sessionsForMachine(raw, ctx) {
       cacheApprox: true,
       stale: false,
       observedAt,
-    });
+    };
+    // Present only when true, so a consumer that never heard of it sees the row it always saw.
+    if (vanished) row.vanished = true;
+    sessions.push(row);
   }
 
   sessions.sort((a, b) => (a.key.sessionId < b.key.sessionId ? -1 : a.key.sessionId > b.key.sessionId ? 1 : 0));
@@ -556,6 +646,7 @@ async function collectSessions(opts) {
 module.exports = {
   collectSessions,
   normalizeBridges, foldSession, groupEvents, mapCwd,
-  buildSurfaceIndex, joinSurface, surfaceCandidate, sessionsForMachine, collectMachine,
+  buildSurfaceIndex, joinSurface, joinRecorded, surfaceCandidate, sessionsForMachine,
+  sessionStatusOf, readMachineEvents, collectMachine,
   BLOCKING_NOTIFICATIONS, CLEARING_EVENTS, RUNNING_WINDOW_MS, CACHE_TTL_MS, ABANDON_MS, DEFAULT_BRIDGE_URL,
 };

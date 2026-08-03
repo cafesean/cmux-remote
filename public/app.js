@@ -44,7 +44,7 @@
   const $ = (id) => document.getElementById(id);
   const elTabs = $('tabs'), elPanes = $('panes'), elEmpty = $('empty'), elStatus = $('status'), elJump = $('jump');
   const elText = $('text'), elSend = $('send'), elRefresh = $('refresh'), elFilesBtn = $('filesBtn');
-  const elRadarBtn = $('radarBtn');
+  const elRadarBtn = $('radarBtn'), elInboxBtn = $('inboxBtn');
   const elWsChip = $('wsChip'), elWsLabel = $('wsLabel'), elHost = $('hostLabel'), elWsMenu = $('wsMenu');
   const elKeys = $('keys'), elKbToggle = $('kbToggle'), elHint = $('hint');
   const elModeCompose = $('modeCompose'), elModeLive = $('modeLive');
@@ -104,6 +104,9 @@
   // p5 radar. Declared up here (not at its section) so renderTabs can test it without a TDZ risk.
   // It stays null unless radar.js loaded AND created cleanly — that null is the entire kill switch.
   let radarUI = null;
+  // p9 inbox, same contract and same reason: renderTabs/syncFilesBtn read it, and a null here means
+  // the feature is simply absent.
+  let inboxUI = null;
 
   function gate(msg, showToken) {
     const g = $('gate'); g.replaceChildren(); g.style.flexDirection = 'column';
@@ -148,6 +151,17 @@
     if (!spans.length) line.appendChild(document.createTextNode(' '));
     return line;
   }
+  // A history row: plain text, default style, no positioned runs — that is all cmux can give for rows
+  // older than the replay window (see loadHistory). Tagged `.hist` so it reads as older chrome, and so
+  // the menu-tap detector can tell it apart from a live grid row.
+  function buildPlainRow(text, def0) {
+    const line = document.createElement('div'); line.className = 'trow hist';
+    const el = document.createElement('span');
+    styleSpan(el, def0, def0);
+    el.textContent = text || ' ';
+    line.appendChild(el);
+    return line;
+  }
   function rowSig(spans) {
     let s = '';
     for (const sp of spans) s += sp.column + '' + sp.style_id + '' + sp.text + '';
@@ -169,26 +183,45 @@
     // scale font so the source terminal's columns fill THIS pane's width (before measuring line height)
     if (g.columns && g.columns > 1) { v.cols = g.columns; fitFont(v); }
 
-    // fill blank rows so a short source grid still occupies the pane (phones)
+    // fill blank rows so a short source grid still occupies the pane (phones). Not needed once history
+    // sits above it: the grid is already pinned to the bottom of a long scroll, and padding would only
+    // add dead space under the prompt.
     const cs = getComputedStyle(el);
     const fs = parseFloat(cs.fontSize) || 13;
     const lh = parseFloat(cs.lineHeight) || fs * 1.32;
     const padY = parseFloat(cs.paddingTop || '0') + parseFloat(cs.paddingBottom || '0');
-    const fillRows = Math.max(rows, Math.ceil(Math.max(0, el.clientHeight - padY) / lh));
-
-    const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const hist = (v.hist && v.hist.length) ? v.hist : null;
+    const off = hist ? hist.length : 0;
+    const fillRows = off ? rows : Math.max(rows, Math.ceil(Math.max(0, el.clientHeight - padY) / lh));
 
     // patch row-by-row: only rebuild rows whose signature changed → preserves selection + scroll
     const kids = el.childNodes;
-    for (let r = 0; r < fillRows; r++) {
-      const spans = (byRow[r] || []).sort((a, b) => a.column - b.column);
-      const sig = spans.length ? rowSig(spans) : '';
+    // History rows come FIRST and are keyed by their own text, so a live grid frame never rebuilds them.
+    // Rebuilding ~1700 nodes four times a second would make the pane unreadable and eat the phone.
+    for (let r = 0; r < off; r++) {
+      const sig = 'H' + hist[r];
       if (v.rowSig[r] === sig && kids[r]) continue;
-      const node = buildRow(spans, byId, def0);
+      const node = buildPlainRow(hist[r], def0);
       if (kids[r]) el.replaceChild(node, kids[r]); else el.appendChild(node);
       v.rowSig[r] = sig;
     }
-    while (el.childNodes.length > fillRows) { el.removeChild(el.lastChild); v.rowSig.pop(); }
+    for (let r = 0; r < fillRows; r++) {
+      const spans = (byRow[r] || []).sort((a, b) => a.column - b.column);
+      const sig = spans.length ? rowSig(spans) : '';
+      const i = off + r;
+      if (v.rowSig[i] === sig && kids[i]) continue;
+      const node = buildRow(spans, byId, def0);
+      if (kids[i]) el.replaceChild(node, kids[i]); else el.appendChild(node);
+      v.rowSig[i] = sig;
+    }
+    while (el.childNodes.length > off + fillRows) { el.removeChild(el.lastChild); v.rowSig.pop(); }
+    v.histLen = off;
+    // The replay window slides forward as output arrives, so rows scroll OUT of the styled grid and the
+    // history block no longer reaches it — a gap would open at the seam. The grid's top row changing
+    // identity is exactly that event; refetch (throttled) rather than let the pane lie about its past.
+    const topSig = v.rowSig[off] || '';
+    if (off && v.histTopSig && topSig && topSig !== v.histTopSig) refreshHistory(v);
+    v.histTopSig = topSig;
 
     // Follow the tail, which is what a terminal does.
     //
@@ -244,6 +277,47 @@
   function clearScreen(v) {
     if (!v) return;
     v.screenEl.replaceChildren(); v.rowSig = []; v.screenEl.style.background = '';
+    // History belongs to the surface that was in this pane, not to the pane.
+    v.hist = null; v.histLen = 0; v.histTopSig = null; v.histAt = 0;
+  }
+
+  // ---- deep scrollback: 2000 rows per pane ------------------------------------
+  // cmux caps `terminal.replay` at 240 scrollback rows and takes no parameter to raise it (measured on
+  // 0.64.19 against a 3000-line buffer). So a pane that attaches shows one screen plus 240 rows, which
+  // is where "a pane loading just one small window's worth" comes from — and on a full-screen TUI
+  // (`active_screen: "alternate"`) cmux reports ZERO scrollback by design, so it really is one screen.
+  //
+  // The rows above that window come from the bridge's /history route (read-screen text, aligned to the
+  // styled grid by content) and are painted as unstyled rows on top of it — see buildPlainRow. They are
+  // fetched ONCE per surface, never on the streaming frames: 1700 rows of text on every repaint would be
+  // ~200KB four times a second over the tunnel, which is the exact cost the hash-dedupe exists to avoid.
+  const HISTORY_ROWS = 2000;        // what a pane is expected to remember, per the operator
+  const HISTORY_MIN_GAP_MS = 4000;  // floor between refetches for one pane (each is a cmux read-screen)
+  function refreshHistory(v) {
+    if (!v || !v.surfaceId) return;
+    if (Date.now() - (v.histAt || 0) < HISTORY_MIN_GAP_MS) return;
+    loadHistory(v, v.surfaceId);
+  }
+  async function loadHistory(v, sid) {
+    if (!v || !sid || !state.machine || v.histBusy) return;
+    v.histBusy = true;
+    v.histAt = Date.now();
+    try {
+      const r = await jget('/api/cmux/history?machine=' + encodeURIComponent(state.machine)
+        + '&surface=' + encodeURIComponent(sid) + '&rows=' + HISTORY_ROWS);
+      const d = await r.json().catch(() => null);
+      if (!r.ok || !d || !Array.isArray(d.rows)) return;
+      // The pane may have switched surfaces while this was in flight; the answer describes the OLD one.
+      if (v.surfaceId !== sid) return;
+      if (!d.rows.length) { if (!v.hist) v.hist = null; return; }
+      // Prepending rows pushes everything down. Following the tail absorbs that (scrollToTail runs on
+      // the same frame); a reader who has scrolled up would be yanked, so leave them where they are and
+      // let the next attach or tail-follow pick the history up.
+      if (v.followTail === false) return;
+      v.hist = d.rows;
+      if (v.lastGrid) renderGrid(v, v.lastGrid);
+    } catch (_) { /* history is an enrichment — a pane without it is the old behaviour, not a failure */ }
+    finally { v.histBusy = false; }
   }
 
   // ---- per-tab grid cache: reopening a tab paints instantly from the last known grid (0 network),
@@ -436,7 +510,7 @@
       // whose status changes upstream (a session starts running, a tab is added) silently closes
       // Radar or Files mid-read — on a live board that is every few seconds. Track the resolved
       // tab so leaving lands on the right surface, but do not switch to it now.
-      const owned = state.tabType === 'radar' || state.tabType === 'files' || state.tabType === 'viewer';
+      const owned = state.tabType === 'radar' || state.tabType === 'inbox' || state.tabType === 'files' || state.tabType === 'viewer';
       if (!state.tab || state.tab.id !== keep.id) {
         if (owned) state.tab = { id: keep.id, ref: keep.ref };
         else selectTab(keep.id);
@@ -477,10 +551,17 @@
       if (w.ref === state.wsRef) b.classList.add('sel');
       const dot = document.createElement('span'); dot.className = 'wsdot';
       const nm = document.createElement('span'); nm.className = 'wsname'; nm.textContent = w.title || w.ref;
+      // Rename lives HERE because the header label is the dropdown's trigger — tapping it has to open
+      // the list, so it can never also be an edit target. cmux names an unnamed workspace after
+      // whatever tab is in front of it, which is why three of them can read "Claude Code".
+      const pen = document.createElement('span'); pen.className = 'wsedit'; pen.textContent = '✎';
+      pen.setAttribute('role', 'button'); pen.setAttribute('aria-label', 'Rename workspace');
+      pen.title = 'Rename workspace';
+      pen.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closeWsMenu(); doRenameWorkspace(w); };
       const x = document.createElement('span'); x.className = 'wsclose'; x.textContent = '×';
       x.setAttribute('role', 'button'); x.setAttribute('aria-label', 'Close workspace');
       x.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closeWsMenu(); doCloseWorkspace(w); };
-      b.append(dot, nm, x);
+      b.append(dot, nm, pen, x);
       b.onclick = () => { closeWsMenu(); selectWorkspace(w.ref); };
       elWsMenu.appendChild(b);
     });
@@ -581,8 +662,16 @@
     elRadarBtn.setAttribute('aria-pressed', inRadar ? 'true' : 'false');
     elRadarBtn.title = inRadar ? 'Hide radar' : 'Radar';
   }
+  // The inbox chip carries its own on/off state too — same toolbar, same contract.
+  function syncInboxBtn() {
+    if (!elInboxBtn) return;
+    const inInbox = state.tabType === 'inbox';
+    elInboxBtn.setAttribute('aria-pressed', inInbox ? 'true' : 'false');
+    elInboxBtn.title = inInbox ? 'Hide inbox' : 'Inbox';
+  }
   function syncFilesBtn() {
     syncRadarBtn();
+    syncInboxBtn();
     if (!elFilesBtn) return;
     const inFiles = state.tabType === 'files' || state.tabType === 'viewer';
     elFilesBtn.setAttribute('aria-pressed', inFiles ? 'true' : 'false');
@@ -596,6 +685,7 @@
     // that is mirroring perfectly well underneath — indistinguishable from "the tab didn't switch".
     exitFilesMode();
     exitRadarMode();
+    exitInboxMode();
     const isBrowser = t.type === 'browser';
     const sameTab = state.tab && state.tab.id === id;
     state.tab = { id: t.id, ref: t.ref };
@@ -631,10 +721,16 @@
   }
   // Which panes to paint: every one when there is room, otherwise just the focused pane blown up to
   // full size — the phone keeps the one-terminal-at-a-time behaviour the tab strip was built for.
+  //
+  // A SINGLE pane still takes the split view when the viewport is wide enough. It used to fall through
+  // to the solo branch (`panes.length > 1`), which meant a freshly created workspace — one pane, always —
+  // came up in the phone layout on a desktop: pill strip on top, no pane header, no ⊞ menu, and the only
+  // way out was to split it. The layout is a property of the VIEWPORT, not of how many panes happen to
+  // exist right now.
   function visiblePanes() {
     const panes = layoutPanes();
     if (!panes.length) return [];
-    if (canSplit() && panes.length > 1) {
+    if (canSplit()) {
       if (panes.length <= MAX_PANES) return panes;
       // keep the focused pane visible even if it sits past the cap, and say so rather than silently
       // dropping panes off the mirror
@@ -665,7 +761,9 @@
     box.append(head, screen, foot);
     elPanes.appendChild(box);
     const v = { paneId: p.id, paneRef: p.ref, surfaceId: null, el: box, headEl: head, screenEl: screen, footEl: foot,
-      rowSig: [], cols: 0, followTail: true, lastRaw: null, lastHash: null };
+      rowSig: [], cols: 0, followTail: true, lastRaw: null, lastHash: null,
+      // deep scrollback (loadHistory): the plain rows above the 240 the replay window can carry
+      hist: null, histLen: 0, histTopSig: null, histAt: 0, histBusy: false };
     screen.addEventListener('scroll', () => {
       // Only a HUMAN scroll decides whether to keep following. scrollToTail sets scrollTop itself,
       // and its target sits above the grid's trailing blank rows, so treating that echo as a reader
@@ -718,6 +816,7 @@
       const cached = paintFromCache(v, want);
       v.lastRaw = cached ? cached.raw : null;
       v.lastHash = cached ? cached.h : null;
+      loadHistory(v, want);             // every pane remembers 2000 rows, not one screen plus cmux's 240
     }
     const tab = v.surfaceId && findTab(v.surfaceId);
     const label = paneTitle(v.surfaceId) || p.ref;
@@ -798,12 +897,13 @@
       elPanes.appendChild(el);
     }
   }
-  // `body.solo` = the one-pane view (phone, Split view: Off, or a workspace with a single pane).
-  // The tab strip is shown ONLY there: in split view every pane header is its own switcher and the
-  // strip would be duplicate chrome. Derived from the layout, not from the live views, so it stays
-  // right while the panes are torn down for the Files/browser overlays.
+  // `body.solo` = the one-pane view: a viewport too narrow to split (phones), or Split view: Off.
+  // The tab strip is shown ONLY there — in split view every pane header is its own switcher and the
+  // strip would be duplicate chrome. It is keyed on the VIEWPORT alone: keying it on the pane count as
+  // well put a wide desktop into the phone layout for every single-pane workspace, which is what every
+  // new workspace is.
   function syncSoloClass() {
-    document.body.classList.toggle('solo', !canSplit() || layoutPanes().length <= 1);
+    document.body.classList.toggle('solo', !canSplit());
   }
   function renderPanes() {
     syncSoloClass();
@@ -1581,6 +1681,11 @@
     if (tabs.length > 1 || running.length) {
       const what = tabs.length > 1 ? tabs.length + ' tabs' : 'a running tab';
       if (!confirm('Close this pane? It holds ' + what + '.')) return;
+    } else if (((ws && ws.panes) || []).length <= 1) {
+      // The pane header is now shown for a single-pane workspace too (split view no longer needs two
+      // panes), so this × is newly reachable there — and closing the only pane takes the workspace with
+      // it. Say that, instead of quietly closing the workspace someone just made.
+      if (!confirm('Close this pane? It is the only one in this workspace.')) return;
     }
     setStatus('closing pane…');
     try {
@@ -1665,6 +1770,25 @@
       setStatus('tab closed');
     } catch (_) { setStatus('close failed', true); }
   }
+  // Rename a workspace. An emptied box CLEARS the custom name and hands the label back to cmux's
+  // tab-derived default, which is the only way to undo a rename — so it is not treated as a cancel.
+  async function doRenameWorkspace(w) {
+    if (!state.machine || !w) return;
+    const cur = w.title || '';
+    const next = prompt('Workspace name (empty = back to the tab’s name):', cur);
+    if (next === null) return;                       // cancelled — Esc / Cancel, not an empty name
+    const title = String(next).trim();
+    if (title === cur.trim()) return;
+    setStatus('renaming…');
+    try {
+      const r = await jpost('/api/cmux/rename-workspace', { machine: state.machine, workspace: w.id, title });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) { setStatus((d && d.detail) || (d && d.error) || 'rename failed', true); return; }
+      if (Array.isArray(d.workspaces)) state.workspaces = d.workspaces;
+      renderHeader(); renderTabs(); renderPanes();
+      setStatus(title ? 'renamed' : 'name cleared');
+    } catch (_) { setStatus('rename failed', true); }
+  }
   async function doCloseWorkspace(w) {
     if (!state.machine || !w) return;
     if (!confirm('Close workspace "' + (w.title || w.ref) + '"?\nThis closes all its tabs.')) return;
@@ -1732,7 +1856,10 @@
   // Returns true if it handled the tap (so the caller doesn't also focus the composer).
   function tryMenuClick(v, rowEl) {
     if (!state.tab || state.tabType !== 'terminal' || !v) return false;
-    const rows = Array.prototype.slice.call(v.screenEl.childNodes);
+    // Only the LIVE grid rows are candidates. A scrolled-off menu sitting in the history block carries
+    // its old ❯ marker forever, and letting it win `markedItem` would compute the arrow delta from a
+    // highlight that no longer exists — keys fired at the wrong item, in a menu, with no undo.
+    const rows = Array.prototype.slice.call(v.screenEl.childNodes).slice(v.histLen || 0);
     const tapIdx = rows.indexOf(rowEl);
     if (tapIdx < 0) return false;
     const items = []; let markedItem = -1;                          // option rows (grid indices) + which is selected
@@ -1975,6 +2102,7 @@
       exitFilesMode();
       if (state.browser && state.browser.surface) exitBrowserMode();
       exitRadarMode();
+      exitInboxMode();
       teardownPanes();
       setStatus('');
       state.tabType = 'git';
@@ -2644,6 +2772,50 @@
     if (window.console) console.error('source-control bar failed to mount', e);
   }
 
+  // ---- Inbox tab (p9, S-008) -------------------------------------------------
+  // The same defensive mount, for the same reason. jget/jpost are private to this IIFE, so the
+  // factory injection below is the ONLY way the inbox can reach the API — there is no other seam.
+  // If /inbox.js 404s (no route, stale cache) or throws in create(), inboxUI stays null, the chip is
+  // removed, and the terminal mirror is untouched.
+  try {
+    if (window.cmuxInbox && typeof window.cmuxInbox.create === 'function') {
+      inboxUI = window.cmuxInbox.create({
+        mount: $('wrap'),
+        jget, jpost, promptToken,
+        onJump: radarJump,
+      });
+    }
+  } catch (e) { inboxUI = null; if (window.console) console.error('inbox failed to mount', e); }
+  if (!inboxUI && elInboxBtn && elInboxBtn.parentNode) elInboxBtn.remove();
+  if (inboxUI && elInboxBtn) elInboxBtn.onclick = (e) => { e.stopPropagation(); toggleInbox(); };
+
+  function toggleInbox() {
+    if (!inboxUI) return;
+    if (state.tabType === 'inbox') {
+      // Leaving goes back through selectTab so the terminal resumes polling — opening the inbox
+      // stopped it, and merely hiding the pane would leave a frozen mirror underneath.
+      if (state.tab && findTab(state.tab.id)) return selectTab(state.tab.id);
+      exitInboxMode(); renderTabs(); return;
+    }
+    try {
+      exitFilesMode();
+      if (state.browser && state.browser.surface) exitBrowserMode();
+      exitRadarMode();
+      exitGitMode();
+      teardownPanes();
+      setStatus('');
+      state.tabType = 'inbox';
+      inboxUI.open();
+    } catch (e) { state.tabType = 'terminal'; if (window.console) console.error('inbox open failed', e); }
+    renderTabs();
+  }
+
+  function exitInboxMode() {
+    if (!inboxUI) return;
+    try { inboxUI.close(); } catch (_) {}
+    if (state.tabType === 'inbox') state.tabType = 'terminal';
+  }
+
   function toggleRadar() {
     if (!radarUI) return;
     if (state.tabType === 'radar') {
@@ -2655,6 +2827,7 @@
     try {
       exitFilesMode();
       if (state.browser && state.browser.surface) exitBrowserMode();
+      exitInboxMode();
       // This called the poll-stopper that the multi-pane merge deleted; teardownPanes() is its
       // replacement. Opening radar must stop the mirror, or a frozen terminal sits underneath.
       teardownPanes();
@@ -2788,6 +2961,7 @@
     document.body.classList.toggle('mode-fview', which === 'viewer');
     if (which === 'files' || which === 'viewer') {
       exitRadarMode();
+      exitInboxMode();
       // teardownPanes() is the multi-pane replacement for the old poll-stopper — same job, stop
       // mirroring. The old function no longer exists, so calling it here would throw.
       teardownPanes();

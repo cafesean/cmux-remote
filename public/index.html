@@ -67,6 +67,9 @@
     #wsMenu button .wsdot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
     #wsMenu button.run .wsdot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
     #wsMenu button .wsname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #wsMenu button .wsedit { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center; color: var(--dim); font-size: 13px; line-height: 1; }
+    #wsMenu button .wsedit:active { background: rgba(255,255,255,.12); color: var(--fg); }
     #wsMenu button .wsclose { flex: 0 0 auto; margin-left: auto; width: 24px; height: 24px; border-radius: 50%;
       display: inline-flex; align-items: center; justify-content: center; color: var(--dim); font-size: 17px; line-height: 1; }
     #wsMenu button .wsclose:active { background: rgba(255,255,255,.12); color: var(--fg); }
@@ -250,6 +253,9 @@
     #fileDrop .fdicon { font-size: 30px; line-height: 1; }
     #fileDrop .fdtext { margin-top: 8px; font-size: 13px; color: var(--fg); font-weight: 600; }
     .trow { white-space: pre-wrap; overflow-wrap: anywhere; width: 100%; max-width: 100%; }
+    /* Scrollback older than cmux's 240-row replay window. It arrives as plain text — cmux has no styles
+       for it — so it is dimmed slightly to say so rather than pretending to be a faithful mirror. */
+    .trow.hist { opacity: .82; }
     /* bottom-left, not top-left: panes now have their own header band up there, and the pill used to
        sit right on top of the focused pane's title */
     #status { position: absolute; bottom: 8px; left: 12px; z-index: 5; font-size: 11px; color: var(--ok); font-weight: 600;
@@ -437,6 +443,9 @@
          did not mount, so a missing/broken radar leaves no dead control behind. -->
     <button class="icon" id="gitBtn" aria-pressed="false" aria-label="Source control" title="Source control">⎇</button>
     <button class="icon" id="radarBtn" aria-pressed="false" aria-label="Radar" title="Radar">◎</button>
+    <!-- Inbox (p9). Same toolbar, same contract as Radar: removed at boot if inbox.js did not
+         mount, so a missing/broken inbox leaves no dead control behind. -->
+    <button class="icon" id="inboxBtn" aria-pressed="false" aria-label="Inbox" title="Inbox">✉</button>
     <button class="icon" id="settingsBtn" aria-haspopup="menu" aria-expanded="false" aria-label="Settings" title="Settings">⚙</button>
     <button class="icon" id="refresh" aria-label="Refresh">⟳</button>
   </header>
@@ -603,6 +612,12 @@
   <script src="/git.js?v=v1-p7-20260801a"></script>
   <script src="/gitbar.js?v=v1-p8-20260802a"></script>
   <script src="/radar.js?v=v1-p5radar-20260731a"></script>
+  <!-- p9 inbox. Loaded BEFORE app.js so window.cmuxInbox exists when app boot runs, and versioned
+       HERE ONLY: sw.js precaches the BARE /inbox.js and its fetch branch matches by pathname, so a
+       query-bearing cache key would leave the offline fallback nothing to find. The ?v= still busts
+       caches because the sw cache version bumps with it. If it 404s, app.js renders no inbox chip
+       and the terminal mirror is untouched. -->
+  <script src="/inbox.js?v=v1-p9inbox-20260802a"></script>
   <script src="/app.js?v=v16-p7-20260801b"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
 </body>

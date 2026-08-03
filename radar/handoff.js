@@ -44,9 +44,9 @@ const LINE_MAX = 131072;
 // document's formatting — a constant carrying `**` would print literal asterisks on every surface.
 const SAFETY_NOTICE = 'The session is instructed to inspect and plan only on its first turn, and to ask before modifying, committing, pushing, merging or deleting anything. It runs without --dangerously-skip-permissions, so Claude\'s own permission prompts still apply — but your existing allowlists may already permit some commands. This is not a sandbox.';
 
-// §6.8 — p6's entire contribution to the seed: exactly one appended line (108 bytes; its
-// separator newline makes 109, so the largest acceptable override is seedMaxBytes - 109).
-const FIRST_TURN_LINE = 'FIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until Sean replies.';
+// §6.8 — p6's entire contribution to the seed: exactly one appended line (116 bytes; its
+// separator newline makes 117, so the largest acceptable override is seedMaxBytes - 117).
+const FIRST_TURN_LINE = 'FIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until the operator replies.';
 
 // §M2 — the literal wrapper body. The binary travels as $1, a POSITIONAL parameter, because the
 // scrub unsets ^(CLAUDE|CMUX|AI_AGENT|GHOSTTY) and that includes CLAUDE_BIN — a wrapper reading
@@ -241,7 +241,7 @@ function createHandoff(opts) {
   const incident = (code, detail) => {
     const id = crypto.randomUUID();
     // §7.3 — the withheld detail lives in the server log, one line keyed by the id, NEVER in a
-    // response body. A developer greps a log; Sean presses one button.
+    // response body. A developer greps a log; the operator presses one button.
     log(`[radar] handoff incident ${id} ${code}: ${JSON.stringify(detail)}`);
     return id;
   };
@@ -1243,7 +1243,7 @@ function createHandoff(opts) {
           await transitionQ(e, 'discarded', 'discarded_operator', { pid: e.pid });
           continue;
         }
-        // Alive — a late transcript does not revoke a discard: Sean pressed it. Keep signalling;
+        // Alive — a late transcript does not revoke a discard: the operator pressed it. Keep signalling;
         // release still requires PROOF, per dispatch, so a half-succeeded discard frees exactly
         // the halves it proved and holds the rest, invisibly, forever if need be.
         const gone = await killDispatchSet(e);

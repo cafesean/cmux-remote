@@ -405,6 +405,15 @@ async function handleApi(req, res, u) {
     if (p === '/api/cmux/grid' && u.searchParams.get('h')) qs.set('h', u.searchParams.get('h'));   // conditional poll: unchanged → {same:1}
     return relay(res, bridge(m, `${p.replace('/api/cmux', '/cmux')}?${qs}`));
   }
+  // Deep scrollback for one surface: the rows ABOVE what terminal.replay can carry (capped at 240 by
+  // cmux). A pane fetches this once when it attaches, so it never rides the streaming frames.
+  if (req.method === 'GET' && p === '/api/cmux/history') {
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    const qs = new URLSearchParams({ surface: u.searchParams.get('surface') || '' });
+    if (u.searchParams.get('rows')) qs.set('rows', u.searchParams.get('rows'));
+    return relay(res, bridge(m, `/cmux/history?${qs}`, { timeout: 25000 }));
+  }
   // Pane geometry for the multi-pane mirror (one cheap cmux call; hash-deduped like /grid).
   if (req.method === 'GET' && p === '/api/cmux/layout') {
     const m = findMachine(u.searchParams.get('machine'));
@@ -447,6 +456,13 @@ async function handleApi(req, res, u) {
       if (!b) return sendJson(res, 400, { error: 'bad_json' });
       const m = findMachine(b.machine);
       if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      // This proxy re-serializes an allowlisted body, so any field it does not name is DROPPED.
+      // `expect_seq` is a safety precondition, and a silently dropped precondition is worse than a
+      // rejected one: the caller believes the send was guarded and it was not. Refuse it loudly
+      // instead. The p9 reply route talks to the bridge directly and never comes through here.
+      if (Object.prototype.hasOwnProperty.call(b, 'expect_seq')) {
+        return sendJson(res, 400, { error: 'expect_seq_unsupported' });
+      }
       relay(res, bridge(m, '/cmux/send', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ surface: b.surface, text: b.text, submit: b.submit }),
@@ -498,6 +514,19 @@ async function handleApi(req, res, u) {
       relay(res, bridge(m, '/cmux/close-tab', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ surface: b.surface }),
+        timeout: 20000,
+      }));
+    });
+  }
+  // "Rename workspace" — a name of its own, instead of the first tab's title.
+  if (req.method === 'POST' && p === '/api/cmux/rename-workspace') {
+    return readBody(req, (b) => {
+      if (!b) return sendJson(res, 400, { error: 'bad_json' });
+      const m = findMachine(b.machine);
+      if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      relay(res, bridge(m, '/cmux/rename-workspace', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ workspace: b.workspace, title: b.title }),
         timeout: 20000,
       }));
     });
@@ -628,6 +657,11 @@ const httpServer = http.createServer((req, res) => {
   // loads /gitbar.js, this allow-list did not, and the defensive mount in app.js turned the 404
   // into "Files browses with no bar" — silently, with GIT_PANEL_ENABLED reading on.
   if (u.pathname === '/gitbar.js') return serveStatic(req, res, 'gitbar.js');
+  // p9 inbox. Served like radar.js — whether or not RADAR_ENABLED is set, because a static file that
+  // answers 404 half the time is a confusing way to say "off". With radar disabled the tab simply
+  // finds no /api/radar/inbox and says so. There is no fallback route here: without this line the
+  // module 404s and the feature ships dark.
+  if (u.pathname === '/inbox.js') return serveStatic(req, res, 'inbox.js');
   if (u.pathname === '/sw.js') return serveStatic(req, res, 'sw.js');
   if (u.pathname === '/manifest.webmanifest') return serveStatic(req, res, 'manifest.webmanifest');
   if (u.pathname === '/icon-180.png') return serveStatic(req, res, 'icon-180.png');

@@ -1,0 +1,82 @@
+[
+  {
+    "id": "fixture-inbox-001",
+    "text": "The slot-planner refactor is up for review. Nothing needed from you on this one; I'll report back when the review lands.",
+    "label": "status-only"
+  },
+  {
+    "id": "fixture-inbox-002",
+    "text": "Corrected in both places. The parcel index and the backfill script now compute the window boundary the same way.",
+    "label": "status-only"
+  },
+  {
+    "id": "fixture-inbox-003",
+    "text": "I left the retry ceiling at three, matching the importer that was already there. Say the word and I'll raise it.",
+    "label": "offer-more"
+  },
+  {
+    "id": "fixture-inbox-004",
+    "text": "Both panels render from the new feed. Want me to confirm the empty-state copy appears on a cold load, or move on to the alert badges?",
+    "label": "offer-more"
+  },
+  {
+    "id": "fixture-inbox-005",
+    "text": "The two fixes are on one branch because they touch the same file. The offer stands to split them onto their own branches.",
+    "label": "offer-more"
+  },
+  {
+    "id": "fixture-inbox-006",
+    "text": "Deleted four dead helpers and a stale snapshot directory while I was in there. The tree is tidier than when I started.",
+    "label": "status-only"
+  },
+  {
+    "id": "fixture-inbox-007",
+    "text": "Stopping to put a fork to you. A: widen the existing table and backfill in place. B: add a second table and cut over once it is warm. C: leave it alone and clamp the range at read time. I'd take A, but B is the one that survives a second consumer. Which?",
+    "label": "needs-decision"
+  },
+  {
+    "id": "fixture-inbox-008",
+    "text": "Four workers are running against the slot fixtures. I'll integrate and commit as each one lands.",
+    "label": "status-only"
+  },
+  {
+    "id": "fixture-inbox-009",
+    "text": "I've stopped at the approval prompt. The next step deletes the generated fixture directory recursively and I don't have standing permission for that. Approve it and I'll carry on.",
+    "label": "needs-decision"
+  },
+  {
+    "id": "fixture-inbox-010",
+    "text": "The importer cannot authenticate against the staging queue. I need the token exported in the shell I'm running in, and I won't guess at the variable name. Which one holds it?",
+    "label": "needs-decision"
+  },
+  {
+    "id": "fixture-inbox-011",
+    "text": "Done. The backfill ran over all twelve fixture windows, twelve passed, none were skipped, and the summary file is written.",
+    "label": "status-only"
+  },
+  {
+    "id": "fixture-inbox-012",
+    "text": "I'm halfway through the cutover and I've paused before the destructive step. Dropping the old column is next and there is no way back from it without a restore. Tell me to proceed and I'll finish.",
+    "label": "needs-decision"
+  },
+  {
+    "id": "fixture-inbox-013",
+    "text": "The suite is green and the branch is ready. One thing I noticed but did not touch: the fallback path swallows its own error. Should I fix that as well, or leave it for a separate pass?",
+    "label": "offer-more"
+  },
+  {
+    "id": "fixture-inbox-014",
+    "text": "I wondered whether the window boundary should be inclusive and settled it from the existing tests: it is, and the new code matches them. Nothing needed at your end.",
+    "label": "status-only"
+  },
+  {
+    "id": "fixture-inbox-015",
+    "text": "I cannot go further until I know which of the two schema files is canonical, the one checked in or the one the generator writes. They disagree on two field names, and choosing wrong loses data silently.",
+    "label": "needs-decision"
+  },
+  {
+    "id": "fixture-inbox-016",
+    "text": "That clears the whole checklist. If you want the same treatment applied to the importer I can start on it; otherwise I'll stop here.",
+    "label": "offer-more"
+  }
+]

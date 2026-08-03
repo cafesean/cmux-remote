@@ -457,7 +457,7 @@ test('start() installs exactly one timer and stop() clears it (both idempotent)'
 test('radar.start()/stop() drive the collector scheduler once each', async () => {
   const events = [];
   const c = stubCollector({ start: () => { events.push('start'); }, stop: () => { events.push('stop'); } });
-  const radar = createRadar({ createCollector: () => c, scanOnStart: false, log: () => {} });
+  const radar = createRadar({ createCollector: () => c, log: () => {} });
   radar.start();
   radar.start();
   assert.deepStrictEqual(events, ['start']);

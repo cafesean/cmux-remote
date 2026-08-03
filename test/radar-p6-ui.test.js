@@ -200,13 +200,13 @@ const PLAN_A = {
   logPath: '/radar/handoffs/h.log',
   transcriptPath: '/claude/projects/-repos-r1/b.jsonl',
   argv: ['--remote-control', '-n', 'h-20260801-1200-aaaaaa-e1', '--session-id', 'bbbbbbbb-0000-4000-8000-000000000002', 'SEED'],
-  seedText: '/radar-handoff\nMISSION: finish E1\nFIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until Sean replies.',
+  seedText: '/radar-handoff\nMISSION: finish E1\nFIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until the operator replies.',
   createdAt: '2026-08-01T12:00:00.000Z',
   expiresAt: '2026-08-01T12:02:00.000Z',
 };
 const PLAN_B = Object.assign({}, PLAN_A, {
   previewId: 'cccccccc-0000-4000-8000-000000000003',
-  seedText: 'edited seed\nFIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until Sean replies.',
+  seedText: 'edited seed\nFIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until the operator replies.',
 });
 
 // The fixture board: one row of every kind that matters to selection, plus epics and worktrees.

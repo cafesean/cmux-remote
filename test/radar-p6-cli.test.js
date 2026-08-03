@@ -4,7 +4,7 @@
 // S-002  buildBrief renders `last seen by session …` / `origin unknown` per selected epic (§6.5).
 // S-006  buildBrief is widened to the four kind-prefixed selector forms (§6.8's table) — this file
 //        owns the RENDERER assertions; the protocol (preview/commit/routes) is radar/handoff.js's.
-// S-007  the seed contract numbers (108-byte line, 109-byte join, 12179 max override) and the
+// S-007  the seed contract numbers (116-byte line, 117-byte join, 12171 max override) and the
 //        SAFETY_NOTICE constant — asserted lazily, because radar/handoff.js owns the constant and
 //        may land after this file.
 // S-010  `radar handoff` as an HTTP client with §M5's exact exit codes, proven against a stub
@@ -312,15 +312,15 @@ test('radar brief joins observations.jsonl and tolerates a truncated final line'
 
 // ---- S-007: the seed contract numbers and the SAFETY_NOTICE constant -----------------------------
 
-const FIRST_TURN = 'FIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until Sean replies.';
+const FIRST_TURN = 'FIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until the operator replies.';
 
-test('§6.8 seed contract: the appended line is 108 bytes, the join costs 109, the largest legal override is 12179', () => {
-  assert.strictEqual(Buffer.byteLength(FIRST_TURN, 'utf8'), 108);
-  assert.strictEqual(Buffer.byteLength('\n' + FIRST_TURN, 'utf8'), 109);
+test('§6.8 seed contract: the appended line is 116 bytes, the join costs 117, the largest legal override is 12171', () => {
+  assert.strictEqual(Buffer.byteLength(FIRST_TURN, 'utf8'), 116);
+  assert.strictEqual(Buffer.byteLength('\n' + FIRST_TURN, 'utf8'), 117);
   const seedMaxBytes = 12288;                    // the §4.7 default the cap is stated against
-  assert.strictEqual(seedMaxBytes - 109, 12179);
-  assert.strictEqual(Buffer.byteLength('a'.repeat(12179) + '\n' + FIRST_TURN, 'utf8'), seedMaxBytes);
-  assert.ok(Buffer.byteLength('a'.repeat(12180) + '\n' + FIRST_TURN, 'utf8') > seedMaxBytes,
+  assert.strictEqual(seedMaxBytes - 117, 12171);
+  assert.strictEqual(Buffer.byteLength('a'.repeat(12171) + '\n' + FIRST_TURN, 'utf8'), seedMaxBytes);
+  assert.ok(Buffer.byteLength('a'.repeat(12172) + '\n' + FIRST_TURN, 'utf8') > seedMaxBytes,
     'one more override byte must blow the cap — a 12288-byte override is never acceptable');
 });
 

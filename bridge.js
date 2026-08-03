@@ -628,6 +628,99 @@ function cmuxScreen(res, surface, lines) {
     : send(res, 200, { screen: stdout || '' })));
 }
 
+// ---------- deep scrollback: the rows ABOVE the replay window -----------------
+// `terminal.replay` is capped at 240 scrollback rows BY CMUX. Verified on 0.64.19 against a
+// 3000-line buffer: `scrollback_rows`, `max_scrollback_rows`, `lines` and `scrollback:true` all come
+// back with scrollback_rows === 240, and `mobile.terminal.replay` agrees. So the styled grid alone can
+// NEVER carry the history a pane is supposed to remember — CMUX_GRID_MAX_ROWS above is a ceiling the
+// replay path cannot reach, not a promise it keeps. `read-screen --scrollback --lines N` can: it
+// returns the last N lines of the same buffer as plain text (measured: 2000 asked, 2000 returned).
+//
+// This route hands back the rows that sit strictly ABOVE the replay window, so the client can paint
+// them as unstyled history on top of the styled grid and read one continuous 2000-row pane.
+//
+// THE SEAM IS FOUND BY CONTENT, NOT BY ARITHMETIC. read-screen trims the buffer's trailing blank rows
+// and replay does not, so counting rows in from either end drifts by however many blank rows happen to
+// sit below the cursor in the desktop viewport — and a drift of one duplicates or swallows a line at
+// the join, which reads as corruption. Instead: take the oldest styled row that has content as an
+// anchor and find it (plus its successor, so a repeated line can't match the wrong copy) scanning the
+// plain text from the END backwards, which is the most recent occurrence.
+//
+// ALT-SCREEN SURFACES ARE EXCLUDED. cmux defines an alternate screen as having zero scrollback, and the
+// history read-screen still reports there is the PRIMARY buffer sitting behind the full-screen TUI —
+// prepending it would invent a past the reader never saw. `altScreen: true` says so, so the client can
+// tell "no history exists" from "history not fetched yet".
+const REPLAY_SB_CAP = 240;         // cmux's own ceiling on terminal.replay scrollback rows
+const HISTORY_MAX_ROWS = 2000;     // rows a pane is expected to remember
+
+// Row text as the client paints it: positioned runs, gaps padded with spaces. Map row -> text.
+function spansToText(spans) {
+  const byRow = new Map();
+  for (const sp of (spans || [])) {
+    if (!byRow.has(sp.row)) byRow.set(sp.row, []);
+    byRow.get(sp.row).push(sp);
+  }
+  const out = new Map();
+  for (const [row, list] of byRow) {
+    list.sort((a, b) => a.column - b.column);
+    let text = '';
+    for (const sp of list) {
+      if (sp.column > text.length) text += ' '.repeat(sp.column - text.length);
+      text += sp.text || '';
+    }
+    out.set(row, text);
+  }
+  return out;
+}
+// Index in `lines` where the replay window's first row sits, or -1 when it can't be located.
+// `styled` is the replay window's rows in order (scrollback first, then viewport).
+function alignHistory(lines, styled) {
+  let k = -1;                                   // a blank anchor would match everywhere
+  for (let i = 0; i < styled.length && i < 40; i++) if (String(styled[i] || '').trim()) { k = i; break; }
+  if (k < 0) return -1;
+  const a0 = String(styled[k]).trimEnd();
+  const a1 = k + 1 < styled.length ? String(styled[k + 1] == null ? '' : styled[k + 1]).trimEnd() : null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (String(lines[i]).trimEnd() !== a0) continue;
+    if (a1 !== null && i + 1 < lines.length && String(lines[i + 1]).trimEnd() !== a1) continue;
+    return i - k >= 0 ? i - k : -1;
+  }
+  return -1;
+}
+
+// GET /cmux/history?surface=&rows= -> { rows: [text…], aligned, complete?, altScreen?, styledRows }
+function cmuxHistory(res, surface, rowsParam) {
+  const asked = parseInt(rowsParam, 10);
+  const want = Math.min(Number.isFinite(asked) && asked > 0 ? asked : HISTORY_MAX_ROWS, CMUX_SCROLLBACK_MAX);
+  cmux(['rpc', 'terminal.replay', JSON.stringify({ surface_id: surface })], (err, stdout) => {
+    if (err) return send(res, 502, { error: 'cmux_failed' });
+    let rg = null;
+    try { rg = (JSON.parse(stdout) || {}).render_grid || null; } catch (_) { rg = null; }
+    if (!rg || !Array.isArray(rg.row_spans)) return send(res, 502, { error: 'cmux_failed' });
+    const sbRows = rg.scrollback_rows || 0;
+    const styledRows = sbRows + (rg.rows || 0);
+    if (rg.active_screen && rg.active_screen !== 'primary') {
+      return send(res, 200, { rows: [], aligned: false, altScreen: true, styledRows });
+    }
+    // The replay window already reaches the top of the buffer, so there is nothing above it — and no
+    // reason to pay for a 2000-line read to prove it.
+    if (sbRows < REPLAY_SB_CAP) return send(res, 200, { rows: [], aligned: true, complete: true, styledRows });
+    const sbText = spansToText(rg.scrollback_spans);
+    const vpText = spansToText(rg.row_spans);
+    const styled = [];
+    for (let r = 0; r < sbRows; r++) styled.push(sbText.get(r) || '');
+    for (let r = 0; r < (rg.rows || 0); r++) styled.push(vpText.get(r) || '');
+    cmux(['read-screen', '--surface', surface, '--scrollback', '--lines', String(want)], (e2, txt) => {
+      if (e2) return send(res, 502, { error: 'cmux_failed' });
+      const lines = String(txt || '').replace(/\n$/, '').split('\n');
+      const start = alignHistory(lines, styled);
+      if (start <= 0) return send(res, 200, { rows: [], aligned: start === 0, styledRows, bufferRows: lines.length });
+      const room = Math.max(0, want - styledRows);
+      send(res, 200, { rows: lines.slice(Math.max(0, start - room), start), aligned: true, styledRows, bufferRows: lines.length });
+    }, 15000);
+  }, 10000);
+}
+
 // GET /cmux/stream?surface= -> SSE of base64(screen) frames. Poll read-screen, emit only on change.
 function cmuxStream(req, res, surface) {
   res.writeHead(200, {
@@ -660,21 +753,120 @@ function cmuxStream(req, res, surface) {
 }
 
 // ---------- input (addressed by surface) ------------------------------------
-// POST /cmux/send { surface, text, submit } — type text into a tab, optionally press enter to submit.
+// POST /cmux/send { surface, text, submit, expect_seq? } — type text into a tab, optionally press
+// enter to submit. Typing into a terminal is a BLIND WRITE, so this route owes its callers three
+// things the first version did not give them:
+//
+//  1. PER-SURFACE SERIALIZATION OF EVERY SEND. All /cmux/send work for one surface — with or
+//     without expect_seq — queues through one promise chain, so a check-then-write pair can never
+//     be interleaved by another send for the same surface. Serializing only the preconditioned
+//     sends would leave an unguarded legacy call free to land between a check and its write, which
+//     is exactly the race the precondition exists to close.
+//  2. A SEQ PRECONDITION THAT FAILS CLOSED. expect_seq is compared, inside the serialized section,
+//     against the ENVELOPE seq of a fresh grid read taken through the same gridPayload path
+//     /cmux/grid serves. (`grid.state_seq` is a phantom field that is never present on real data;
+//     it is never read here.) A seq that cannot be re-read is answered `seq_unavailable`, never
+//     waved through — an unverifiable precondition is not a satisfied one.
+//  3. PHASE-DISTINCT WRITE FAILURES. "Nothing was typed" may only be claimed when it is provable,
+//     and it is provable in exactly one case: the text command's child never started. Every later
+//     failure — timeout, signal, nonzero exit, late error — leaves the terminal side effect
+//     unproved and must say so instead of lying to the operator. The blanket `cmux_failed` is gone
+//     from this route.
+// Flags that say WHERE a send goes. `runSendCommand` refuses to adapt these away — see the comment
+// on the retry branch there.
+const TARGETING_FLAGS = new Set(['--surface', '--workspace', '--pane']);
+const SEND_CHAINS = new Map();
+// The per-surface queue. `fn` runs only once every earlier send for this surface has settled; a
+// rejection never poisons the chain, and the key is dropped when the queue drains so a long-lived
+// bridge does not accumulate one entry per surface it has ever written to.
+function serializeSend(surface, fn) {
+  // KEYED CASE-INSENSITIVELY, because SURFACE_RE accepts either casing of a uuid. Two callers
+  // spelling the same surface differently must not land on two different chains — that would let
+  // one caller's send interleave another's check/write and defeat the whole precondition.
+  const key = String(surface).toLowerCase();
+  const prev = SEND_CHAINS.get(key) || Promise.resolve();
+  const done = prev.then(fn);
+  const settled = done.then(() => {}, () => {});
+  SEND_CHAINS.set(key, settled);
+  settled.then(() => { if (SEND_CHAINS.get(key) === settled) SEND_CHAINS.delete(key); });
+  return done;
+}
+// The same 8 s budget the shared cmux() runner applies. Overridable ONLY so the post-dispatch
+// timeout branch is exercisable in milliseconds rather than eight seconds; unset in production.
+const SEND_CMD_TIMEOUT_MS = Number(process.env.CMUX_SEND_TIMEOUT_MS) || 8000;
+// Run one cmux command for this route and report WHICH PHASE a failure belongs to.
+//
+// The discriminator is structural, never a match on the error message: Node assigns
+// `subprocess.pid` synchronously when uv_spawn succeeds and leaves it `undefined` when the spawn
+// itself fails (the ENOENT/EACCES class), and the callback always fires after execFile() has
+// returned. So `pid === undefined` is the one state that PROVES no child ever ran; anything else is
+// a child that started and may have written before it died. A flag retry (adaptArgs, mirroring
+// cmux()) carries `dispatched` forward — once any attempt has started a child, no later attempt is
+// allowed to claim nothing happened. cb(null) on success, cb({dispatched, detail}) on failure.
+function runSendCommand(args, cb, dispatched, tries) {
+  const child = execFile(CMUX_BIN, args, { timeout: SEND_CMD_TIMEOUT_MS, env: CMUX_ENV, maxBuffer: 8 * 1024 * 1024 },
+    (err, stdout, stderr) => {
+      const started = dispatched || child.pid !== undefined;
+      const m = err && (tries || 0) < 3 && String(stderr || '').match(/unknown flag '(--[a-z-]+)'/);
+      // THE TARGETING FLAG IS NEVER ADAPTED AWAY. `adaptArgs` drops an unknown flag AND its value
+      // and retries, which is right for `--focus` and `--id-format` and catastrophic for
+      // `--surface`: the retry would be an UNTARGETED send, and cmux would type this text into
+      // whatever it considers the default target. That is the wrong-pane write every gate upstream
+      // exists to prevent, arrived at by a retry nobody asked for. If cmux ever rejects the flag
+      // that says WHERE, the answer is to stop, not to send somewhere else. The first attempt did
+      // dispatch, so this reports as post-dispatch and the route maps it to `send_unconfirmed` —
+      // the conservative direction, never a false "nothing was typed".
+      if (m && TARGETING_FLAGS.has(m[1])) {
+        return cb({ dispatched: started, detail: `cmux rejected ${m[1]}; refusing to retry untargeted` });
+      }
+      if (m) {
+        const next = adaptArgs(args, m[1]);
+        if (next) return runSendCommand(next, cb, started, (tries || 0) + 1);
+      }
+      cb(err ? { dispatched: started, detail: String(stderr || err.message || err).slice(0, 200) } : null);
+    });
+}
+const runSendCommandP = (args) => new Promise((resolve) => runSendCommand(args, resolve, false, 0));
+
 function cmuxSend(req, res) {
   cmuxReadBody(req, (b) => {
     if (!b) return send(res, 400, { error: 'bad_json' });
     const surface = String(b.surface || '');
     if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
+    // OWN-PROPERTY presence, not truthiness (expect_seq 0 is a legitimate precondition). A PRESENT
+    // expect_seq that is not a finite JSON number — string, null, object, array, NaN, and the
+    // Infinity a 1e999 literal parses to — is rejected HERE: before any grid read and before the
+    // queue. Treating invalid-present as absent would silently drop the precondition; comparing it
+    // would fabricate a seq_changed. bad_json is the code the reply route already reads as
+    // provably-pre-typing.
+    const wants = Object.prototype.hasOwnProperty.call(b, 'expect_seq');
+    if (wants && !Number.isFinite(b.expect_seq)) return send(res, 400, { error: 'bad_json' });
     const text = typeof b.text === 'string' ? b.text : '';
-    const run = (args) => new Promise((resolve, reject) => cmux(args, (e) => (e ? reject(e) : resolve())));
-    (async () => {
-      try {
-        if (text) await run(['send', '--surface', surface, '--', text]);   // argv (no shell) → no injection
-        if (b.submit) await run(['send-key', '--surface', surface, '--', 'enter']);
-        send(res, 200, { ok: true });
-      } catch (e) { send(res, 502, { error: 'cmux_failed', detail: String((e && e.message) || e).slice(0, 200) }); }
-    })();
+    let replied = false;
+    const answer = (code, body) => { if (replied) return; replied = true; send(res, code, body); };
+    serializeSend(surface, async () => {
+      if (wants) {
+        const cur = await new Promise((resolve) => gridPayload(surface, resolve));
+        // gridPayload's real failure shapes are `null` and the plain-text fallback, which carries no
+        // envelope seq at all. Neither can verify the precondition, so neither may pass it.
+        if (!cur || !Number.isFinite(cur.seq)) return answer(409, { error: 'seq_unavailable' });
+        if (cur.seq !== b.expect_seq) return answer(409, { error: 'seq_changed', seq: cur.seq });
+      }
+      if (text) {
+        const e = await runSendCommandP(['send', '--surface', surface, '--', text]);   // argv (no shell) → no injection
+        // The one provable case, and everything else. Enter is never attempted after either.
+        if (e) return answer(502, { error: e.dispatched ? 'text_command_unconfirmed' : 'send_failed', detail: e.detail });
+      }
+      if (b.submit) {
+        const e = await runSendCommandP(['send-key', '--surface', surface, '--', 'enter']);
+        if (e) return answer(502, { error: 'submit_failed_text_inserted', detail: e.detail });
+      }
+      answer(200, { ok: true });
+    }).catch((e) => {
+      // An unexpected throw cannot prove where it landed, so it takes the unproved answer — the
+      // conservative direction, since the caller treats it as "check the tab", never as a retry.
+      answer(502, { error: 'text_command_unconfirmed', detail: String((e && e.message) || e).slice(0, 200) });
+    });
   });
 }
 
@@ -760,6 +952,29 @@ function cmuxCloseTab(req, res) {
       if (err) return send(res, 502, { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 400) });
       const workspaces = await treePayload();
       send(res, 200, { ok: true, closed: surface, workspaces: workspaces || [] });
+    }, 8000);
+  });
+}
+
+// POST /cmux/rename-workspace { workspace, title } — give a workspace a name of its own.
+// Without one, cmux labels a workspace after whatever tab happens to be in front of it, so a new
+// workspace is named after its first tab and three of them read "Claude Code". An empty title is not a
+// no-op: it CLEARS the custom name and hands the label back to cmux's derived default (verified —
+// clear-name on a /tmp workspace went back to "/tmp").
+function cmuxRenameWorkspace(req, res) {
+  cmuxReadBody(req, (b) => {
+    if (!b) return send(res, 400, { error: 'bad_json' });
+    const workspace = String(b.workspace || '');
+    if (!WORKSPACE_RE.test(workspace)) return send(res, 400, { error: 'bad_workspace' });
+    // Newlines/tabs would corrupt the sidebar row and could not have been typed on purpose.
+    const title = String(b.title == null ? '' : b.title).replace(/[\r\n\t]+/g, ' ').trim().slice(0, 120);
+    const args = title
+      ? ['workspace-action', '--action', 'rename', '--workspace', workspace, '--title', title]
+      : ['workspace-action', '--action', 'clear-name', '--workspace', workspace];
+    cmux(args, async (err, stdout, stderr) => {
+      if (err) return send(res, 502, { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 400) });
+      const workspaces = await treePayload();
+      send(res, 200, { ok: true, workspace, title, workspaces: workspaces || [] });
     }, 8000);
   });
 }
@@ -1393,6 +1608,11 @@ function handleCmux(req, res) {
     if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
     return cmuxScreen(res, s, u.searchParams.get('lines'));
   }
+  if (req.method === 'GET' && p === '/cmux/history') {
+    const s = surfaceParam();
+    if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
+    return cmuxHistory(res, s, u.searchParams.get('rows'));
+  }
   if (req.method === 'GET' && p === '/cmux/stream') {
     const s = surfaceParam();
     if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
@@ -1403,6 +1623,7 @@ function handleCmux(req, res) {
   if (req.method === 'POST' && p === '/cmux/new-surface') return cmuxNewSurface(req, res);
   if (req.method === 'POST' && p === '/cmux/new-workspace') return cmuxNewWorkspace(req, res);
   if (req.method === 'POST' && p === '/cmux/close-tab') return cmuxCloseTab(req, res);
+  if (req.method === 'POST' && p === '/cmux/rename-workspace') return cmuxRenameWorkspace(req, res);
   if (req.method === 'POST' && p === '/cmux/close-workspace') return cmuxCloseWorkspace(req, res);
   if (req.method === 'POST' && p === '/cmux/new-pane') return cmuxNewPane(req, res);
   if (req.method === 'POST' && p === '/cmux/split-off') return cmuxSplitOff(req, res);

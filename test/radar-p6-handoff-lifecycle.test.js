@@ -124,7 +124,7 @@ async function activeHandoff(w, over) {
 // ---- silence vs process fact ---------------------------------------------------------------------
 
 test('THERE IS NO SILENCE-BASED ABANDONMENT: a live pid with zero observations for 24h is quiet and holds every key', async () => {
-  // The rule the whole release invariant hangs on: a session waiting for Sean emits NOTHING, and
+  // The rule the whole release invariant hangs on: a session waiting for the operator emits NOTHING, and
   // U5 says nothing bounds how long. quiet is a display, not a decision.
   assert.ok(!fs.readFileSync(require.resolve('../radar/handoff.js'), 'utf8').includes('abandonAfterMs'));
   const w = world();
@@ -390,7 +390,7 @@ test('SUPPRESSION CANNOT RELEASE AN ORPHAN: key existence reads the fact base, n
   assert.strictEqual((await w.api.get(plan.handoffId)).body.status, 'active', 'a suppressed rendering is not an absent fact');
   assert.deepStrictEqual(Object.keys(JSON.parse(locksFile(w.dir)).locks), plan.factKeys, 'the keys of a live worker stay held');
 
-  // The real resolution path: Sean tags the branch, the orphan FACT leaves the fact base.
+  // The real resolution path: the operator tags the branch, the orphan FACT leaves the fact base.
   w.stateBox.state = Object.assign({}, w.stateBox.state, {
     repos: { repoA: { branches: [{ name: 'stray', epic: 'PROJ-9', isDefault: false, unpushed: 2, mergedIntoDevelop: null, mergedIntoMain: null }], worktrees: [] } },
   });

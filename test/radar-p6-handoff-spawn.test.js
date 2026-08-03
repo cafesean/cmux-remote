@@ -126,7 +126,7 @@ test('adapter delivers exactly 6 argv elements through the scrub; the seed is ON
     assert.strictEqual(args.pop(), '');            // trailing NUL
     assert.deepStrictEqual(args, plan.argv, 'element-for-element, no shell re-parsing');
     assert.strictEqual(args.length, 6);
-    assert.strictEqual(args[5], seed + '\nFIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until Sean replies.');
+    assert.strictEqual(args[5], seed + '\nFIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until the operator replies.');
     assert.ok(!args.includes('--dangerously-skip-permissions'), 'read from what the adapter was CALLED WITH, never source text');
     const env = fs.readFileSync(path.join(out, 'env.txt'), 'utf8');
     for (const v of ['CLAUDE_BIN', 'CMUX_TEST_VAR', 'AI_AGENT_TEST', 'GHOSTTY_TEST']) {

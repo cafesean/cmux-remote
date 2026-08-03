@@ -3,14 +3,14 @@
 # exits 0 on pass.
 #
 # What it proves: seedText = <brief or seedOverride> + "\n" + the FIRST TURN line, where the line
-# is 108 bytes and its separator makes 109 (spec §6.8) — so with the default seedMaxBytes 12288 the
-# largest legal override is 12179 (final seed EXACTLY 12288), 12180 is 413 seed_too_large, and a
+# is 116 bytes and its separator makes 117 (spec §6.8) — so with the default seedMaxBytes 12288 the
+# largest legal override is 12171 (final seed EXACTLY 12288), 12172 is 413 seed_too_large, and a
 # 12288-byte override is rejected outright. Plus §7.2: SAFETY_NOTICE is byte-equal to the PLAIN
 # TEXT of the spec sentence — 334 UTF-8 bytes, committed as fixtures/s007-seed/SAFETY_NOTICE.txt
 # (no markdown asterisks, no backticks, ASCII apostrophe, em dash retained).
 #
 # All boundary numbers are COMPUTED from the running config's seedMaxBytes (§11), never hard-coded
-# beyond the two §6.8 constants (108/109) that are themselves asserted first.
+# beyond the two §6.8 constants (116/117) that are themselves asserted first.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../_lib.sh"
 p6_harness_start "s007-seed" "S-007"
@@ -26,10 +26,10 @@ fail() {
 # snapshots its config once at boot, so rewrites must land before a restart to be seen.
 
 # --- the two §6.8 constants, asserted before anything depends on them --------------------------
-export FT='FIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until Sean replies.'
+export FT='FIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until the operator replies.'
 node -e 'const ft=process.env.FT;
-if(Buffer.byteLength(ft,"utf8")!==108){console.error("FIRST TURN line is "+Buffer.byteLength(ft,"utf8")+" bytes, not 108");process.exit(1);}
-if(Buffer.byteLength("\n"+ft,"utf8")!==109)process.exit(1);' \
+if(Buffer.byteLength(ft,"utf8")!==116){console.error("FIRST TURN line is "+Buffer.byteLength(ft,"utf8")+" bytes, not 116");process.exit(1);}
+if(Buffer.byteLength("\n"+ft,"utf8")!==117)process.exit(1);' \
   || fail 'the FIRST TURN constants do not hold'
 
 # --- a real repo so the fixture selector resolves ----------------------------------------------
@@ -67,8 +67,8 @@ if(!r||!(r.worktrees||[]).some((w)=>w.dirty&&(w.dirty.staged+w.dirty.unstaged+w.
 
 # The boundary numbers, computed from the RUNNING config (§11).
 SEED_MAX="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.env.RADAR_DIR+"/config.json","utf8")).seedMaxBytes??12288)')"
-OVERRIDE_MAX=$(( SEED_MAX - 109 ))
-[ "$OVERRIDE_MAX" = "12179" ] || fail "seedMaxBytes=$SEED_MAX gives override max $OVERRIDE_MAX — fixture expects the 12288 default"
+OVERRIDE_MAX=$(( SEED_MAX - 117 ))
+[ "$OVERRIDE_MAX" = "12171" ] || fail "seedMaxBytes=$SEED_MAX gives override max $OVERRIDE_MAX — fixture expects the 12288 default"
 export SEED_MAX OVERRIDE_MAX
 
 post_preview() { # <payload-file> <out-file> -> echoes HTTP code
@@ -89,7 +89,7 @@ if(!s.endsWith("\n"+ft)){console.error("seed does not end with newline + the FIR
 if(s.includes("UNRESOLVED SELECTORS")){console.error("an UNRESOLVED SELECTORS line is unreachable from p6 and must not render");process.exit(1);}' \
   || fail 'the default seedText violates the §6.8 contract'
 
-# --- boundary: an override of seedMaxBytes-109 yields a final seed of EXACTLY seedMaxBytes -----
+# --- boundary: an override of seedMaxBytes-117 yields a final seed of EXACTLY seedMaxBytes -----
 node -e 'const fs=require("fs");
 fs.writeFileSync(process.env.TMP+"/p7-max.json",JSON.stringify({selectors:["epic:PROJ-907"],seedOverride:"a".repeat(Number(process.env.OVERRIDE_MAX))}))'
 CODE=$(post_preview "$TMP/p7-max.json" "$EVIDENCE/boundary-ok.json")
@@ -101,7 +101,7 @@ if(Buffer.byteLength(s,"utf8")!==max){console.error("final seed is "+Buffer.byte
 if(s!=="a".repeat(Number(process.env.OVERRIDE_MAX))+"\n"+ft){console.error("seed is not override + newline + FIRST TURN, byte for byte");process.exit(1);}' \
   || fail 'the largest legal override does not produce a final seed of exactly seedMaxBytes'
 
-# --- one more byte is refused: 12180 -> 413 seed_too_large {limit} -----------------------------
+# --- one more byte is refused: 12172 -> 413 seed_too_large {limit} -----------------------------
 node -e 'const fs=require("fs");
 fs.writeFileSync(process.env.TMP+"/p7-over.json",JSON.stringify({selectors:["epic:PROJ-907"],seedOverride:"a".repeat(Number(process.env.OVERRIDE_MAX)+1)}))'
 CODE=$(post_preview "$TMP/p7-over.json" "$EVIDENCE/boundary-too-large.json")
