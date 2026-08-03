@@ -520,6 +520,15 @@ export async function run({ chromium, base, token, fixture, now, log }) {
           after.cardDisplay === 'none' && after.cardPainted === false, JSON.stringify(after));
         check('the list comes back', after.listHidden === false, JSON.stringify(after));
         eq('and the ROW remains — never optimistically hidden', after.rows, 1);
+        // A reply that changes nothing on screen reads as a reply that did nothing. The row stays, so
+        // the CONFIRMATION has to be visible on it — the operator's act, not a claim about the session.
+        const marked = await page.evaluate(() => {
+          const r = document.querySelector('#inbox .irow');
+          const chip = r && r.querySelector('.ireplied');
+          return { chip: chip ? chip.textContent.trim() : null, rowClass: r ? r.className : null };
+        });
+        eq('the answered row is visibly marked replied', marked.chip, 'replied');
+        check('…and the row itself carries the replied state', /irow-replied/.test(marked.rowClass || ''), JSON.stringify(marked));
         eq('exactly one POST was made', posts.length, 1);
         check('carrying the row\'s own turn token verbatim',
           JSON.stringify(posts[0].turn) === JSON.stringify(row.turn) && posts[0].text === 'two steps, please',
