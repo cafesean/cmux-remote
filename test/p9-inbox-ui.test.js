@@ -695,3 +695,100 @@ test('render · the hidden attribute is enforced against this sheet\'s own displ
   assert.ok(withDisplayRule.length > 0,
     'no hidden-toggled class carries an author display rule — this guard has lost its subject');
 });
+
+// ---- the topic title -----------------------------------------------------------------------------
+
+// A row's question says how the last turn ENDED; it does not say WHICH session it is. Past one row
+// that made the list unreadable — every entry is prose. The title is the topic, read off the
+// transcript. It is validated in the renderer as well as in derive, because this module is also handed
+// payloads by the harness stub and, in principle, by any server claiming to speak §5.3.
+test('pure layer · rowTitle keeps a real title and reports its provenance', () => {
+  assert.deepEqual(INBOX.rowTitle({ title: 'Retry budget shape', titleSource: 'ai' }),
+    { text: 'Retry budget shape', source: 'ai' });
+  assert.deepEqual(INBOX.rowTitle({ title: 'renamed-by-hand', titleSource: 'custom' }),
+    { text: 'renamed-by-hand', source: 'custom' });
+});
+
+test('pure layer · rowTitle returns null for every absent-or-empty title', () => {
+  for (const r of [{}, { title: null }, { title: '' }, { title: '   \n\t ' }, { title: 12345 },
+    { title: { text: 'an object, not a string' } }]) {
+    assert.equal(INBOX.rowTitle(r), null, `must be null for ${JSON.stringify(r)}`);
+  }
+  assert.equal(INBOX.rowTitle(null), null);
+  assert.equal(INBOX.rowTitle(undefined), null);
+});
+
+// An unknown provenance must never be styled as the operator's own rename — that is the one visual
+// distinction made here, and a machine guess presented as a chosen label is a lie.
+test('pure layer · an unrecognised titleSource degrades to the machine treatment, never to custom', () => {
+  for (const src of ['telepathy', 'CUSTOM', 'operator', '', null, undefined, 7]) {
+    assert.equal(INBOX.rowTitle({ title: 'plausible topic', titleSource: src }).source, 'ai',
+      `source ${JSON.stringify(src)} must not be trusted as custom`);
+  }
+});
+
+// Truncation is CSS's job. A substring here would put a lie in the DOM that a copy-paste carries away.
+test('pure layer · rowTitle never truncates, and the one-line clamp is CSS', () => {
+  const long = 'topic '.repeat(200).trim();
+  assert.equal(INBOX.rowTitle({ title: long, titleSource: 'ai' }).text.length, long.length);
+  // The rule spans two entries of the CSS array, so mirror the runtime join before matching.
+  const joinedCss = SRC.inbox.replace(/',\s*'/g, '');
+  assert.match(joinedCss, /#inbox \.itopic\{[^']*text-overflow:ellipsis/);
+});
+
+test('render · a titled row shows the topic; an untitled row renders no topic element', async () => {
+  const titled = row({ title: 'Split the migration', titleSource: 'ai', question: 'one or two steps?' });
+  const bare = row({ title: null, titleSource: null, question: 'no topic here' });
+  const { ui, pane } = mountInbox(payloadOf([titled, bare]));
+  ui.open();
+  await flush();
+  const rows = byClass(pane, 'irow');
+  assert.equal(rows.length, 2);
+  assert.equal(byClass(rows[0], 'itopic')[0].textContent, 'Split the migration');
+  assert.equal(byClass(rows[0], 'iq')[0].textContent, 'one or two steps?', 'question still under the topic');
+  assert.equal(byClass(rows[1], 'itopic').length, 0, 'an untitled row renders no topic element');
+  assert.equal(byClass(rows[1], 'iq')[0].textContent, 'no topic here',
+    'and its question stands alone, exactly as before titles existed');
+});
+
+test('render · an operator rename is marked as own; the automatic titler is not', async () => {
+  const a = mountInbox(payloadOf([row({ title: 'mine', titleSource: 'custom' })]));
+  a.ui.open(); await flush();
+  assert.match(byClass(a.pane, 'itopic')[0].className, /itopic-own/);
+
+  const b = mountInbox(payloadOf([row({ title: 'guessed', titleSource: 'ai' })]));
+  b.ui.open(); await flush();
+  assert.equal(/itopic-own/.test(byClass(b.pane, 'itopic')[0].className), false);
+});
+
+// Same rule the question already follows (AC: this module reaches no HTML sink). A title is
+// transcript-derived text and a session can be renamed to anything at all.
+test('render · a title full of metacharacters is TEXT and builds no element', async () => {
+  const nasty = '<img src=x onerror=alert(1)>"\'`${}&';
+  const { ui, pane } = mountInbox(payloadOf([row({ title: nasty, titleSource: 'custom' })]));
+  ui.open();
+  await flush();
+  const topic = byClass(pane, 'itopic')[0];
+  assert.equal(topic.textContent, nasty, 'the payload is the text, verbatim');
+  for (const tag of ['img', 'script', 'iframe', 'a']) {
+    assert.equal(byTag(topic, tag).length, 0, `no <${tag}> may be created from title text`);
+  }
+  const textNodes = [];
+  (function collect(n) { if (n.nodeType === 3) textNodes.push(n._text); for (const c of n.childNodes) collect(c); })(topic);
+  assert.deepEqual(textNodes, [nasty], 'exactly one text node, holding the payload');
+});
+
+// Opening a card must not lose the label the row was recognised BY: a header that switches from the
+// topic to a repo name reads as having opened something else.
+test('render · the card header prefers the topic, and falls back when there is none', async () => {
+  const withTopic = mountInbox(payloadOf([row({ title: 'Retry budget shape', titleSource: 'ai' })]));
+  withTopic.ui.open(); await flush();
+  byClass(withTopic.pane, 'irow')[0].onclick();
+  assert.equal(byClass(withTopic.pane, 'ititle')[0].textContent, 'Retry budget shape');
+
+  const noTopic = mountInbox(payloadOf([row({ title: null, titleSource: null })]));
+  noTopic.ui.open(); await flush();
+  byClass(noTopic.pane, 'irow')[0].onclick();
+  const fell = byClass(noTopic.pane, 'ititle')[0].textContent;
+  assert.ok(fell && fell !== 'Retry budget shape', `header fell back to something real, got ${JSON.stringify(fell)}`);
+});

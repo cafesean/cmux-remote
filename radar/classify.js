@@ -75,7 +75,10 @@ function tsOfRecord(rec) {
   return Number.isFinite(Date.parse(raw)) ? raw : null;
 }
 
-function readLastAssistantText(transcriptPath) {
+// The bounded tail window, as whole lines, newest last. Factored out because two readers need the
+// same window and the same boundary discipline: the last assistant turn, and the session title.
+// Returns [] on any IO failure — every caller treats "no lines" and "nothing found" identically.
+function tailLines(transcriptPath) {
   let fd = null;
   try {
     fd = fs.openSync(transcriptPath, 'r');
@@ -104,23 +107,59 @@ function readLastAssistantText(transcriptPath) {
     // but that can only ever be inside the first element, and the first element is kept only when
     // the byte before it was a newline, which is by definition a character boundary too.
     const lines = buf.slice(0, got).toString('utf8').split('\n');
-    const stopAt = firstElementIsWhole ? 0 : 1;
-
-    for (let i = lines.length - 1; i >= stopAt; i--) {
-      const line = lines[i];
-      if (!line) continue;
-      let rec;
-      try { rec = JSON.parse(line); } catch (_) { continue; }
-      const text = textOfRecord(rec);
-      if (text === null) continue;
-      return { text, ts: tsOfRecord(rec) };
-    }
-    return null;
+    return firstElementIsWhole ? lines : lines.slice(1);
   } catch (_) {
-    return null;
+    return [];
   } finally {
     if (fd !== null) { try { fs.closeSync(fd); } catch (_) { /* nothing left to salvage */ } }
   }
+}
+
+function readLastAssistantText(transcriptPath) {
+  const lines = tailLines(transcriptPath);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line) continue;
+    let rec;
+    try { rec = JSON.parse(line); } catch (_) { continue; }
+    const text = textOfRecord(rec);
+    if (text === null) continue;
+    return { text, ts: tsOfRecord(rec) };
+  }
+  return null;
+}
+
+// The session's own title, so an inbox row says WHAT it is about instead of only how it ended.
+//
+// Two record kinds carry one: `{type:'custom-title',customTitle}` written by an explicit rename, and
+// `{type:'ai-title',aiTitle}` written by the automatic titler.
+//
+// ⚠️ CUSTOM WINS BY KIND, NEVER BY POSITION, and this is the whole subtlety. The automatic titler
+// keeps re-emitting its `ai-title` AFTER a rename — measured on a real transcript, the LAST title
+// record in the file was a stale `ai-title` while the operator had explicitly renamed the session.
+// "Last title record wins" therefore renames the session back behind the operator's back.
+//
+// The window is the tail only. Titles are NOT written near the start of a transcript — on a 2.5 MB
+// real file neither kind appeared in the first 64 KB — so a head probe buys nothing; both kinds are
+// re-emitted periodically, which is what makes the tail reliable. A session whose title fell outside
+// the window degrades to no headline, and the row still carries its question.
+function readSessionTitle(transcriptPath) {
+  const lines = tailLines(transcriptPath);
+  let ai = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || line.indexOf('itle') === -1) continue;   // cheap reject before JSON.parse
+    let rec;
+    try { rec = JSON.parse(line); } catch (_) { continue; }
+    if (!rec || typeof rec !== 'object') continue;
+    const custom = typeof rec.customTitle === 'string' ? rec.customTitle.trim() : '';
+    if (custom) return { text: custom, source: 'custom' };
+    if (ai === null) {
+      const auto = typeof rec.aiTitle === 'string' ? rec.aiTitle.trim() : '';
+      if (auto) ai = { text: auto, source: 'ai' };
+    }
+  }
+  return ai;
 }
 
 // ================================================================================================
@@ -771,6 +810,10 @@ async function classifyBlocked(sessions, deps) {
   // rest. Losing a valid carried verdict costs an `unknown`, which is SHOWN — the safe direction.
   for (const s of blocked) {
     s.lastAssistant = readLastAssistantText(s.transcriptPath) || null;
+    // Read here, next to the turn text, because this is already the one place per sweep that opens
+    // the transcript — and because the title is honest data that must survive every classifier
+    // degradation below exactly as `lastAssistant` does. A row with no verdict still knows its topic.
+    s.sessionTitle = readSessionTitle(s.transcriptPath) || null;
     delete s.intent;
   }
 
@@ -922,7 +965,7 @@ async function classifyBlocked(sessions, deps) {
 function _resetClassifyState() { cooldowns.clear(); inflight.clear(); }
 
 module.exports = {
-  readLastAssistantText,
+  readLastAssistantText, readSessionTitle,
   classify, classifyBlocked,
   classifierVersion, intentCacheKey, transportOf,
   defaultRun, resolveClassifier, probeBinary, classifyArgv, readVerdict,

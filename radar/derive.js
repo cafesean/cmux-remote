@@ -391,6 +391,24 @@ function inboxIntent(session, now) {
   };
 }
 
+// The session title, validated rather than trusted. `sessionTitle` is attached by the classify stage
+// straight off the transcript, so this is a defence against a hand-built state file or a stage that
+// half-ran — the same reason `inboxIntent` synthesizes rather than copies through.
+//
+// A title is kept only when it is a non-empty string with a source this projection recognises. An
+// unrecognised source is dropped WITH the text: a UI that styles an operator's rename differently
+// from a machine guess cannot be handed a third thing it has no rule for. `RENDER_TITLE_MAX` is not
+// applied here — truncation is a rendering concern (trap 12), the same rule `question` follows.
+const TITLE_SOURCES = ['custom', 'ai'];
+function inboxTitle(session) {
+  const t = session && session.sessionTitle;
+  if (!t || typeof t !== 'object') return null;
+  const text = typeof t.text === 'string' ? t.text.trim() : '';
+  if (!text) return null;
+  if (TITLE_SOURCES.indexOf(t.source) === -1) return null;
+  return { text, source: t.source };
+}
+
 // Exactly four fields (spec §5.3). `tabStatus` is deliberately NOT projected: cmux status is
 // workspace-scoped even though it is stamped onto every tab, so it can never prove anything about
 // the one terminal a reply would be written into — carrying it forward would only invite a consumer
@@ -429,6 +447,7 @@ function buildInbox(sessions, now) {
     if (INBOX_VERDICTS.indexOf(intent.verdict) === -1) continue;
 
     const lastAssistant = s.lastAssistant && typeof s.lastAssistant === 'object' ? s.lastAssistant : null;
+    const title = inboxTitle(s);
     const surface = inboxSurface(s);
     const notificationType = typeof s.notificationType === 'string' ? s.notificationType : '';
     // A cwd join is a guess about WHICH terminal and the reply route only ever writes through
@@ -451,6 +470,13 @@ function buildInbox(sessions, now) {
       epic: s.epic == null ? null : s.epic,
       // COMPLETE text, never truncated here (trap 12). Truncation is a rendering concern.
       question: lastAssistant && typeof lastAssistant.text === 'string' ? lastAssistant.text : '',
+      // WHAT the row is about, as opposed to how its last turn ended. A queue of questions with no
+      // topics is unreadable once it holds more than one row: every entry looks like prose. `null`
+      // rather than a fabricated stand-in — a row with no title renders its question alone, which is
+      // the pre-title behaviour and still correct. `titleSource` travels so the UI can distinguish an
+      // operator's explicit rename from the automatic titler's guess without re-deriving it.
+      title: title === null ? null : title.text,
+      titleSource: title === null ? null : title.source,
       intent,
       surface,
       surfaceReason: s.surfaceReason == null ? null : s.surfaceReason,

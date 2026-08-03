@@ -80,6 +80,8 @@ function readOnlyRow(id, surfaceReason, over) {
     worktree: null,
     epic: null,
     question: `A read-only row for ${surfaceReason == null ? 'no reason' : surfaceReason}.`,
+    title: `Read-only topic ${id}`,
+    titleSource: 'ai',
     intent: { verdict: 'needs-decision', reason: 'ends on a direct question', model: 'fixture-model', at: '2026-01-02T03:10:04.000Z', inferred: true },
     surface: null,
     surfaceReason,
@@ -102,6 +104,8 @@ function answerableRow(over) {
     worktree: null,
     epic: null,
     question: 'Should the migration run in one step or two?',
+    title: 'Migration rollout for the sample service',
+    titleSource: 'custom',
     intent: { verdict: 'needs-decision', reason: 'ends on a direct question', model: 'fixture-model', at: '2026-01-02T03:20:04.000Z', inferred: true },
     surface: { workspace: 'fixture-workspace', tabRef: 'w0/t9', tabUuid: 'fixture-tab-uuid-9', via: 'recorded' },
     surfaceReason: null,
@@ -294,6 +298,26 @@ export async function run({ chromium, base, token, fixture, now, log }) {
           ages.length === 3 && new Set(ages).size === 3, JSON.stringify(ages));
         eq('the oldest row is the oldest age', ages[0], '59m');
         eq('and the newest is the newest', ages[2], '9m');
+
+        // The topic. A queue of questions with no topics is unreadable past one row, so assert the
+        // real rendered text — and assert the UNTITLED row renders no topic element at all, because
+        // "every row shows a topic" would also pass if the renderer invented one.
+        const topics = await page.$$eval('#inbox .irow', (ns) => ns.map((n) => {
+          const t = n.querySelector('.itopic');
+          return t ? { text: t.textContent.trim(), own: /itopic-own/.test(t.className) } : null;
+        }));
+        eq('the renamed row shows the operator\'s own title', topics[0] && topics[0].text, 'fixture-renamed-by-operator');
+        check('…and it is marked as the operator\'s, not the titler\'s', topics[0] && topics[0].own === true, JSON.stringify(topics[0]));
+        eq('the untitled row renders NO topic element', topics[1], null);
+        eq('the auto-titled row shows the titler\'s topic', topics[2] && topics[2].text, 'Split the migration in two');
+        check('…and is NOT marked as the operator\'s', topics[2] && topics[2].own === false, JSON.stringify(topics[2]));
+        // The row the operator recognised by its topic must still say so once opened.
+        await page.click('#inbox .irow');
+        await page.waitForSelector('#inbox .icard .iquestion', { timeout: 5000 });
+        eq('opening a card keeps the topic in the header', (await cardText(page, '#inbox .ititle')).trim(),
+          'fixture-renamed-by-operator');
+        await page.click('#inbox .iback');
+        await sleep(60);
         check('no page errors on the fixture list', errors.length === 0, errors.join('\n        '));
       } finally { await close(); }
     }
