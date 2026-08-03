@@ -1452,3 +1452,72 @@ test('privacy · nothing this story ships carries live-machine identity', () => 
   const allowed = new RegExp('^' + prefix + '(\\$\\{n\\}|\\d+)$');
   for (const id of ids) assert.match(id, allowed, `${id} must be synthetic`);
 });
+
+// ================================================================================================
+// The answered mark — a successful reply must be VISIBLE without lying about the session
+// ================================================================================================
+//
+// §6.1's success row keeps the row in the list: only the session can prove it stopped waiting, so
+// optimistic hiding is forbidden. But a reply that changes nothing on screen reads as a reply that did
+// nothing, and the operator retypes it. The mark resolves that by recording the OPERATOR'S ACT, keyed
+// by row AND TURN: "you answered this turn". A new turn is a new question, and the mark must be gone.
+
+test('answered · a successful reply marks the row, and does NOT remove it', () => {
+  const r = row({});
+  const out = INBOX.applyReplyResult(stateWith([r], r, { draft: 'two steps, please' }), 'ok');
+  assert.equal(out.state.rows.length, 1, 'the row STAYS — never optimistically hidden');
+  assert.equal(out.state.card, null, 'the card closes');
+  assert.equal(INBOX.answeredOf(out.state, r), true, 'and the row is marked answered');
+});
+
+test('answered · every FAILURE outcome leaves the row unmarked', () => {
+  const r = row({});
+  for (const code of ['send_failed', 'not_at_prompt', 'pane_changed', 'tab_gone',
+    'send_unconfirmed', 'already_answered', 'question_changed', 'surface_reassigned']) {
+    const out = INBOX.applyReplyResult(stateWith([r], r, { draft: 'text' }), code);
+    assert.equal(INBOX.answeredOf(out.state, r), false, `${code} must not mark the row answered`);
+  }
+});
+
+// The whole safety property: the mark is scoped to the turn it answered. If the session speaks again
+// the signature moves and a stale "replied" cannot sit beside a fresh question.
+test('answered · the mark is scoped to the TURN, so a new turn clears it', () => {
+  const r = row({ turn: { blockedSince: iso(-60000), assistantTs: iso(-60000) } });
+  const marked = INBOX.applyReplyResult(stateWith([r], r, { draft: 'text' }), 'ok').state;
+  assert.equal(INBOX.answeredOf(marked, r), true);
+
+  const movedOn = Object.assign({}, r, { turn: { blockedSince: iso(-1000), assistantTs: iso(-1000) } });
+  assert.equal(INBOX.answeredOf(marked, movedOn), false,
+    'the same session on a NEW turn is a new question and must not read as replied');
+});
+
+test('answered · pruning drops entries whose row left the payload or whose turn moved', () => {
+  const a = row({ sessionKey: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-101' } });
+  const b = row({ sessionKey: { machine: 'fixture-machine-a', sessionId: 'fixture-inbox-102' } });
+  let answered = INBOX.markAnswered({}, INBOX.rowKey(a), a.turn);
+  answered = INBOX.markAnswered(answered, INBOX.rowKey(b), b.turn);
+  assert.equal(Object.keys(answered).length, 2);
+
+  // b is gone from the payload; a is still there on the same turn.
+  assert.deepEqual(Object.keys(INBOX.pruneAnswered(answered, [a])), [INBOX.rowKey(a)]);
+  // a is still listed but has spoken again.
+  const aMoved = Object.assign({}, a, { turn: { blockedSince: iso(-5), assistantTs: iso(-5) } });
+  assert.deepEqual(Object.keys(INBOX.pruneAnswered(answered, [aMoved])), []);
+  // and an empty payload prunes everything, so the map cannot grow for the life of the tab.
+  assert.deepEqual(INBOX.pruneAnswered(answered, []), {});
+});
+
+test('answered · a refresh that still lists the row on the same turn KEEPS the mark', () => {
+  const r = row({});
+  const marked = INBOX.applyReplyResult(stateWith([r], r, { draft: 'text' }), 'ok').state;
+  const after = INBOX.applyRefresh(marked, { ok: true, items: [r] }).state;
+  assert.equal(INBOX.answeredOf(after, r), true,
+    'the mark must survive the very next poll, or it flashes and vanishes');
+});
+
+test('answered · a failed refresh does not silently drop the mark', () => {
+  const r = row({});
+  const marked = INBOX.applyReplyResult(stateWith([r], r, { draft: 'text' }), 'ok').state;
+  const after = INBOX.applyRefresh(marked, { ok: false }).state;
+  assert.equal(INBOX.answeredOf(after, r), true);
+});
