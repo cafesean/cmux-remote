@@ -646,3 +646,40 @@ test('privacy · nothing this story ships carries live-machine identity', () => 
     }
   }
 });
+
+// The `hidden` attribute is the ONLY mechanism this module uses to retract the card, the reply field,
+// the notice and the back button. That mechanism is a UA-stylesheet rule (`[hidden]{display:none}`),
+// so it is defeated by any author rule that sets `display` on the same element — and the sheet ships
+// two of those (`.icard` and `.ifield` are flex columns). The consequence was visible, not academic:
+// a card closed after a reply stayed painted, so the previous question sat under "Nothing waiting."
+//
+// The obvious test — "assert cardEl.hidden === true" — is what let this ship: the attribute was
+// always true. So assert the RULE that makes the attribute mean something, and assert it structurally
+// so a future `display` rule on a newly hidden element cannot quietly reopen the hole.
+test('render · the hidden attribute is enforced against this sheet\'s own display rules', () => {
+  const src = SRC.inbox;
+
+  // 1. The reset exists, is scoped to the panel, and is unbeatable by a later `display` rule.
+  const reset = /'#inbox \[hidden\]\{display:none !important\}'/.test(src);
+  assert.equal(reset, true, 'inbox.js must ship #inbox [hidden]{display:none !important}');
+
+  // 2. Every class retracted via `.hidden` is enumerated from the SOURCE, not restated here — a list
+  //    maintained by hand would drift the moment a new hidden element is added.
+  const hiddenVars = new Set();
+  for (const m of src.matchAll(/(\w+)\.hidden\s*=/g)) hiddenVars.add(m[1]);
+  assert.ok(hiddenVars.size >= 5, `expected several hidden-toggled elements, found ${hiddenVars.size}`);
+
+  const classOf = new Map();
+  for (const v of hiddenVars) {
+    const decl = new RegExp(`(?:const|let|var)\\s+${v}\\s*=\\s*mk\\(\\s*'[^']+'\\s*,\\s*'([^']+)'`).exec(src);
+    if (decl) classOf.set(v, decl[1].split(/\s+/)[0]);
+  }
+  assert.ok(classOf.size >= 5, 'could not resolve the classes of the hidden-toggled elements');
+
+  // 3. Prove the hazard is real for at least one of them — otherwise this test would pass on a sheet
+  //    that never had a conflicting rule, and would stop meaning anything.
+  const withDisplayRule = [...classOf.values()].filter((cls) =>
+    new RegExp(`'#inbox \\.${cls}\\{[^']*display:`).test(src));
+  assert.ok(withDisplayRule.length > 0,
+    'no hidden-toggled class carries an author display rule — this guard has lost its subject');
+});

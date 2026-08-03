@@ -708,6 +708,16 @@
     '#inbox{position:absolute;inset:0;z-index:3;display:none;flex-direction:column;overflow:hidden;background:var(--bg)}',
     'body.mode-inbox #inbox{display:flex}',
     'body.mode-inbox footer{display:none}',
+    // THE HIDDEN ATTRIBUTE IS NOT SELF-ENFORCING HERE. `[hidden]{display:none}` lives in the UA
+    // stylesheet, so ANY author rule that sets `display` on the same element beats it — and two of
+    // the rules below do exactly that (`.icard` and `.ifield` are flex columns). Without this reset
+    // `cardEl.hidden = true` in closeCard() is a NO-OP: the card stays painted and the question from
+    // the last card you opened sits under the list forever, next to "Nothing waiting.".
+    // It shipped that way because the browser AC asserted the ATTRIBUTE (`.icard.hidden === true`,
+    // which was always true) instead of the rendered box — see test/browser/inbox.browser.mjs.
+    // `!important` rather than source-order precedence: the next `display` rule added to this sheet
+    // must not be able to resurrect the bug.
+    '#inbox [hidden]{display:none !important}',
     '#inbox .ihead{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:9px 11px;',
     '  border-bottom:1px solid var(--line);background:var(--panel);font-size:13px}',
     '#inbox .iback{background:none;border:none;color:var(--dim);font:inherit;font-size:18px;padding:0 4px}',
