@@ -428,6 +428,18 @@ test('pure layer · markers — unknown is unclassified, needs-decision is infer
   // A row that reached the client with no intent at all still marks as unclassified rather than
   // silently rendering as a measured verdict.
   assert.equal(INBOX.rowMarkers({}).label, 'unclassified');
+
+  // The queue no longer gates on verdict, so these two reach the list as well. EVERY verdict must
+  // carry a chip — an unlabelled row gives a human nothing to triage on, which is the whole reason
+  // the widening is safe.
+  assert.equal(INBOX.rowMarkers(row({ intent: { verdict: 'offer-more' } })).label, 'offered more');
+  assert.equal(INBOX.rowMarkers(row({ intent: { verdict: 'status-only' } })).label, 'no question');
+  for (const v of ['needs-decision', 'offer-more', 'status-only', 'unknown']) {
+    assert.notEqual(INBOX.rowMarkers(row({ intent: { verdict: v } })).label, '', `${v} must be labelled`);
+  }
+  // The two flags stay narrow: only needs-decision is an inference, only unknown is unclassified.
+  assert.equal(INBOX.rowMarkers(row({ intent: { verdict: 'status-only' } })).inferred, false);
+  assert.equal(INBOX.rowMarkers(row({ intent: { verdict: 'status-only' } })).unclassified, false);
 });
 
 test('pure layer · the canonical row key is a VALUE, equal across separately-parsed payloads', () => {
