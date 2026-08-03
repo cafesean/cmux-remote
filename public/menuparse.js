@@ -29,6 +29,19 @@
 
   // Rows made only of these are chrome (box rules, separators), never options.
   const RULE_RE = /^[\s─-╿▀-▟=_-]*$/;
+  // The rule characters themselves, for measuring a row that is a border carrying a label.
+  const RULE_CHARS_RE = /[─-╿▀-▟=_-]/g;
+  const RULE_RUN_RE = /[─-╿▀-▟=_-]{12,}/;
+  function ruleish(trimmed) {
+    const s = String(trimmed || '');
+    const body = s.trim();
+    if (!body) return false;
+    const ruleCount = (body.match(RULE_CHARS_RE) || []).length;
+    if (ruleCount / body.length < 0.6) return false;      // mostly rule, not prose with dashes
+    if (!RULE_RUN_RE.test(body)) return false;             // a DRAWN line, not scattered punctuation
+    if (body.length - ruleCount > 48) return false;        // a short label, not a sentence
+    return true;
+  }
   // Cursor pointers. Present for completeness of the row model — they are NOT a selection signal.
   const MARKER_GLYPHS = '❯▶►▸➤»‣';
 
@@ -96,6 +109,20 @@
       for (let i = 0; i < r.cells.length; i++) r.text += r.cells[i] === undefined ? ' ' : r.cells[i];
       r.trimmed = r.text.replace(/\s+$/, '');
       r.isRule = RULE_RE.test(r.trimmed);
+      // A BORDER WITH A LABEL DRAWN INTO IT IS STILL A BORDER. Claude Code renders the session's
+      // name inside the input box's top rule — `───────── my-session-name ──` — so that row is not
+      // pure rule characters and `isRule` is false for it. Measured consequence, not hypothetical:
+      // the box became invisible to `lastBoxedPrompt` (which needs rule/glyph/rule) AND the decorated
+      // border was counted by `lastShellPrompt` as a themed prompt, so paneKind answered `shell` for
+      // every NAMED session and the reply gate refused it as `not_at_prompt` forever.
+      //
+      // Kept deliberately tight, because the asymmetry in this file's header still holds — a false
+      // negative costs a refusal, a false positive types into a shell. All three must hold: mostly
+      // rule characters, an unbroken run long enough to be a drawn line rather than punctuation in
+      // prose, and a short remainder, so a status line or a sentence containing a dash can never
+      // qualify. The measured border scores 0.78 with a 64-char run; the status line under it scores
+      // 0.04, and prose with an em dash scores near zero.
+      r.isRuleish = r.isRule || ruleish(r.trimmed);
       r.isBlank = r.trimmed.trim() === '';
       r.hasGlyph = MARKER_GLYPHS.indexOf(firstGlyph(r.trimmed)) >= 0;
       if (r.indent === null) r.indent = 0;
@@ -273,16 +300,20 @@
   // viewport above — so "both signals present" is the normal case, not the ambiguous one. What
   // matters is which came last. A boxed prompt below the shell prompt means the agent is running;
   // a shell prompt below the box means the agent exited and the shell is back.
+  // `isRuleish`, not `isRule`: a border carrying the session's name is still the box's border.
   function lastBoxedPrompt(rows) {
     let at = -1;
     for (let i = 0; i + 2 < rows.length; i++) {
-      if (rows[i].isRule && rows[i + 2].isRule && rows[i + 1].hasGlyph) at = rows[i + 1].row;
+      if (rows[i].isRuleish && rows[i + 2].isRuleish && rows[i + 1].hasGlyph) at = rows[i + 1].row;
     }
     return at;
   }
+  // A labelled border also has a NON-DEFAULT BACKGROUND, which is the shell-prompt signature — so it
+  // must be excluded here too, or the box's own top rule outranks the box and the pane reads as
+  // `shell`. Excluding `isRule` alone was enough only while every border was undecorated.
   function lastShellPrompt(rows) {
     let at = -1;
-    for (const r of rows) if (r.bgOff && !r.isRule && r.trimmed.trim().length > 0) at = r.row;
+    for (const r of rows) if (r.bgOff && !r.isRuleish && r.trimmed.trim().length > 0) at = r.row;
     return at;
   }
 

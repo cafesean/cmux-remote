@@ -47,6 +47,7 @@
   const INFERRED_LABEL = 'inferred';
   const OFFER_LABEL = 'offered more';
   const STATUS_LABEL = 'no question';
+  const REPLIED_LABEL = 'replied';
 
   // A blocked session waiting at a permission prompt is waiting on a MENU, not on text (trap 20), so
   // it is read-only even when its tab is alive and recorded. An allowlist, never a pattern.
@@ -483,7 +484,47 @@
 
   function normalizeState(state) {
     const s = state || {};
-    return { rows: Array.isArray(s.rows) ? s.rows : [], card: s.card || null };
+    return {
+      rows: Array.isArray(s.rows) ? s.rows : [],
+      card: s.card || null,
+      // rowKey -> the turn signature that was answered. See `answeredOf`.
+      answered: s.answered && typeof s.answered === 'object' ? s.answered : {},
+    };
+  }
+
+  // WHAT THIS RECORDS IS THE OPERATOR'S ACTION, NEVER THE SESSION'S STATE — and the distinction is the
+  // whole reason it is safe. §6.1's success row says the row STAYS until a refresh removes it, never
+  // optimistically hidden, because only the session can prove it stopped waiting. But a reply that
+  // produces no visible change reads as a reply that did nothing, and the operator retypes it.
+  //
+  // So the mark is keyed by ROW *and TURN*: it means "you answered THIS turn". The moment the session
+  // speaks again the turn signature moves and the mark is gone on its own — a new turn is a new
+  // question, and a stale "replied" beside a fresh question would be the exact lie this avoids.
+  function markAnswered(answered, key, turn) {
+    const next = {};
+    for (const k of Object.keys(answered || {})) next[k] = answered[k];
+    next[key] = turnSignature(turn);
+    return next;
+  }
+
+  // Pruned against the payload, so the map cannot grow for the life of the tab: an entry survives only
+  // while its row is still listed AND still on the same turn.
+  function pruneAnswered(answered, rows) {
+    const live = {};
+    for (const row of (rows || [])) {
+      const k = rowKey(row);
+      if (Object.prototype.hasOwnProperty.call(answered || {}, k)
+        && answered[k] === turnSignature(row && row.turn)) live[k] = answered[k];
+    }
+    return live;
+  }
+
+  // True when this exact row+turn has been answered from here.
+  function answeredOf(state, row) {
+    const s = normalizeState(state);
+    const k = rowKey(row);
+    return Object.prototype.hasOwnProperty.call(s.answered, k)
+      && s.answered[k] === turnSignature(row && row.turn);
   }
 
   // The single render instruction. The DOM layer executes it and decides nothing.
@@ -544,13 +585,17 @@
     if (!result || result.ok !== true) {
       // §6.2: the list and every draft are untouched, and one inline line is emitted.
       const card = st.card ? Object.assign({}, st.card, { line: REFRESH_FAILED_COPY }) : null;
-      return { state: { rows: st.rows, card: card }, instr: instructionsFor(card, { list: 'keep', field: 'keep' }) };
+      return { state: { rows: st.rows, card: card, answered: st.answered }, instr: instructionsFor(card, { list: 'keep', field: 'keep' }) };
     }
     const items = Array.isArray(result.items) ? result.items : [];
     const rec = reconcileRows(st.rows, items, st.card ? { key: st.card.key, row: st.card.row, turn: st.card.turn } : null);
     const applied = applyCardDecision(st.card, rec.openCard);
     return {
-      state: { rows: items, card: applied.card },
+      // The one place a whole payload lands, so the one place the answered map is pruned against
+      // reality: an entry survives only while its row is still listed AND still on the same turn.
+      // Without this the map would grow for the life of the tab and a re-blocked session could show a
+      // "replied" mark earned by a turn it has long since moved past.
+      state: { rows: items, card: applied.card, answered: pruneAnswered(st.answered, items) },
       reconciled: rec,
       instr: instructionsFor(applied.card, { list: 'replace', field: applied.field, immediateGet: applied.immediateGet }),
     };
@@ -567,7 +612,7 @@
     const key = st.card.key;
     const rows = st.rows.map(function (r) { return rowKey(r) === key ? row : r; });
     return {
-      state: { rows: rows, card: applied.card },
+      state: { rows: rows, card: applied.card, answered: pruneAnswered(st.answered, rows) },
       reconciled: rec,
       instr: instructionsFor(applied.card, { list: 'keep', field: applied.field, immediateGet: applied.immediateGet }),
     };
@@ -577,7 +622,7 @@
     const st = normalizeState(state);
     if (!st.card) return { state: st, instr: instructionsFor(null, {}) };
     const card = Object.assign({}, st.card, { draft: typeof text === 'string' ? text : '' });
-    return { state: { rows: st.rows, card: card }, instr: instructionsFor(card, { field: 'keep' }) };
+    return { state: { rows: st.rows, card: card, answered: st.answered }, instr: instructionsFor(card, { field: 'keep' }) };
   }
 
   // A Send press. In `awaiting-fresh` and `reconfirm-required` this is a pure no-op — no post comes
@@ -585,7 +630,7 @@
   function applySend(state, text) {
     const st = normalizeState(state);
     const card = st.card ? Object.assign({}, st.card, text === undefined ? {} : { draft: typeof text === 'string' ? text : '' }) : null;
-    const base = { rows: st.rows, card: card };
+    const base = { rows: st.rows, card: card, answered: st.answered };
     if (!canSend(card) || !String(card.draft).trim()) {
       return { state: base, instr: instructionsFor(card, { field: 'keep' }) };
     }
@@ -599,7 +644,7 @@
     // window in which a response can outlive its card is as small as the round trip allows.
     const sending = Object.assign({}, card, { sending: true });
     return {
-      state: { rows: st.rows, card: sending },
+      state: { rows: st.rows, card: sending, answered: st.answered },
       instr: instructionsFor(sending, {
         field: 'keep', post: post,
         // The sender's identity travels with the request and comes back with the response.
@@ -642,8 +687,12 @@
     const copy = copyForCode(code);
     if (copy === null) {
       // §6.1's success row: the field clears, the card closes, and the ROW STAYS in the list until a
-      // refresh removes it. Never optimistically hidden.
-      return { state: { rows: st.rows, card: null }, instr: instructionsFor(null, { closeCard: true, clearField: true }) };
+      // refresh removes it. Never optimistically hidden — but it is MARKED, so a successful reply is
+      // visibly distinct from one that silently did nothing. The mark is scoped to the answered turn.
+      return {
+        state: { rows: st.rows, card: null, answered: markAnswered(st.answered, card.key, card.turn) },
+        instr: instructionsFor(null, { closeCard: true, clearField: true }),
+      };
     }
     const staleTurn = !!(p && p.turn !== undefined && turnSignature(p.turn) !== turnSignature(card.turn));
     let machine = { name: card.machine, turn: card.turn };
@@ -666,7 +715,7 @@
       line: staleTurn ? card.line : (copy.requiresReconfirm ? null : copy.text),
     });
     return {
-      state: { rows: st.rows, card: next },
+      state: { rows: st.rows, card: next, answered: st.answered },
       instr: instructionsFor(next, { field: 'keep', immediateGet: immediateGet }),
       dropped: false, stale: staleTurn,
     };
@@ -677,7 +726,7 @@
     if (!st.card) return { state: st, instr: instructionsFor(null, {}) };
     const m = machineReduce({ name: st.card.machine, turn: st.card.turn }, { type: 'confirm' });
     const next = Object.assign({}, st.card, { machine: m.state.name, turn: m.state.turn });
-    return { state: { rows: st.rows, card: next }, instr: instructionsFor(next, { field: 'keep' }) };
+    return { state: { rows: st.rows, card: next, answered: st.answered }, instr: instructionsFor(next, { field: 'keep' }) };
   }
 
   // ---- the refresh predicate, as a reducer (spec §5.6) -------------------------------------------
@@ -760,6 +809,10 @@
     '#inbox .itopic{font-size:13px;font-weight:600;color:var(--dim);margin-bottom:3px;',
     '  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '#inbox .itopic-own{color:var(--fg)}',
+    // The reply is the operator's own act, so it reads as confirmation rather than a warning: the
+    // chip is the OK colour and the row recedes, without ever leaving the list.
+    '#inbox .ireplied{color:var(--ok,#39d353)}',
+    '#inbox .irow-replied .itopic,#inbox .irow-replied .iq{opacity:.55}',
     '#inbox .iq{font-size:13px;line-height:1.45;color:var(--fg);overflow-wrap:anywhere}',
     // With a topic above it the question is supporting detail, so it stops competing for the eye:
     // dimmed and clamped to two lines. Without a topic `.iq` is unchanged and stays the headline.
@@ -920,6 +973,14 @@
         if (where) meta.appendChild(mk('span', 'iwhere', where));
         const marks = rowMarkers(row);
         if (marks.label) meta.appendChild(mk('span', 'imark', marks.label));
+        // Your reply, on this turn. Not a claim that the session has moved — only the session can
+        // prove that, and it proves it by leaving the list. This says "you answered this", which is
+        // the thing a reply that produced no visible change failed to say.
+        const replied = answeredOf(pure, row);
+        if (replied) {
+          meta.appendChild(mk('span', 'imark ireplied', REPLIED_LABEL));
+          btn.className = 'irow irow-replied';
+        }
         btn.appendChild(meta);
         // The topic, when the session has one. It goes ABOVE the question because it answers the
         // question a scanning operator asks first — "which of my sessions is this?" — where the
@@ -1047,9 +1108,9 @@
         fieldEl.replaceChildren();
         // A NEW card, so a new generation — including a reopen of the same key, which is a different
         // opening and must not inherit an in-flight POST's answer.
-        pure = { rows: pure.rows, card: openCardState(row, ++cardGen) };
+        pure = { rows: pure.rows, card: openCardState(row, ++cardGen), answered: pure.answered };
       } else {
-        pure = { rows: pure.rows, card: Object.assign({}, pure.card, { row: row, answerable: !!row.answerable }) };
+        pure = { rows: pure.rows, card: Object.assign({}, pure.card, { row: row, answerable: !!row.answerable }), answered: pure.answered };
       }
       backBtn.hidden = false;
       list.hidden = true;
@@ -1084,7 +1145,7 @@
       // Retire the generation FIRST. Anything still in flight for this card is now addressed to a
       // card that does not exist, which is exactly what `applyReplyResult` drops.
       cardGen += 1;
-      pure = { rows: pure.rows, card: null };
+      pure = { rows: pure.rows, card: null, answered: pure.answered };
       card.input = null;
       card.sendBtn = null;
       fieldEl.replaceChildren();
@@ -1099,6 +1160,11 @@
       title.textContent = 'Inbox';
       cardEl.hidden = true;
       list.hidden = false;
+      // The list is REPAINTED on the way back, not merely unhidden. It used to be enough to unhide it
+      // because nothing that happened inside a card could change a row's rendering — a successful reply
+      // now marks its row, and unhiding a list painted BEFORE the reply showed the row unmarked, so the
+      // confirmation was invisible in the browser while every unit test passed on the pure layer.
+      renderList();
     }
 
     backBtn.onclick = function () { closeCard(); };
@@ -1247,6 +1313,9 @@
     readOnlyCopy: readOnlyCopy,
     rowMarkers: rowMarkers,
     rowTitle: rowTitle,
+    markAnswered: markAnswered,
+    pruneAnswered: pruneAnswered,
+    answeredOf: answeredOf,
     relativeAge: relativeAge,
     rowQuestion: rowQuestion,
     rowWhere: rowWhere,
