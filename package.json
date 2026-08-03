@@ -2,7 +2,6 @@
   "name": "cmux-remote",
   "version": "0.1.0",
   "description": "View and drive your local cmux terminal and browser tabs from any browser or phone. Self-hostable, multi-machine, zero-dependency.",
-  "author": "Sean Liao",
   "license": "MIT",
   "type": "commonjs",
   "engines": {
@@ -18,7 +17,9 @@
     "server": "node server.js",
     "radar": "node radar/radar-cli.js",
     "test": "node --test test/*.test.js",
-    "test:browser": "node test/p8-browser-run.mjs"
+    "test:browser": "node test/p8-browser-run.mjs",
+    "test:eval:inbox": "node scripts/eval-inbox.mjs",
+    "test:browser:inbox": "node scripts/browser-inbox.mjs"
   },
   "keywords": [
     "cmux",

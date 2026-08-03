@@ -80,7 +80,7 @@ function world(o = {}) {
   return { dir, bin, state, cfg, api, logs, advance: (ms) => { t += ms; }, nowMs: () => t };
 }
 
-const FIRST_TURN = 'FIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until Sean replies.';
+const FIRST_TURN = 'FIRST TURN: inspect and plan only. Do not modify, commit, push, merge or delete anything until the operator replies.';
 const previewFiles = (dir) => {
   try { return fs.readdirSync(path.join(dir, 'handoffs', 'previews')).filter((n) => n.endsWith('.json')); } catch (_) { return []; }
 };
@@ -291,8 +291,8 @@ test('claudeBin: missing is 422 claude_bin_missing; a broken --version is 422 cl
 
 // ---- the seed (§6.8) -----------------------------------------------------------------------------
 
-test('seedText = brief (or override) + newline + the 108-byte FIRST TURN line', async () => {
-  assert.strictEqual(Buffer.byteLength(FIRST_TURN, 'utf8'), 108);
+test('seedText = brief (or override) + newline + the 116-byte FIRST TURN line', async () => {
+  assert.strictEqual(Buffer.byteLength(FIRST_TURN, 'utf8'), 116);
   const w = world();
   const r = await w.api.preview({ selectors: ['epic:PROJ-1'] });
   assert.strictEqual(r.body.plan.seedText, 'BRIEF epic:PROJ-1\n' + FIRST_TURN);
@@ -300,14 +300,14 @@ test('seedText = brief (or override) + newline + the 108-byte FIRST TURN line', 
   assert.strictEqual(o.body.plan.seedText, 'MY SEED\n' + FIRST_TURN);
 });
 
-test('the cap applies to the FINAL seedText: 12179-byte override fits exactly, 12180 is 413', async () => {
+test('the cap applies to the FINAL seedText: 12171-byte override fits exactly, 12172 is 413', async () => {
   const w = world();
-  const fit = await w.api.preview({ selectors: ['epic:PROJ-1'], seedOverride: 'a'.repeat(12179) });
+  const fit = await w.api.preview({ selectors: ['epic:PROJ-1'], seedOverride: 'a'.repeat(12171) });
   assert.strictEqual(fit.status, 200);
   assert.strictEqual(Buffer.byteLength(fit.body.plan.seedText, 'utf8'), 12288);
-  const over = await w.api.preview({ selectors: ['epic:PROJ-1'], seedOverride: 'a'.repeat(12180) });
+  const over = await w.api.preview({ selectors: ['epic:PROJ-1'], seedOverride: 'a'.repeat(12172) });
   assert.deepStrictEqual({ s: over.status, e: over.body.error, l: over.body.limit }, { s: 413, e: 'seed_too_large', l: 12288 });
-  // A 12288-byte override is REJECTED — accepting it would deliver 12397 bytes.
+  // A 12288-byte override is REJECTED — accepting it would deliver 12405 bytes.
   const full = await w.api.preview({ selectors: ['epic:PROJ-1'], seedOverride: 'a'.repeat(12288) });
   assert.strictEqual(full.status, 413);
 });

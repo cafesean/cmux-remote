@@ -344,6 +344,115 @@ function flattenAttention(list) {
   return out;
 }
 
+// ---- inbox (spec §5.3, §5.4) ---------------------------------------------------------------------
+// The one uncapped, ungrouped, oldest-first list of sessions actually waiting on the operator.
+//
+// It is the ONE derivation that reads the FULL sessions[] rather than the `liveSessions` shield: a
+// vanished session — the tab it was known by is closed — is still a real prompt someone must answer
+// or kill, so it belongs in the inbox as a read-only row. Every other derivation is shielded, which
+// is what makes publishing vanished rows a no-op for attention[] and counts.blocked.
+
+// Verdicts that mean "an operator has to look at this". `offer-more` and `status-only` are the
+// classifier saying the session is not waiting on a decision, so they never reach the queue.
+const INBOX_VERDICTS = ['needs-decision', 'unknown'];
+
+// The notification types that mean the session is waiting on TEXT. A permission prompt is waiting on
+// a MENU (trap 20), so it is read-only however well its surface resolved.
+const ANSWERABLE_NOTIFICATIONS = ['idle_prompt', 'agent_needs_input'];
+
+// A missing `intent` is SYNTHESIZED, never copied through (spec §5.3). A blocked session can reach
+// here without one — a stage bug, partial wiring, a hand-built state — and `undefined` would break
+// both the row contract and the GET route's unconditional `item.intent.verdict` dereference. The
+// projection is explicit and total: five fields, nothing undefined, `inferred` always true.
+function inboxIntent(session, now) {
+  const i = session.intent;
+  if (!i || typeof i !== 'object' || !i.verdict) {
+    return { verdict: 'unknown', reason: 'intent missing', model: null, at: new Date(now).toISOString(), inferred: true };
+  }
+  return {
+    verdict: i.verdict,
+    reason: i.reason == null ? null : i.reason,
+    model: i.model == null ? null : i.model,
+    at: i.at == null ? new Date(now).toISOString() : i.at,
+    inferred: true,
+  };
+}
+
+// Exactly four fields (spec §5.3). `tabStatus` is deliberately NOT projected: cmux status is
+// workspace-scoped even though it is stamped onto every tab, so it can never prove anything about
+// the one terminal a reply would be written into — carrying it forward would only invite a consumer
+// to read it as readiness.
+function inboxSurface(session) {
+  const s = session.surface;
+  if (!s || typeof s !== 'object' || !s.tabUuid) return null;
+  return {
+    workspace: s.workspace == null ? null : s.workspace,
+    tabRef: s.tabRef == null ? null : s.tabRef,
+    tabUuid: s.tabUuid,
+    via: s.via === 'recorded' ? 'recorded' : 'cwd',
+  };
+}
+
+// Ascending by blockedSince. Rows speak ISO (trap 23), so parse before comparing rather than relying
+// on lexicographic luck; an unparseable value sorts last instead of poisoning the comparator.
+const blockedAt = (row) => {
+  const t = Date.parse(row.blockedSince);
+  return Number.isFinite(t) ? t : Infinity;
+};
+
+function buildInbox(sessions, now) {
+  const rows = [];
+  for (const s of (Array.isArray(sessions) ? sessions : [])) {
+    // A row without an identity is not addressable — there is nothing a reply could be aimed at.
+    if (!s || !s.key || !s.key.sessionId) continue;
+    // 1. Only `blocked`. `abandoned`, `running` and `idle` are excluded.
+    if (s.status !== 'blocked') continue;
+    // 2. A null deadline is NOT stale — it means the session never submitted, so there is no window
+    //    to have missed. A deadline that has passed is excluded even when nothing else would exclude
+    //    it (`blocked-stale` is an attention item TYPE, never a session status — trap 4).
+    if (s.cacheExpiresAt != null && !(Date.parse(s.cacheExpiresAt) > now)) continue;
+    // 3. The verdict gate, with a missing intent synthesized before it is read.
+    const intent = inboxIntent(s, now);
+    if (INBOX_VERDICTS.indexOf(intent.verdict) === -1) continue;
+
+    const lastAssistant = s.lastAssistant && typeof s.lastAssistant === 'object' ? s.lastAssistant : null;
+    const surface = inboxSurface(s);
+    const notificationType = typeof s.notificationType === 'string' ? s.notificationType : '';
+    // A cwd join is a guess about WHICH terminal and the reply route only ever writes through
+    // recorded identity, so advertising Send on one would offer an action the route must refuse.
+    const answerable = !!(surface && surface.via === 'recorded' && ANSWERABLE_NOTIFICATIONS.indexOf(notificationType) !== -1);
+    const blockedSince = s.blockedSince;
+
+    rows.push({
+      sessionKey: { machine: s.key.machine, sessionId: s.key.sessionId },
+      blockedSince,
+      lastStopAt: s.lastStopAt == null ? null : s.lastStopAt,
+      cacheExpiresAt: s.cacheExpiresAt == null ? null : s.cacheExpiresAt,
+      cacheApprox: true,
+      notificationType,
+      // The turn identity token the reply must echo (spec §5.5). Both halves verbatim: a reply that
+      // echoes a turn the session has since moved past is refused rather than written blind.
+      turn: { blockedSince, assistantTs: lastAssistant && lastAssistant.ts != null ? lastAssistant.ts : null },
+      repo: s.repo == null ? null : s.repo,
+      worktree: s.worktree == null ? null : s.worktree,
+      epic: s.epic == null ? null : s.epic,
+      // COMPLETE text, never truncated here (trap 12). Truncation is a rendering concern.
+      question: lastAssistant && typeof lastAssistant.text === 'string' ? lastAssistant.text : '',
+      intent,
+      surface,
+      surfaceReason: s.surfaceReason == null ? null : s.surfaceReason,
+      answerable,
+      // There is no dismiss (principle 3): a row leaves the queue by being answered or by the
+      // session ceasing to wait, never by being swept under a rug.
+      actions: answerable ? [{ kind: 'reply' }] : [],
+    });
+  }
+  rows.sort((a, b) => (blockedAt(a) - blockedAt(b))
+    || cmpStr(a.sessionKey.machine, b.sessionKey.machine)
+    || cmpStr(a.sessionKey.sessionId, b.sessionKey.sessionId));
+  return rows;
+}
+
 // ---- p6 suppression (spec §6.6) ------------------------------------------------------------------
 // An attention item is removed from the PUBLISHED attention[] iff it contributes AT LEAST ONE fact
 // key and every key it contributes is held by some live handoff. The non-empty precondition is not
@@ -432,12 +541,23 @@ function derive(input) {
   const decisions = (Array.isArray(input.decisions) ? input.decisions : []).filter((d) => d && typeof d.id === 'string');
   const sessions = Array.isArray(sessionsFragment.sessions) ? sessionsFragment.sessions : [];
 
+  // THE SHIELD (spec §5.4). `sessions[]` now carries `vanished: true` rows — sessions still blocked
+  // whose recorded tab has left the tree. They are PUBLISHED, because carry-forward is rebuilt from
+  // the published sessions and a vanish held in process is forgotten by the next sweep. But nothing
+  // that already existed may change because of them: every legacy derivation below — buildEpic's
+  // epic joins, the epic universe, buildAttention, counts.blocked — reads `liveSessions`, so a
+  // vanished row contributes no attention item, no epic signal and no count.
+  //
+  // `buildInbox` alone reads the full `sessions[]`: a closed tab does not answer the prompt, it only
+  // removes the Jump. The row stays in the queue, read-only.
+  const liveSessions = sessions.filter((s) => !s.vanished);
+
   // Epic universe: anything git knows about, plus epics that exist only as an open decision or only
   // in Jira. An epic with zero signals is dropped below — "done = disappears".
   const keys = new Set();
   for (const b of branches) if (b.epic && !b.isDefault) keys.add(b.epic);
   for (const d of decisions) if (d.epic && !d.closedAt) keys.add(d.epic);
-  for (const s of sessions) if (s.epic) keys.add(s.epic);
+  for (const s of liveSessions) if (s.epic) keys.add(s.epic);
   for (const k of Object.keys(jiraFragment.epics || {})) keys.add(k);
 
   // Deploy ancestry hooks (S-005 fills these in; with the deploy source disabled they are unreachable).
@@ -477,7 +597,7 @@ function derive(input) {
   };
 
   const ctx = {
-    branches, worktreeByPath, sessions, decisions, aliases, sources, now,
+    branches, worktreeByPath, sessions: liveSessions, decisions, aliases, sources, now,
     deployedDevByRepo, deployedProdByRepo, deployKnownForRepo,
   };
 
@@ -505,8 +625,11 @@ function derive(input) {
 
   const specOrphans = Array.isArray(specsFragment.specOrphans) ? specsFragment.specOrphans : [];
   const attention = buildAttention(epics, {
-    now, sessions, decisions, orphanBranches, defaultUnpushed, ruleViolations, specOrphans,
+    now, sessions: liveSessions, decisions, orphanBranches, defaultUnpushed, ruleViolations, specOrphans,
   });
+
+  // The full array, deliberately: the queue is the one place a vanished session stays visible.
+  const inbox = buildInbox(sessions, now);
 
   // ---- p6 handoffs (spec §4.6). The server passes the LIVE set (and the recovery element) from
   // its in-memory ledger index; with nothing passed the fields publish their required empty values,
@@ -520,7 +643,7 @@ function derive(input) {
   // computed from attention itself, so suppressing first would silently change an existing p5
   // count. counts.handoffsLive is the ONE count p6 adds.
   const counts = {
-    blocked: sessions.filter((s) => s.status === 'blocked').length,
+    blocked: liveSessions.filter((s) => s.status === 'blocked').length,
     decisions: decisions.filter((d) => !d.closedAt).length,
     mergeable: attention.filter((a) => a.type === 'mergeable').length,
     // Counted from the SOURCE lists, not from attention[]: grouping folds N rows into 1, and a
@@ -528,6 +651,9 @@ function derive(input) {
     orphans: orphanBranches.length + specOrphans.length,
     staleWorktrees,
     handoffsLive: handoffs.length,
+    // From the LIST, never from a display array (trap 13). The inbox is uncapped and ungrouped, so
+    // the two can only ever diverge if a renderer's slice were mistaken for the queue itself.
+    inbox: inbox.length,
   };
 
   const covered = new Set();
@@ -556,6 +682,7 @@ function derive(input) {
     epics,
     sessions,
     attention: published,
+    inbox,
     handoffs,
     handoffRecovery,
     role,
@@ -565,7 +692,7 @@ function derive(input) {
 
 module.exports = {
   derive, assembleLadder, tally, buildEpic, buildAttention, epicFlag, flattenAttention,
-  suppressAttention,
+  suppressAttention, buildInbox,
   LADDER_ORDER, ATTENTION_ORDER, ACTIVITY_SIGNALS, DANGLING_SIGNALS, DRIFT_SIGNALS,
-  ORPHAN_GROUP_MIN, RECENT_COMMIT_MS, EPOCH,
+  ORPHAN_GROUP_MIN, RECENT_COMMIT_MS, EPOCH, INBOX_VERDICTS, ANSWERABLE_NOTIFICATIONS,
 };

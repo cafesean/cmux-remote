@@ -187,8 +187,28 @@ test('no runtime dependency is added — package.json declares scripts only', ()
   assert.ok(!pkg.dependencies, 'no dependencies key may appear');
   assert.ok(!pkg.devDependencies, 'no devDependencies key may appear');
   assert.strictEqual(pkg.scripts['test:browser'], 'node test/p8-browser-run.mjs');
-  assert.deepStrictEqual(Object.keys(pkg.scripts).sort(),
-    ['bridge', 'radar', 'server', 'test', 'test:browser']);
+  // p8's own entry points must still be there…
+  for (const k of ['bridge', 'radar', 'server', 'test', 'test:browser']) {
+    assert.ok(pkg.scripts[k], 'p8 declared script ' + k + ' and it must survive');
+  }
+  // …but the roster is no longer FROZEN. It was a deepStrictEqual on the sorted key list, which made
+  // every later feature that adds a script fail this test — p9's inbox eval/browser runners did, and
+  // p9 branched before p8 existed, so it could not have updated a pin it never saw. The claim in the
+  // title is about DEPENDENCIES, and freezing the script names asserts something else.
+  //
+  // What actually keeps the claim true is that every script runs node against a file IN THIS REPO:
+  // no package manager, no binary resolved from node_modules, nothing to install.
+  for (const [k, v] of Object.entries(pkg.scripts)) {
+    const argv = String(v).trim().split(/\s+/);
+    assert.strictEqual(argv[0], 'node',
+      'script ' + k + ' must invoke node directly, not a package-manager binary: ' + v);
+    const target = argv.slice(1).find((a) => !a.startsWith('-'));   // skip flags like --test
+    assert.ok(target, 'script ' + k + ' must name something to run: ' + v);
+    // `test` is a glob (node --test test/*.test.js), so the directory is what can be checked there.
+    const probe = target.includes('*') ? path.dirname(target) : target;
+    assert.ok(fs.existsSync(path.join(REPO, probe)),
+      'script ' + k + ' must point into this repo, not an installed dependency: ' + target);
+  }
 });
 
 test('public-repo hygiene: nothing machine-specific is committed', () => {

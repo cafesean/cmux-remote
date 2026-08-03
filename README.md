@@ -8,8 +8,6 @@ across the world. Installable as an iOS Home-Screen app that launches instantly.
 Self-hostable, multi-machine, **zero dependencies** (plain Node, no `npm install`). Nothing about your
 machines, secrets, or tunnels is ever committed — the repo ships only placeholders.
 
-By Sean Liao.
-
 ---
 
 ## What it does
@@ -36,15 +34,27 @@ By Sean Liao.
   keyboard is driving. **Dividers are draggable**, and a drag resizes the real cmux split — as does a
   new pane created from the ⊞ menu (left/right/up/down). It works the other way too: a split made or
   dragged on the Mac appears on the phone within a tick, pushed over SSE. Tap a pane to focus it and
-  the desktop follows. On a narrow screen
+  the desktop follows. The split view is the default whenever the **viewport** can hold it, including
+  for a workspace that has only one pane — a new workspace has exactly one, and it should not be
+  wearing the phone layout on a desktop. On a narrow screen
   (or with **Split view: Off**) the mirror collapses to one pane at a time — the phone behaviour —
   and the tab strip switches between them.
+- **2000 rows of scrollback per pane.** `terminal.replay` is capped at **240** scrollback rows by cmux
+  and takes no parameter to raise it, so a pane used to attach showing roughly one screen of history.
+  The rows above that window are fetched once per pane from `read-screen --scrollback` and painted as
+  plain (unstyled — cmux has no styles for them) rows on top of the live grid, joined to it by content
+  rather than by counting rows, so nothing is duplicated or swallowed at the seam. A **full-screen TUI**
+  is the one case with no history to show: cmux defines an alternate screen as having zero scrollback,
+  and what `read-screen` reports there belongs to the primary buffer behind the TUI.
+- **Workspaces can be named.** cmux labels an unnamed workspace after whatever tab is in front of it,
+  so several read the same thing. **✎** on any row of the workspace list renames it (an emptied box
+  clears the name and hands the label back to that derived default).
 - **The chrome lives on the panes, like cmux.** Each pane header carries its own **⊞** (split
   ←↑↓→ from *this* pane, new terminal/browser tab in it, even out the splits, close it) and its own
   **×** that kills the whole pane, tabs and all. The toolbar is down to the workspace chip, 📁 Files,
   ⚙ and ⟳ — no global split or new-tab buttons, and no tab strip: in split view every pane is its
-  own switcher. The strip comes back **only in the one-pane view** (a phone, `Split view: Off`, or a
-  single-pane workspace), where it *is* the switcher and carries the `+` / `+🌐` buttons.
+  own switcher. The strip comes back **only in the one-pane view** — a viewport too narrow to split, or
+  `Split view: Off` — where it *is* the switcher and carries the `+` / `+🌐` buttons.
 - **Arranging is dragging, not a menu.** Grab a pane by its title bar and drop it where you want it:
   on another pane's **edge** to sit beside it, or on its **middle** to join it as a tab. A tab chip
   drags the same way, which is how one tab gets a pane of its own. The drop zone drawn under your
@@ -326,12 +336,14 @@ are marked no-store; the `*stream*` endpoints are long-lived SSE.
 | `POST /api/cmux/resize-pane` | `{machine, workspace, paneA, paneB, axis, target}` — drag a divider: `paneA`/`paneB` are the panes either side of it and `target` is where it should land (0..1 of the layout box) |
 | `POST /api/cmux/equalize` | `{machine, workspace}` — even out every split |
 | `GET /api/cmux/screen?machine=&surface=&lines=` | plain-text snapshot / scrollback paging |
+| `GET /api/cmux/history?machine=&surface=&rows=` | the scrollback **above** the render-grid, as plain rows — cmux caps `terminal.replay` at 240 scrollback rows and takes no parameter to raise it, so this is what makes a pane remember `rows` (default 2000) instead of one screen. Answers `{rows, aligned, styledRows, bufferRows}`; `complete:true` when the replay window already reaches the top of the buffer (no read is paid for), `altScreen:true` for a full-screen TUI, where cmux defines the scrollback as empty and the history behind it belongs to another screen. Fetched once per pane, never on the streaming frames |
 | `GET /api/cmux/stream?machine=&surface=` | SSE of base64 plain-text screen frames, emitted on change |
 | `POST /api/cmux/send` | `{machine, surface, text, submit}` — type text, optionally press enter |
 | `POST /api/cmux/key` | `{machine, surface, key}` — press one allow-listed key |
 | `POST /api/cmux/new-surface` | `{machine, workspace, pane?}` — add a terminal tab (to a specific pane, if given) |
 | `POST /api/cmux/new-workspace` | `{machine, cwd?, command?}` — create a workspace |
 | `POST /api/cmux/close-tab` | `{machine, surface}` — close a tab |
+| `POST /api/cmux/rename-workspace` | `{machine, workspace, title}` — give a workspace a name of its own. Without one cmux labels it after whatever tab is in front of it, so several can read the same thing. An **empty** title clears the custom name and hands the label back to that derived default |
 | `POST /api/cmux/close-workspace` | `{machine, workspace}` — close a workspace and all its tabs |
 | `POST /api/cmux/browser/open` | `{machine, workspace, url?}` — open a browser tab |
 | `GET /api/cmux/browser/info?machine=&surface=` | current url/title/viewport of a browser tab |
@@ -518,4 +530,4 @@ cmux-remote/
 
 ## License
 
-MIT © Sean Liao — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
