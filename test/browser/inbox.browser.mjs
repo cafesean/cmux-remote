@@ -470,15 +470,30 @@ export async function run({ chromium, base, token, fixture, now, log }) {
         await sleep(60);
         eq('send is live on an answerable row with text typed', await page.$eval('#inbox .isend', (n) => n.disabled), false);
         await page.click('#inbox .isend');
-        await page.waitForSelector('#inbox .icard[hidden]', { timeout: 5000 });
+        // `state: 'hidden'` is load-bearing, not tidiness. waitForSelector defaults to 'visible', so
+        // this line used to wait for a card that was SIMULTANEOUSLY [hidden] and visible — and it
+        // passed, every run, because that contradiction was the bug. Once the panel enforces the
+        // hidden attribute the default would time out on correct behaviour.
+        await page.waitForSelector('#inbox .icard', { state: 'hidden', timeout: 5000 });
 
-        const after = await page.evaluate(() => ({
-          cardHidden: document.querySelector('#inbox .icard').hidden,
-          listHidden: document.querySelector('#inbox .ilist').hidden,
-          fields: document.querySelectorAll('#inbox .ifield textarea').length,
-          rows: document.querySelectorAll('#inbox .irow').length,
-        }));
+        // `.hidden` is the ATTRIBUTE, and asserting it alone is how a visibly-broken card shipped: it
+        // was always true while `#inbox .icard{display:flex}` kept the box painted, because
+        // `[hidden]{display:none}` is a UA rule any author `display` beats. So assert the RENDERED
+        // BOX — computed display and a null offsetParent — which is the thing the operator sees.
+        const after = await page.evaluate(() => {
+          const card = document.querySelector('#inbox .icard');
+          return {
+            cardHidden: card.hidden,
+            cardDisplay: getComputedStyle(card).display,
+            cardPainted: card.offsetParent !== null || card.getClientRects().length > 0,
+            listHidden: document.querySelector('#inbox .ilist').hidden,
+            fields: document.querySelectorAll('#inbox .ifield textarea').length,
+            rows: document.querySelectorAll('#inbox .irow').length,
+          };
+        });
         check('the card closes and the field is gone', after.cardHidden === true && after.fields === 0, JSON.stringify(after));
+        check('and the closed card is NOT RENDERED — no stale question left under the list',
+          after.cardDisplay === 'none' && after.cardPainted === false, JSON.stringify(after));
         check('the list comes back', after.listHidden === false, JSON.stringify(after));
         eq('and the ROW remains — never optimistically hidden', after.rows, 1);
         eq('exactly one POST was made', posts.length, 1);
