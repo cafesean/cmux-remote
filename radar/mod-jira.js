@@ -86,8 +86,23 @@ async function loadJiraConfig(configPath) {
       baseUrl,
       tokenRef: typeof raw.tokenRef === 'string' && raw.tokenRef.trim() ? raw.tokenRef.trim() : DEFAULT_TOKEN_REF,
       projects,
+      // p11 S-003. Read here rather than in radar/config.js because the whole `jira` block bypasses
+      // normalizeConfig's whitelist — mod-jira reads the file itself. A copy in DEFAULTS would be a
+      // second, silently-unused setting.
+      agile: normalizeAgile(raw.agile),
     },
     error: null,
+  };
+}
+
+// OFF by default: the Agile intake is additional load on someone else's server and a strictly
+// additive capability, so it is opted into. Same silent-default discipline as radar/config.js.
+function normalizeAgile(raw) {
+  const o = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  const n = Number(o.maxIssuesPerScan);
+  return {
+    enabled: o.enabled === true,
+    maxIssuesPerScan: Number.isFinite(n) ? Math.min(5000, Math.max(1, n)) : 500,
   };
 }
 
@@ -295,6 +310,149 @@ function detectDrift(epic, git, now) {
   return null;
 }
 
+// ---- Agile intake (p11 S-003) ---------------------------------------------------------------------------------
+//
+// A SEPARATE SOURCE, AND THAT IS THE POINT. Q1/Q2 above answer "what does the tracker say about the
+// epics git knows about" and feed drift detection. This section answers a different question — "what
+// work exists on the boards at all" — and it talks to a DIFFERENT API family (/rest/agile/1.0)
+// which a given instance or token may simply not expose.
+//
+// So its failures are reported on `sources.jiraAgile` and NEVER on `sources.jira`. Poisoning
+// `sources.jira` when only the Agile half is down would make the existing p5 epic-drift detection
+// read as failed while it is in fact working perfectly — a false red that costs exactly as much
+// trust as a false green.
+const AGILE_PAGE = 50;
+const MAX_AGILE_PAGES = 20;
+
+async function agileGet(pathAndQuery, ctx) {
+  const r = await getJson(
+    `${ctx.baseUrl}/rest/agile/1.0/${pathAndQuery}`,
+    { authorization: `Bearer ${ctx.token}`, accept: 'application/json' },
+    ctx.timeoutMs,
+    ctx.fetchImpl,
+  );
+  if (r.kind === 'stale') return { error: `jira-agile: ${r.error}` };
+  if (r.status === 401 || r.status === 403) return { error: `jira-agile ${r.status} unauthorized (token from ${ctx.tokenRef})` };
+  if (r.status === 404) return { error: 'jira-agile 404 — the Agile API is not available on this instance' };
+  if (r.status === 429) return { error: 'jira-agile 429 rate limited' };
+  if (!r.ok) return { error: `jira-agile ${r.status}` };
+  return { body: r.body || {} };
+}
+
+// Paged list helper. `values` is the Agile API's envelope key throughout, and `isLast` is its
+// end-of-pages signal; an empty page also stops the loop, for the same reason searchAll does it.
+async function agileList(pathBase, ctx, cap) {
+  const out = [];
+  let startAt = 0;
+  for (let page = 0; page < MAX_AGILE_PAGES; page++) {
+    const sep = pathBase.includes('?') ? '&' : '?';
+    const r = await agileGet(`${pathBase}${sep}startAt=${startAt}&maxResults=${AGILE_PAGE}`, ctx);
+    if (r.error) return { error: r.error, items: out };
+    const values = Array.isArray(r.body.values) ? r.body.values : [];
+    for (const v of values) {
+      if (cap != null && out.length >= cap) return { items: out, truncated: true };
+      out.push(v);
+    }
+    if (values.length === 0 || r.body.isLast === true) break;
+    startAt += values.length;
+  }
+  return { items: out };
+}
+
+// An Agile issue → the raw shape workref.buildWorkRefs consumes. Status mapping is by CATEGORY
+// only, exactly as mapIssue does for the JQL path — display names are not load-bearing anywhere.
+function agileIssueToRaw(issue, board, sprint, baseUrl) {
+  const f = (issue && issue.fields) || {};
+  const st = f.status || {};
+  const cat = (st.statusCategory && typeof st.statusCategory.key === 'string') ? st.statusCategory.key : null;
+  const typeName = (f.issuetype && typeof f.issuetype.name === 'string') ? f.issuetype.name : '';
+  const isEpic = typeName.toLowerCase() === 'epic';
+  const key = String(issue.key || '');
+  return {
+    source: 'jira',
+    sourceId: key,
+    sourceUrl: baseUrl ? `${baseUrl}/browse/${key}` : null,
+    kind: isEpic ? 'epic' : 'issue',
+    title: typeof f.summary === 'string' ? f.summary : null,
+    nativeStatus: typeof st.name === 'string' ? st.name : null,
+    nativeCategory: CATEGORIES.includes(cat) ? cat : null,
+    assignee: (f.assignee && typeof f.assignee.name === 'string') ? f.assignee.name : null,
+    updatedAt: typeof f.updated === 'string' ? f.updated : null,
+    description: typeof f.summary === 'string' ? f.summary : null,
+    // An epic IS its own cluster; a story clusters under its epic when the instance exposes one.
+    epicKey: isEpic ? (ISSUE_KEY_RE.test(key) ? key : null) : (typeof f.epic === 'object' && f.epic && ISSUE_KEY_RE.test(String(f.epic.key || '')) ? String(f.epic.key) : null),
+    board: board ? { urn: `urn:work:jira-board:${board.id}`, name: board.name || null } : null,
+    sprint: sprint ? { urn: `urn:work:jira-sprint:${sprint.id}`, name: sprint.name || null, endsAt: sprint.endDate || null } : null,
+    connector: 'mod-jira',
+  };
+}
+
+// Returns { items, source, pending }. Never throws; a failure anywhere degrades this source alone.
+async function collectAgile(cfg, ctx, observedAt) {
+  const agile = (cfg && cfg.agile) || { enabled: false, maxIssuesPerScan: 500 };
+  if (!agile.enabled) return { items: [], source: { status: 'disabled' }, pending: 0 };
+
+  const boardsR = await agileList('board', ctx, null);
+  if (boardsR.error) return { items: [], source: { status: 'error', observedAt, error: boardsR.error }, pending: 0 };
+  const boards = boardsR.items;
+
+  const items = [];
+  let pending = 0;
+  const scopedBoards = boards.filter((b) => {
+    const key = b && b.location && typeof b.location.projectKey === 'string' ? b.location.projectKey : null;
+    return !key || !Array.isArray(cfg.projects) || cfg.projects.includes(key);
+  });
+
+  for (const b of scopedBoards) {
+    items.push({
+      source: 'jira-board', sourceId: String(b.id), kind: 'board',
+      title: typeof b.name === 'string' ? b.name : null, connector: 'mod-jira',
+    });
+  }
+
+  const sprintByBoard = new Map();
+  for (const b of scopedBoards) {
+    const r = await agileList(`board/${encodeURIComponent(b.id)}/sprint?state=active,future`, ctx, null);
+    // A board with no sprint support answers 400/404; that is a board-shape fact, not an outage, so
+    // it degrades this board only and the rest of the scan continues.
+    if (r.error) continue;
+    sprintByBoard.set(String(b.id), r.items);
+    for (const sp of r.items) {
+      items.push({
+        source: 'jira-sprint', sourceId: String(sp.id), kind: 'sprint',
+        title: typeof sp.name === 'string' ? sp.name : null,
+        due: typeof sp.endDate === 'string' ? sp.endDate : null,
+        board: { urn: `urn:work:jira-board:${b.id}`, name: b.name || null },
+        connector: 'mod-jira',
+      });
+    }
+  }
+
+  let budget = agile.maxIssuesPerScan;
+  for (const b of scopedBoards) {
+    if (budget <= 0) { pending += 1; continue; }
+    const r = await agileList(`board/${encodeURIComponent(b.id)}/issue?fields=summary,status,issuetype,assignee,updated,epic`, ctx, budget);
+    if (r.error) continue;
+    const sprints = sprintByBoard.get(String(b.id)) || [];
+    const activeSprint = sprints.find((s) => s && s.state === 'active') || null;
+    for (const issue of r.items) {
+      items.push(agileIssueToRaw(issue, b, activeSprint, ctx.baseUrl));
+      budget -= 1;
+    }
+    // Truncation is REPORTED, never silent: a count that quietly stopped growing reads as "that is
+    // all the work there is", which is the same false-green class as a swallowed error.
+    if (r.truncated) pending += 1;
+  }
+
+  return {
+    items,
+    source: pending > 0
+      ? { status: 'ok', observedAt, boards: scopedBoards.length, pending }
+      : { status: 'ok', observedAt, boards: scopedBoards.length, pending: 0 },
+    pending,
+  };
+}
+
 // ---- module entry -------------------------------------------------------------------------------------------
 
 async function collectJira(opts) {
@@ -325,6 +483,12 @@ async function collectJira(opts) {
     fetchImpl: opts.fetchImpl || null,
   };
 
+  // Agile runs FIRST and independently, so the coupling is broken in BOTH directions: an Agile
+  // outage must not touch `sources.jira` (Codex round 1, finding 10), and a Q1 failure — which
+  // returns early below with a null fragment — must not silently take the board intake down with
+  // it. Its result therefore travels on every return path out of this function.
+  const agile = await collectAgile(cfg, ctx, observedAt);
+
   const warnings = [];
   const epics = {};
 
@@ -342,7 +506,7 @@ async function collectJira(opts) {
   // without the epic universe, a partial result is indistinguishable from "those epics were closed",
   // and publishing it would silently retire live work from the board.
   const q1 = await searchAll(openEpicsJql(cfg.projects), ctx);
-  if (q1.error) return { fragment: null, source: { status: 'error', observedAt, error: q1.error }, warnings: warnings.concat(q1.error) };
+  if (q1.error) return { fragment: null, agile, source: { status: 'error', observedAt, error: q1.error }, warnings: warnings.concat(q1.error) };
   absorb(q1.issues, false);
 
   // Q2 — the git-known keys, regardless of status. Skipped only when there is genuinely nothing to
@@ -374,12 +538,13 @@ async function collectJira(opts) {
     : { status: 'ok', observedAt };
   if (q2Failed) warnings.push(source.error);
 
-  return { fragment: { epics, drift }, source, warnings };
+  return { fragment: { epics, drift }, agile, source, warnings };
 }
 
 module.exports = {
   collectJira,
   loadJiraConfig,
+  normalizeAgile, collectAgile, agileIssueToRaw, agileList, agileGet,
   openEpicsJql,
   keysJql,
   knownEpicKeys,
