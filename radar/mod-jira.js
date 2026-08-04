@@ -82,15 +82,19 @@ async function loadJiraConfig(configPath) {
   if (!baseUrl) return { cfg: null, error: 'jira.baseUrl is not set (and JIRA_BASE_URL is unset)' };
 
   return {
+    // `cfg` KEEPS ITS EXACT p5 SHAPE — baseUrl, tokenRef, projects, nothing else. p11 first added
+    // `agile` in here, which silently widened a return contract other code and tests compare
+    // against. "Additive" has to mean additive at every boundary, not only at state.json: a new
+    // key inside an existing object is a CHANGE to that object, so the Agile settings travel as
+    // their own sibling field instead.
     cfg: {
       baseUrl,
       tokenRef: typeof raw.tokenRef === 'string' && raw.tokenRef.trim() ? raw.tokenRef.trim() : DEFAULT_TOKEN_REF,
       projects,
-      // p11 S-003. Read here rather than in radar/config.js because the whole `jira` block bypasses
-      // normalizeConfig's whitelist — mod-jira reads the file itself. A copy in DEFAULTS would be a
-      // second, silently-unused setting.
-      agile: normalizeAgile(raw.agile),
     },
+    // p11 S-003, read here because the whole `jira` block bypasses normalizeConfig's whitelist —
+    // mod-jira reads the file itself, so a copy in DEFAULTS would be a second, unused setting.
+    agile: normalizeAgile(raw.agile),
     error: null,
   };
 }
@@ -487,7 +491,13 @@ async function collectJira(opts) {
   // outage must not touch `sources.jira` (Codex round 1, finding 10), and a Q1 failure — which
   // returns early below with a null fragment — must not silently take the board intake down with
   // it. Its result therefore travels on every return path out of this function.
-  const agile = await collectAgile(cfg, ctx, observedAt);
+  // The injected-config path (opts.jiraConfig, used by tests and by callers that build a config in
+  // memory) can still carry `agile` on the object; the file path now delivers it alongside. Both
+  // are normalized to the same shape here so collectAgile has exactly one contract to read.
+  const agileCfg = opts.jiraConfig !== undefined
+    ? normalizeAgile(opts.jiraConfig && opts.jiraConfig.agile)
+    : (loaded.agile || normalizeAgile(undefined));
+  const agile = await collectAgile(Object.assign({}, cfg, { agile: agileCfg }), ctx, observedAt);
 
   const warnings = [];
   const epics = {};
