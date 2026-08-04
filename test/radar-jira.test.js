@@ -432,24 +432,57 @@ test('no jira block in the config is `disabled`, not an error', async () => {
 test('the jira config block takes defaults for base url, token ref and projects', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'radar-jira-cfg-'));
   const cfgPath = path.join(dir, 'config.json');
+  // BLANK ENV, EXPLICITLY. Every assertion below is unchanged; what changed is that they no longer
+  // depend on whether the shell that started this process exported JIRA_BASE_URL. It did on one
+  // machine and did not on another, so this test passed or failed by environment on the same
+  // commit — and the difference showed up in no diff. The configured-env direction is pinned in
+  // its own test immediately after this one.
+  const BLANK = { env: {} };
   await store.writeJsonAtomic(cfgPath, { configVersion: 1, jira: {} });
-  const { cfg } = await loadJiraConfig(cfgPath);
+  const { cfg } = await loadJiraConfig(cfgPath, BLANK);
   // No hardcoded host and no borrowed project keys. An empty block is therefore NOT usable: the
   // module reports a reason and stays disabled rather than guessing another organisation's Jira.
   assert.strictEqual(cfg, null, 'an empty jira block cannot be defaulted into a working config');
-  const empty = await loadJiraConfig(cfgPath);
+  const empty = await loadJiraConfig(cfgPath, BLANK);
   assert.match(empty.error, /projects is empty/);
 
   // projects present but no host -> still refused, with a different stated reason
   await store.writeJsonAtomic(cfgPath, { configVersion: 1, jira: { projects: ['ABC'] } });
-  const noHost = await loadJiraConfig(cfgPath);
+  const noHost = await loadJiraConfig(cfgPath, BLANK);
   assert.strictEqual(noHost.cfg, null);
   assert.match(noHost.error, /baseUrl is not set/);
 
   await store.writeJsonAtomic(cfgPath, { configVersion: 1, jira: { baseUrl: 'https://j.example/', projects: ['BETA'] } });
-  const custom = await loadJiraConfig(cfgPath);
+  const custom = await loadJiraConfig(cfgPath, BLANK);
   assert.strictEqual(custom.cfg.baseUrl, 'https://j.example', 'trailing slash trimmed');
   assert.deepStrictEqual(custom.cfg.projects, ['BETA']);
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// The other half of the same dependency, and the reason the blank env above is an injection rather
+// than a removal: the JIRA_BASE_URL fallback is REAL production behaviour and must keep working.
+// Pinning both directions is what makes the ambient-environment bug impossible to reintroduce —
+// deleting the fallback would pass the test above and silently break every deployment relying on it.
+test('an env-supplied JIRA_BASE_URL is still the fallback when the config omits baseUrl', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'radar-jira-env-'));
+  const cfgPath = path.join(dir, 'config.json');
+  await store.writeJsonAtomic(cfgPath, { configVersion: 1, jira: { projects: ['ABC'] } });
+
+  const withEnv = await loadJiraConfig(cfgPath, { env: { JIRA_BASE_URL: 'https://jira.example.com/' } });
+  assert.strictEqual(withEnv.cfg.baseUrl, 'https://jira.example.com', 'env fallback applies, trailing slash trimmed');
+  assert.deepStrictEqual(withEnv.cfg.projects, ['ABC']);
+
+  // An explicit config baseUrl still WINS over the environment.
+  await store.writeJsonAtomic(cfgPath, { configVersion: 1, jira: { baseUrl: 'https://configured.example', projects: ['ABC'] } });
+  const explicit = await loadJiraConfig(cfgPath, { env: { JIRA_BASE_URL: 'https://ambient.example' } });
+  assert.strictEqual(explicit.cfg.baseUrl, 'https://configured.example', 'config beats environment');
+
+  // A blank/whitespace env value is not a host.
+  await store.writeJsonAtomic(cfgPath, { configVersion: 1, jira: { projects: ['ABC'] } });
+  const blankish = await loadJiraConfig(cfgPath, { env: { JIRA_BASE_URL: '   ' } });
+  assert.strictEqual(blankish.cfg, null);
+  assert.match(blankish.error, /baseUrl is not set/);
+
   await fsp.rm(dir, { recursive: true, force: true });
 });
 
