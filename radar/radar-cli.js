@@ -551,6 +551,8 @@ const HELP = `radar — derived truth for the repos, worktrees and epics on this
   radar brief <epic|worktrees|orphans> ...    print the handoff prompt for a selection
   radar handoff <selector> [more...] [--dry]  dispatch the selection via the radar server (--dry: preview only)
   radar handoff show <handoffId>              print one handoff by id (no listing command exists, by design)
+  radar work [--selectable] [--source S] [--all]  list WorkRefs: native status, canonical, route
+  radar route <urn>                           show the resolved target for one WorkRef, or why there is none
 
   --dir <path>     radar home (default $RADAR_DIR or ~/.radar)
   --config <path>  config file (default <dir>/config.json)
@@ -584,6 +586,44 @@ async function main(argv, io) {
         }
         if (flags.json) { stdout.write(JSON.stringify(state, null, 2) + '\n'); return 0; }
         stdout.write(renderStatus(state, { now: Date.now(), all: !!flags.all }));
+        return 0;
+      }
+      // p11 §7. Both render the NATIVE status alongside the canonical one, always: the tracker
+      // stays the authority and radar's projection must never be mistaken for it.
+      case 'work': {
+        const state = await collector.getState();
+        const all = Array.isArray(state && state.workRefs) ? state.workRefs : [];
+        const src = flags.source ? String(flags.source) : null;
+        let list = all.filter((w) => (!src || w.source === src) && (!flags.selectable || w.selectable));
+        if (flags.json) { stdout.write(JSON.stringify(list, null, 2) + '\n'); return 0; }
+        if (!all.length) { stdout.write('radar: no WorkRefs (jira.agile disabled, or nothing intaken yet)\n'); return 0; }
+        // Folded by default, same resting-screen discipline as the rest of the board.
+        const CAP = flags.all ? list.length : 4;
+        for (const w of list.slice(0, CAP)) {
+          const native = (w.status && w.status.native) || '—';
+          const canon = (w.status && w.status.canonical) || 'unknown';
+          const route = w.route && w.route.kind ? `${w.route.kind}${w.route.sessionId ? ` ${String(w.route.sessionId).slice(0, 8)}` : ''}` : `— (${(w.route && w.route.reason) || 'unresolved'})`;
+          stdout.write(`${w.selectable ? '*' : ' '} ${w.urn.padEnd(28)} ${native.padEnd(18)} ${canon.padEnd(9)} ${route}\n`);
+        }
+        if (list.length > CAP) stdout.write(`  +${list.length - CAP} more (--all)\n`);
+        stdout.write(`  ${list.length} shown · ${all.filter((w) => w.selectable).length} selectable of ${all.length}\n`);
+        return 0;
+      }
+      case 'route': {
+        const urn = positional[1];
+        if (!urn) { stderr.write('radar: route needs a workRef urn\n'); return 2; }
+        const state = await collector.getState();
+        const w = (Array.isArray(state && state.workRefs) ? state.workRefs : []).find((x) => x.urn === urn);
+        if (!w) { stderr.write(`radar: no WorkRef ${urn}\n`); return 2; }
+        if (flags.json) { stdout.write(JSON.stringify(w.route, null, 2) + '\n'); return 0; }
+        const r = w.route || {};
+        stdout.write(`${w.urn}\n`);
+        stdout.write(`  tracker says   ${(w.status && w.status.native) || '—'}\n`);
+        stdout.write(`  radar reads    ${(w.status && w.status.canonical) || 'unknown'}\n`);
+        // A null route always says WHY — "unresolved" alone is a shrug, and the reason is the
+        // actionable half (cluster-running, no-surface, wrong-cluster...).
+        stdout.write(`  route          ${r.kind || 'none'}${r.sessionId ? ` -> ${r.sessionId}` : ''}\n`);
+        stdout.write(`  reason         ${r.reason || 'unresolved'}\n`);
         return 0;
       }
       case 'scan': {
