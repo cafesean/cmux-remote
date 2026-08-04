@@ -54,7 +54,7 @@ const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 // Rebuild each module's fragment from the last published snapshot. state.json is the durable
 // carry-forward store, which is what makes carry-forward survive a process restart too.
 function fragmentsFromState(state) {
-  const out = { git: { repos: {} }, deploy: { repos: {} }, sessions: { sessions: [], machines: null }, jira: { epics: {} }, specs: { specOrphans: [], epics: {} } };
+  const out = { git: { repos: {} }, deploy: { repos: {} }, sessions: { sessions: [], machines: null }, jira: { epics: {} }, specs: { specOrphans: [], epics: {} }, jiraAgile: { items: [] } };
   if (!state || !state.repos) return out;
   for (const id of Object.keys(state.repos)) {
     const r = state.repos[id];
@@ -92,6 +92,27 @@ function fragmentsFromState(state) {
     }
   }
   out.specs.specOrphans = orphans;
+
+  // p11: WorkRefs carry forward for the SAME reason jira/specs do (see the note above) — a
+  // session-only sweep does not run mod-jira, and republishing an empty workRefs[] under a
+  // carried-forward `ok` badge is the identical data-loss-reported-as-health bug.
+  //
+  // The RAW connector inputs are reconstructed from the published WorkRefs rather than stored
+  // separately, so `links` and `route` are recomputed fresh from this scan's git and sessions
+  // instead of being carried stale. Everything the builder needs survives a round trip except the
+  // two derived fields, and those are exactly the two that must not survive it.
+  out.jiraAgile = {
+    items: (state.workRefs || []).map((w) => ({
+      source: w.source, sourceId: w.sourceId, sourceUrl: w.sourceUrl, kind: w.kind, title: w.title,
+      nativeStatus: w.status ? w.status.native : null,
+      nativeCategory: w.status ? w.status.nativeCategory : null,
+      assignee: w.assignee, due: w.due, sprint: w.sprint, board: w.board,
+      updatedAt: w.updatedAt, description: w.description,
+      // cluster is the epic key when one existed, else "source:id" — the colon is the discriminator.
+      epicKey: (typeof w.cluster === 'string' && !w.cluster.includes(':')) ? w.cluster : null,
+      connector: w.provenance ? w.provenance.connector : null,
+    })),
+  };
   return out;
 }
 
@@ -183,6 +204,13 @@ function createCollector(opts) {
         // and its own status. Only a hard throw triggers carry-forward.
         fragments[name] = r && r.fragment ? r.fragment : carried[name];
         sources[name] = (r && r.source) || { status: 'error', observedAt, error: `${name} returned no source` };
+        // p11: mod-jira returns the Agile intake on a SIDE CHANNEL so its failures land on
+        // `sources.jiraAgile` and can never degrade `sources.jira` (spec §M2, Codex finding 10).
+        // It travels on mod-jira's error path too, so a Q1 failure does not take boards down.
+        if (name === 'jira' && r && r.agile) {
+          fragments.jiraAgile = { items: Array.isArray(r.agile.items) ? r.agile.items : [] };
+          sources.jiraAgile = r.agile.source || { status: 'error', observedAt, error: 'jiraAgile returned no source' };
+        }
         if (r && Array.isArray(r.warnings)) for (const w of r.warnings) warnings.push(w);
       } catch (e) {
         fragments[name] = carried[name];

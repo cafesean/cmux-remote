@@ -37,6 +37,8 @@
 // epic derivation may be activity signals.
 
 const { keysOfAttentionItem } = require('./handoff-keys');
+const { buildWorkRefs } = require('./workref');
+const { resolveRoute } = require('./eligibility');
 
 const LADDER_ORDER = ['spec', 'pushed', 'mergedDevelop', 'deployedDev', 'prod', 'flags'];
 const RECENT_COMMIT_MS = 14 * 24 * 60 * 60 * 1000;
@@ -706,6 +708,33 @@ function derive(input) {
   // `jira-inprogress-no-git` is the direction that used to be rendered as an ACTIVE epic.
   const jiraDrift = Array.isArray(jiraFragment.drift) ? jiraFragment.drift : [];
 
+  // ---- p11 WorkRefs. ADDITIVE: nothing above this line reads them, so epics[], attention[] and
+  // sessions[] keep the shapes every p5 consumer already depends on.
+  //
+  // `route` is resolved HERE, once per scan, and carried on the WorkRef so the CLI, the UI and
+  // Hermes all read the same answer instead of each recomputing it against a snapshot that may
+  // have moved underneath them.
+  const agileFragment = (input.fragments && input.fragments.jiraAgile) || { items: [] };
+  const workRefs = buildWorkRefs(Array.isArray(agileFragment.items) ? agileFragment.items : [], {
+    gitFragment,
+    aliases,
+    observedAt: new Date(now).toISOString(),
+    scope: (input.config && input.config.scope) || null,
+  });
+  const resumeCfg = (input.config && input.config.resume) || {};
+  for (const wr of workRefs) {
+    wr.route = resolveRoute(wr, sessions, {
+      now,
+      leader: input.collectorId,
+      minIdleSec: resumeCfg.minIdleSec,
+      maxIdleHours: resumeCfg.maxIdleHours,
+      requireSurface: resumeCfg.requireSurface,
+    });
+  }
+  // Counted from the SOURCE list, never from a rendered or folded view — same rule as counts.orphans.
+  counts.workRefs = workRefs.length;
+  counts.workRefsSelectable = workRefs.filter((w) => w.selectable).length;
+
   const machines = Array.isArray(sessionsFragment.machines) && sessionsFragment.machines.length
     ? sessionsFragment.machines
     : [{ id: input.collectorId, bridge: 'unknown', lastSeenAt: null }];
@@ -726,6 +755,7 @@ function derive(input) {
     handoffRecovery,
     role,
     jiraDrift,
+    workRefs,
   };
 }
 

@@ -28,7 +28,9 @@
         "orphans": { "type": "integer", "minimum": 0 },
         "staleWorktrees": { "type": "integer", "minimum": 0 },
         "handoffsLive": { "type": "integer", "minimum": 0, "description": "p6: handoffs.length — the ONE count p6 adds. Every p5 count is computed BEFORE suppression (spec §6.6)." },
-        "inbox": { "type": "integer", "minimum": 0, "description": "p9 (spec §5.4): inbox.length — from the LIST, never from a display array. Present in properties but NOT in required, so snapshots predating p9 (the committed fixtures among them) stay valid." }
+        "inbox": { "type": "integer", "minimum": 0, "description": "p9 (spec §5.4): inbox.length — from the LIST, never from a display array. Present in properties but NOT in required, so snapshots predating p9 (the committed fixtures among them) stay valid." },
+        "workRefs": { "type": "integer", "minimum": 0, "description": "p11: OPTIONAL — absent from `required` so a pre-p11 snapshot still validates. Counted from the source list, never from a folded view." },
+        "workRefsSelectable": { "type": "integer", "minimum": 0, "description": "p11: OPTIONAL. How many WorkRefs a session could act on right now (spec §6.2)." }
       }
     },
     "repos": { "type": "object", "additionalProperties": { "$ref": "#/$defs/repo" } },
@@ -63,6 +65,11 @@
       "type": "array",
       "description": "Weekly digest material (spec §M4). NEVER an interrupt and never an attention item — a Jira status that git cannot corroborate belongs here, not on the board.",
       "items": { "$ref": "#/$defs/jiraDriftItem" }
+    },
+    "workRefs": {
+      "type": "array",
+      "description": "p11 (spec §4.1): canonical, source-neutral work references. ADDITIVE and OPTIONAL — absent from `required` on purpose, so a snapshot taken before p11 still validates. status.native/nativeCategory are the source's authority; status.canonical is radar's projection and is never written back. A consumer that assumes this key is present is the defect, not the snapshot that omits it.",
+      "items": { "$ref": "#/$defs/workRef" }
     }
   },
   "$defs": {
@@ -110,6 +117,32 @@
         "error": { "$ref": "#/$defs/nullableString" }
       }
     },
+    "workRef": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["urn", "source", "sourceId", "status", "cluster"],
+      "properties": {
+        "urn": { "type": "string", "description": "urn:work:<source>:<sourceId> — stable across scans by construction." },
+        "source": { "type": "string" },
+        "sourceId": { "type": "string" },
+        "sourceUrl": { "type": ["string", "null"] },
+        "kind": { "type": "string" },
+        "title": { "type": ["string", "null"] },
+        "status": {
+          "type": "object",
+          "required": ["canonical"],
+          "properties": {
+            "native": { "type": ["string", "null"], "description": "The source's own word, verbatim. This is the authority." },
+            "nativeCategory": { "enum": ["new", "indeterminate", "done", null] },
+            "canonical": { "enum": ["inbox", "ready", "active", "blocked", "waiting", "parked", "done", "unknown"] }
+          }
+        },
+        "cluster": { "type": ["string", "null"] },
+        "links": { "type": "array", "items": { "type": "string" } },
+        "selectable": { "type": "boolean" },
+        "route": { "type": ["object", "null"], "description": "Resolved once per scan (spec §6.3) so every consumer reads one answer. Null means unresolved, and the reason travels with it." }
+      }
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,
@@ -117,7 +150,9 @@
       "properties": {
         "status": { "enum": ["ok", "stale", "error", "disabled"] },
         "observedAt": { "type": "string" },
-        "error": { "type": "string" }
+        "error": { "type": "string" },
+        "boards": { "type": "integer", "minimum": 0, "description": "p11: OPTIONAL per-source counter (jiraAgile). Descriptive; no consumer branches on it." },
+        "pending": { "type": "integer", "minimum": 0, "description": "p11: OPTIONAL. Work observed but not intaken because a bound was hit — reported so truncation is never silent." }
       }
     },
     "dirty": {
