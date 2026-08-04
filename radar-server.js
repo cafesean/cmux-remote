@@ -27,6 +27,9 @@ const { readLastAssistantText } = require('./radar/classify');
 // The one prompt-detection implementation in this repository. Gate 3 classifies a pane by importing
 // it, never by re-deriving it — a private heuristic here would drift from the one the UI shows.
 const { paneKind } = require('./public/menuparse.js');
+// P11 dispatch delegates to the existing handoff path; its gate remains off
+// until a runtime config explicitly enables it.
+const { createDispatcher } = require('./radar/dispatch');
 
 const BODY_CAP = 16 * 1024;            // spec §7
 const HARD_CAP = 16 * BODY_CAP;        // give up on a body that keeps coming after the 413
