@@ -34,7 +34,22 @@ const store = require('./store');
 
 // No hardcoded host. `jira.baseUrl` in config.json is required; absent it, the source reports
 // `disabled` rather than guessing an organisation's Jira. Unknown beats a wrong default.
+//
+// THE ENVIRONMENT IS AN INJECTED INPUT, NOT AN AMBIENT ONE. This constant used to be the whole
+// story, and being a module-load snapshot of process.env made it invisible: whether
+// `loadJiraConfig` refused a config with no baseUrl depended on whether the SHELL that started the
+// process happened to export JIRA_BASE_URL. A suite that passed on one machine failed on another
+// with the same commit, and the difference never appeared in any diff.
+//
+// So the fallback is now read at CALL time from an env object the caller may supply. Production
+// semantics are unchanged — an absent `opts.env` still means `process.env`, and a configured
+// JIRA_BASE_URL is still honoured — but the dependency is now visible and testable, so a test can
+// pin BOTH directions instead of inheriting whatever the shell had.
 const DEFAULT_BASE_URL = process.env.JIRA_BASE_URL || '';
+const envBaseUrl = (env) => {
+  const e = env || process.env;
+  return typeof e.JIRA_BASE_URL === 'string' ? e.JIRA_BASE_URL.trim() : '';
+};
 // No default project keys: an org's Jira project codes are its own. Absent config, the module
 // queries nothing rather than guessing keys that belong to someone else.
 const DEFAULT_PROJECTS = [];
@@ -64,7 +79,8 @@ const CATEGORIES = ['new', 'indeterminate', 'done'];
 // builds its result key by key and drops sections it does not know about, so a `jira` block added
 // there would have to be threaded through P1 code this story does not own. Reading the file again
 // costs one small read per scan and keeps the P4 modules self-contained.
-async function loadJiraConfig(configPath) {
+async function loadJiraConfig(configPath, opts) {
+  const env = (opts && opts.env) || process.env;
   if (!configPath) return { cfg: null, error: null };
   const read = await store.readJson(configPath, null);
   if (!read.ok) return { cfg: null, error: read.error };
@@ -78,7 +94,7 @@ async function loadJiraConfig(configPath) {
 
   // No borrowed host. Without an explicit baseUrl (or JIRA_BASE_URL) the module is DISABLED with a
   // stated reason rather than issuing requests at an empty or guessed origin.
-  const baseUrl = (typeof raw.baseUrl === 'string' && raw.baseUrl.trim() ? raw.baseUrl.trim() : DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const baseUrl = (typeof raw.baseUrl === 'string' && raw.baseUrl.trim() ? raw.baseUrl.trim() : envBaseUrl(env)).replace(/\/+$/, '');
   if (!baseUrl) return { cfg: null, error: 'jira.baseUrl is not set (and JIRA_BASE_URL is unset)' };
 
   return {
@@ -464,15 +480,18 @@ async function collectJira(opts) {
   const observedAt = new Date(now).toISOString();
   const configPath = opts.configPath || (opts.paths && opts.paths.config) || null;
 
+  // Resolved before the config load so the file path and the token lookup below agree about which
+  // environment they are reading. A collector that took its baseUrl from the ambient shell and its
+  // token from an injected env would be reading two different worlds.
+  const env = opts.env || process.env;
   const loaded = opts.jiraConfig !== undefined
     ? { cfg: opts.jiraConfig, error: null }
-    : await loadJiraConfig(configPath);
+    : await loadJiraConfig(configPath, { env });
 
   if (loaded.error) return { fragment: null, source: { status: 'error', observedAt, error: loaded.error }, warnings: [loaded.error] };
   if (!loaded.cfg) return { fragment: { epics: {}, drift: [] }, source: { status: 'disabled' }, warnings: [] };
 
   const cfg = loaded.cfg;
-  const env = opts.env || process.env;
   const token = env[cfg.tokenRef];
   if (!token) {
     const error = `env ${cfg.tokenRef} is unset`;
@@ -565,5 +584,5 @@ module.exports = {
   detectDrift,
   gitSignalsFor,
   chunk,
-  DEFAULT_BASE_URL, DEFAULT_PROJECTS, DEFAULT_TOKEN_REF, ISSUE_KEY_RE, PAGE_SIZE, CATEGORIES,
+  DEFAULT_BASE_URL, envBaseUrl, DEFAULT_PROJECTS, DEFAULT_TOKEN_REF, ISSUE_KEY_RE, PAGE_SIZE, CATEGORIES,
 };
