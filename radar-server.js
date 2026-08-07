@@ -389,13 +389,30 @@ function createRadar(opts) {
       return ref ? (env[ref] || null) : null;
     },
     bridgeSend: dispatchSend,
-    // `spawn` IS DELIBERATELY NOT WIRED, and the dispatcher's own 501 spawn_unavailable is the
-    // honest answer for it. p6 owns the only session spawn in this repository and it exists only at
-    // the end of preview -> commit, which is what makes the seed file, the durable reservation and
-    // the stop-capture wrapper exist; there is no spawn({workRef, seed}) to hand over. A second
-    // implementation here would be a second way to start a session, competing with the one whose
-    // recovery path is tested. So this route surfaces the resume arm, and says so when asked for
-    // the other.
+    // `spawn` IS WIRED, and it is wired to p6's own launch recipe rather than to a second one.
+    // radar/handoff.js exports spawnSession() — the extraction of commit()'s step-6a gap: the same
+    // seed file written through the same TEXT primitive, the same FIRST TURN restriction, the same
+    // env-scrubbing /usr/bin/script wrapper, the same default permission mode. Writing a spawn here
+    // instead would have forked the one recipe whose recovery path is tested, which is exactly why
+    // this dep sat empty (and answered 501) until that function existed.
+    //
+    // Resolved at CALL TIME like every other dep above: getHandoff() is lazy on purpose, so a
+    // dispatch must not be what forces radar/handoff.js to load at construction — and a request
+    // that does reach here re-reads the config through the same boundary p6 uses.
+    //
+    // WIRING CAPABILITY IS NOT ENABLING AUTONOMY. Nothing about this widens the gates: the route is
+    // still behind authed(), still refused on a viewer, `authority: "operator"` is still 503 while
+    // `dispatch.enabled` defaults to false, and eligibility is still recomputed server-side. This
+    // arm is reachable only after all of that says yes.
+    spawn: async (args) => {
+      const h = await getHandoff();
+      if (!h || typeof h.spawnSession !== 'function') {
+        // A stubbed or older handoff module. A throw is the dispatcher's 502 spawn_failed, which is
+        // the honest answer — the alternative is a TypeError surfacing as a radar_error 500.
+        throw new Error('the handoff module exposes no spawnSession primitive');
+      }
+      return h.spawnSession(args);
+    },
   });
 
   // ---- lifecycle ------------------------------------------------------------------------------
@@ -527,8 +544,8 @@ function createRadar(opts) {
         // VERBATIM, exactly like routeHandoffCall. radar/dispatch.js already answers the right code
         // for every refusal — 503 dispatch_disabled while the switch is off, 403 authority_refused,
         // 409 for not_leader / cluster_busy / target_mismatch / no_surface, 404 for an unknown
-        // workRef, 501 when no spawn is wired — and a mapping layer here would be a second copy of
-        // that table, free to drift from the one the module's own tests pin.
+        // workRef, 502 when the spawn itself fails — and a mapping layer here would be a second copy
+        // of that table, free to drift from the one the module's own tests pin.
         const out = await dispatcher.dispatch(b);
         return sendJson(res, out.status, out.payload);
       }

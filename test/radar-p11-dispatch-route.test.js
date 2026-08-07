@@ -357,15 +357,21 @@ test('an unroutable machine is a refusal, not an exception escaping as a 500', a
   assert.notStrictEqual(res.json.error, 'radar_error', 'a bridge this server cannot resolve is an answer, not a fault');
 });
 
-// ---- the honest gap ---------------------------------------------------------------------------------
+// ---- the spawn arm -----------------------------------------------------------------------------------
 
-test('with nothing eligible the route answers 501 spawn_unavailable — this build mounts the resume arm and says so', async () => {
-  // p6 owns the only session spawn in this repository and it exists only at the end of
-  // preview -> commit. There is no spawn({workRef, seed}) primitive to wire here, and inventing a
-  // second way to start a session would compete with the one whose recovery path is tested. The
-  // dispatcher's own code for "no spawn implementation wired" is what a caller gets.
+test('with nothing eligible the route reaches the SPAWN arm, and refuses on its own terms rather than 501', async () => {
+  // This used to answer 501 spawn_unavailable, because p6 owned the only session spawn in the
+  // repository and it lived in the middle of commit(). That spawn is now an extracted primitive
+  // (radar/handoff.js spawnSession) and radar-server.js wires the dep to it — so the arm is REACHED.
+  // What it does once reached is radar-p11-spawn.test.js's subject; the assertion here is only that
+  // nothing answers "no spawn implementation wired" any more.
+  //
+  // This fixture has no polyrepoRoot and no claudeBin on disk, so the preflight refuses the launch:
+  // 502 spawn_failed, the dispatcher's documented code for a spawn that threw.
   const { res, bridge } = await dispatchWith({ collector: { getState: async () => STATE([]) } });
-  assert.strictEqual(res.status, 501);
-  assert.strictEqual(res.json.error, 'spawn_unavailable');
+  assert.notStrictEqual(res.status, 501, 'the dep is wired; 501 spawn_unavailable is now unreachable');
+  assert.notStrictEqual(res.json.error, 'spawn_unavailable');
+  assert.strictEqual(res.status, 502);
+  assert.strictEqual(res.json.error, 'spawn_failed');
   assert.deepStrictEqual(bridge.calls, [], 'nothing was injected on the way to that answer');
 });

@@ -108,10 +108,38 @@ const home = () => process.env.HOME || os.homedir();
 
 const iso = (ms) => new Date(ms).toISOString();
 
-// h-<UTC yyyymmdd-hhmm>-<previewId.slice(0,6)> (§6.3)
-function mintHandoffId(nowMs, previewId) {
+// h-<UTC yyyymmdd-hhmm>-<previewId.slice(0,6)> (§6.3). `prefix` defaults to p6's `h`; the p11
+// dispatch arm mints `d-…` from the same rule so the two kinds of session cannot be mistaken for
+// each other in a directory listing while still sorting together by time.
+function mintHandoffId(nowMs, previewId, prefix) {
   const d = iso(nowMs);
-  return `h-${d.slice(0, 10).replace(/-/g, '')}-${d.slice(11, 16).replace(':', '')}-${previewId.slice(0, 6)}`;
+  return `${prefix || 'h'}-${d.slice(0, 10).replace(/-/g, '')}-${d.slice(11, 16).replace(':', '')}-${previewId.slice(0, 6)}`;
+}
+
+// §6.3 + §M2 — the LAUNCH SURFACE: the three paths a session writes through and the argv the binary
+// is actually called with. ONE derivation, folded into preview()'s plan and minted directly by
+// spawnSession() for a caller that never had a preview. Two copies would be two answers to where a
+// transcript lands and what the CLI is invoked with, and the transcript path is the confirmation
+// signal the whole §M2 lifecycle is pinned to.
+function launchShape(o) {
+  return {
+    seedPath: path.join(o.handoffsDir, `${o.handoffId}.md`),
+    logPath: path.join(o.handoffsDir, `${o.handoffId}.log`),
+    transcriptPath: path.join(home(), '.claude', 'projects', slugifyPath(o.workdir), `${o.sessionUuid}.jsonl`),
+    argv: ['--remote-control', '-n', o.windowName, '--session-id', o.sessionUuid, o.seedText],
+  };
+}
+
+// §8.1 — radar launches with the CLI's DEFAULT permission mode, and that is load-bearing: it is the
+// guardrail that gates the dangerous END of an unattended run. Read off the argv the adapter is
+// CALLED WITH, never from source text (§9 trap 10), so a caller reporting `default` is reporting an
+// observation of the command line rather than a belief about the configuration.
+function permissionModeOfArgv(argv) {
+  const a = Array.isArray(argv) ? argv : [];
+  if (a.includes('--dangerously-skip-permissions')) return 'bypassPermissions';
+  const i = a.indexOf('--permission-mode');
+  if (i >= 0 && typeof a[i + 1] === 'string' && a[i + 1]) return a[i + 1];
+  return 'default';
 }
 
 // §M2's one capture shape: /bin/ps -axww -o pid=,ppid=,lstart=,command=. `ppid` is not optional —
@@ -692,21 +720,25 @@ function createHandoff(opts) {
     const previewId = crypto.randomUUID();
     const handoffId = mintHandoffId(t, previewId);
     const sessionUuid = crypto.randomUUID();
+    const windowName = `${handoffId}-${selectionSlug(selectors)}`;
+    // Paths and argv through the SHARED derivation; everything around them is the preview's own
+    // identity (the confirm sheet, the hash, the expiry) and belongs to p6 alone.
+    const launch = launchShape({ handoffsDir, handoffId, sessionUuid, workdir, windowName, seedText });
     const plan = {
       previewId,
       handoffId,
       sessionUuid,
-      windowName: `${handoffId}-${selectionSlug(selectors)}`,
+      windowName,
       machine: state.collectorId,
       selectors,
       factKeys: fk.factKeys,
       workdir,
       claudeBin,
       claudeVersion,
-      seedPath: path.join(handoffsDir, `${handoffId}.md`),
-      logPath: path.join(handoffsDir, `${handoffId}.log`),
-      transcriptPath: path.join(home(), '.claude', 'projects', slugifyPath(workdir), `${sessionUuid}.jsonl`),
-      argv: ['--remote-control', '-n', `${handoffId}-${selectionSlug(selectors)}`, '--session-id', sessionUuid, seedText],
+      seedPath: launch.seedPath,
+      logPath: launch.logPath,
+      transcriptPath: launch.transcriptPath,
+      argv: launch.argv,
       seedText,
       createdAt: iso(t),
       expiresAt: iso(t + previewTtlMs()),
@@ -730,6 +762,63 @@ function createHandoff(opts) {
     const envelope = { v: 1, plan, hash };
     await store.writeJsonAtomic(path.join(previewsDir, `${previewId}.json`), envelope);
     return { status: 200, body: envelope };
+  }
+
+  // ---- THE ONE LAUNCH RECIPE (§M2 step 6a) -------------------------------------------------------
+  // Everything that turns a plan into a RUNNING session process, and nothing else: the log fd radar
+  // opens for `script` to write, the /bin/bash -c WRAPPER call that scrubs the environment and
+  // carries the binary positionally, the detach, the async-error resolution for a child that never
+  // gets a pid, and the {pid, lstart} identity every liveness leg is later pinned to.
+  //
+  // It appends NOTHING and holds NO queue slot — its callers own the ledger, and a spawn that held
+  // the queue would block every other writer for the life of the launch.
+  //
+  // TWO CALLERS, ONE RECIPE: commit()'s confirm-gated press below, and spawnSession() (the p11
+  // dispatch spawn arm). A second copy of this anywhere would be a second way to start a session,
+  // competing with the one whose recovery path is tested — which is precisely why the dispatcher's
+  // `spawn` dep was left unwired until this function existed.
+  async function launchPlan(plan) {
+    let child = null;
+    let spawnError = null;
+    let fd;
+    try {
+      fd = fs.openSync(plan.logPath, 'a');    // the ONE store-only-writes exemption: `script`
+      try {                                   // writes the bytes, radar only creates the file
+        child = spawn('/bin/bash', ['-c', WRAPPER, 'bash', plan.claudeBin, ...plan.argv], {
+          cwd: plan.workdir, detached: true, stdio: ['ignore', fd, fd],
+        });
+      } finally {
+        // The child holds its own duplicate; Node does NOT close a synchronously-opened fd for
+        // the caller, and one leaked descriptor per dispatch is an unbounded leak (§M2).
+        try { fs.closeSync(fd); } catch (_) { /* already closed */ }
+      }
+      if (child && typeof child.unref === 'function') child.unref();
+    } catch (ex) { spawnError = ex; }
+
+    if (!spawnError && child && child.pid == null) {
+      // ENOENT-style failures surface on the async 'error' event with no pid ever assigned.
+      spawnError = await new Promise((resolve) => {
+        let settled = false;
+        const finish = (e) => { if (!settled) { settled = true; resolve(e); } };
+        if (typeof child.once === 'function') {
+          child.once('error', (e) => finish(e || new Error('spawn error')));
+          child.once('exit', () => finish(new Error('exited before a pid could be recorded')));
+        }
+        setTimeout(() => finish(new Error('no pid and no error event')), 2000);
+      });
+    }
+
+    // `error` is null when the adapter simply handed back no child: the caller's message table
+    // distinguishes the two, so nothing is invented here.
+    if (spawnError || !child || child.pid == null) return { ok: false, error: spawnError, child };
+
+    const pid = child.pid;
+    const lst = await execFileP('/bin/ps', ['-p', String(pid), '-o', 'lstart=']);
+    return {
+      ok: true, child, pid,
+      psStartedAt: (!lst.err && lst.stdout.trim()) ? lst.stdout.trim() : null,
+      permissionMode: permissionModeOfArgv(plan.argv),
+    };
   }
 
   // ---- commit (§M2) — three queue slots with two unqueued gaps ------------------------------------
@@ -862,38 +951,12 @@ function createHandoff(opts) {
       const entry = index.get(plan.handoffId);
 
       // ---- gap: 6a spawn. A spawn() must not hold the queue; the reservation is already durable,
-      // so nothing else can take these keys while we are out here.
-      let child = null;
-      let spawnError = null;
-      let fd;
-      try {
-        fd = fs.openSync(plan.logPath, 'a');    // the ONE store-only-writes exemption: `script`
-        try {                                   // writes the bytes, radar only creates the file
-          child = spawn('/bin/bash', ['-c', WRAPPER, 'bash', plan.claudeBin, ...plan.argv], {
-            cwd: plan.workdir, detached: true, stdio: ['ignore', fd, fd],
-          });
-        } finally {
-          // The child holds its own duplicate; Node does NOT close a synchronously-opened fd for
-          // the caller, and one leaked descriptor per dispatch is an unbounded leak (§M2).
-          try { fs.closeSync(fd); } catch (_) { /* already closed */ }
-        }
-        if (child && typeof child.unref === 'function') child.unref();
-      } catch (ex) { spawnError = ex; }
+      // so nothing else can take these keys while we are out here. The recipe is launchPlan(),
+      // shared verbatim with the p11 dispatch spawn arm — there is one way to start a session.
+      const launched = await launchPlan(plan);
 
-      if (!spawnError && child && child.pid == null) {
-        // ENOENT-style failures surface on the async 'error' event with no pid ever assigned.
-        spawnError = await new Promise((resolve) => {
-          let settled = false;
-          const finish = (e) => { if (!settled) { settled = true; resolve(e); } };
-          if (typeof child.once === 'function') {
-            child.once('error', (e) => finish(e || new Error('spawn error')));
-            child.once('exit', () => finish(new Error('exited before a pid could be recorded')));
-          }
-          setTimeout(() => finish(new Error('no pid and no error event')), 2000);
-        });
-      }
-
-      if (spawnError || !child || child.pid == null) {
+      if (!launched.ok) {
+        const spawnError = launched.error;
         return await store.enqueue(async () => {
           const body = { error: 'spawn_failed', message: ERROR_MESSAGES.spawn_failed, incidentId: incident('spawn_failed', { detail: String((spawnError && spawnError.message) || spawnError || 'no child') }), logPath: plan.logPath };
           try {
@@ -907,9 +970,8 @@ function createHandoff(opts) {
         });
       }
 
-      const pid = child.pid;
-      const lst = await execFileP('/bin/ps', ['-p', String(pid), '-o', 'lstart=']);
-      const psStartedAt = (!lst.err && lst.stdout.trim()) ? lst.stdout.trim() : null;
+      const pid = launched.pid;
+      const psStartedAt = launched.psStartedAt;
 
       // ---- slot B: the process record, immediately after the pid exists --------------------------
       const slotB = await store.enqueue(async () => {
@@ -976,6 +1038,91 @@ function createHandoff(opts) {
     } finally {
       if (mine) executing.delete(key);
     }
+  }
+
+  // ---- the p11 dispatch spawn arm (radar/dispatch.js's `spawn` dep) -------------------------------
+  // Contract, FROZEN by radar/dispatch.js: ({workRef, seed, runId}) -> {sessionId, machine,
+  // seedPath, permissionMode}, and a THROW is that module's documented 502 spawn_failed. Nothing
+  // here maps a status code: the dispatcher owns its response table and a second copy would drift.
+  //
+  // WHAT IT SHARES WITH THE p6 PRESS, because sharing it is the whole point: the preflight (a real
+  // workdir, a binary that answers --version, the seed byte cap), the FIRST TURN line every
+  // radar-launched session carries, the seed written byte-exact through the same TEXT primitive,
+  // the launch surface from launchShape(), and launchPlan() itself.
+  //
+  // WHAT IT DELIBERATELY DOES NOT SHARE — p6's ENVELOPE: no preview to confirm, no idempotency
+  // claim to settle, and NO RESERVATION, because §4.3's lock table is keyed by BOARD FACTS and a
+  // p11 work packet mints none. Inventing a fact key for a workRef urn would put a key into the
+  // table that keyStillMinted() can never find again, and the sweep would read that as
+  // `facts_cleared` — settling a running session `resolved` on its first sweep. So a
+  // dispatch-spawned session is NOT in the handoff ledger and NOT swept, and the server log below
+  // is its only trace. That gap is a reason `dispatch.enabled` stays false, not a reason to fake a
+  // reservation.
+  async function spawnSession(args) {
+    await refreshConfig();                 // request boundary, exactly like preview() and commit()
+    const a = args || {};
+    const seed = typeof a.seed === 'string' ? a.seed : '';
+    if (!seed.trim()) throw new Error('spawn refused: the work packet carries no seed text');
+
+    // Same workdir rule as preview(): ALWAYS polyrepoRoot, never a guessed path — every transcript
+    // lands in ONE project folder and the session cds itself.
+    const workdir = cfg('polyrepoRoot', null);
+    let workdirOk = false;
+    try { workdirOk = workdir != null && fs.statSync(workdir).isDirectory(); } catch (_) { workdirOk = false; }
+    if (!workdirOk) throw new Error(`spawn refused: polyrepoRoot is not a directory (${workdir == null ? 'unconfigured' : workdir})`);
+
+    const claudeBin = cfg('claudeBin', null) || path.join(home(), '.local', 'bin', 'claude');
+    try { fs.accessSync(claudeBin, fs.constants.X_OK); } catch (_) {
+      throw new Error(`spawn refused: ${ERROR_MESSAGES.claude_bin_missing} (${claudeBin})`);
+    }
+    const ver = await execFileP(claudeBin, ['--version'], { timeout: 15000 });
+    if (ver.err || !ver.stdout.trim()) {
+      throw new Error(`spawn refused: ${ERROR_MESSAGES.claude_bin_unusable} (${claudeBin})`);
+    }
+
+    // §6.8's first-turn restriction is a property of the LAUNCH, not of the press that asked for
+    // it: an unattended dispatch is exactly the case where "inspect and plan only, then ask" must
+    // still hold. The cap is measured on the bytes that will be DELIVERED, appended line included.
+    const seedText = seed + '\n' + FIRST_TURN_LINE;
+    if (Buffer.byteLength(seedText, 'utf8') > seedMaxBytes()) {
+      throw new Error(`spawn refused: ${ERROR_MESSAGES.seed_too_large} (limit ${seedMaxBytes()})`);
+    }
+
+    const t = now();
+    const sessionUuid = crypto.randomUUID();
+    const dispatchId = mintHandoffId(t, sessionUuid, 'd');
+    const urn = (a.workRef && typeof a.workRef.urn === 'string') ? a.workRef.urn : (a.runId || 'packet');
+    const windowName = `${dispatchId}-${selectionSlug([urn])}`;
+    const plan = Object.assign(
+      { handoffId: dispatchId, sessionUuid, windowName, machine: machineId(), workdir, claudeBin, seedText },
+      launchShape({ handoffsDir, handoffId: dispatchId, sessionUuid, workdir, windowName, seedText }),
+    );
+
+    // The seed exists BEFORE the process that reads it, through the same TEXT primitive commit()
+    // uses — writeJsonAtomic would quote the Markdown.
+    await store.writeTextAtomicUnqueued(plan.seedPath, plan.seedText);
+
+    const launched = await launchPlan(plan);
+    if (!launched.ok) {
+      const detail = String((launched.error && launched.error.message) || launched.error || 'no child');
+      throw new Error(`${ERROR_MESSAGES.spawn_failed} ${detail}`);
+    }
+    // The ledger holds nothing about this session (see above), so this line is the only durable
+    // record that a process was started and by which run.
+    log(`[radar] p11 dispatch spawn ${dispatchId} pid=${launched.pid} session=${sessionUuid} run=${a.runId || 'unknown'} work=${urn}`);
+    return {
+      sessionId: sessionUuid,
+      machine: plan.machine,
+      seedPath: plan.seedPath,
+      permissionMode: launched.permissionMode,
+      // Beyond the frozen contract, and inert to it: what a caller needs to actually find the
+      // session it just started.
+      dispatchId,
+      logPath: plan.logPath,
+      transcriptPath: plan.transcriptPath,
+      pid: launched.pid,
+      psStartedAt: launched.psStartedAt,
+    };
   }
 
   // SIGTERM -> poll every 250ms for discardKillMs -> SIGKILL -> poll again. Identity is re-checked
@@ -1421,7 +1568,12 @@ function createHandoff(opts) {
     adopt: pressWrapped('adopt'),
     discard: pressWrapped('discard'),
     get, sweep, recoverAtStartup, publish, suppressedKeys,
+    // The p11 dispatch spawn arm. Exported from HERE and not reimplemented anywhere, so the repo
+    // keeps exactly one launch recipe.
+    spawnSession,
   };
 }
 
+// Exactly three, pinned by the p6 module-contract test: the spawn primitive is reached through a
+// createHandoff instance, never as a second module-level entry point.
 module.exports = { SAFETY_NOTICE, ERROR_MESSAGES, createHandoff };
