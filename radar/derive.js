@@ -530,6 +530,54 @@ function suppressAttention(attention, covered, stateLite) {
   return out;
 }
 
+// ---- session identity enrichment (p11 S-005) ---------------------------------------------------
+//
+// WHY A SESSION NEEDS A `branch` AT ALL. mod-sessions publishes `worktree` as the session's absolute
+// CWD PATH, and that is correct and stays: it is what a human reads and what the UI shows. But
+// eligibility joins a session against a WorkRef's `urn:work:git:<repo>/<branch>` links, and a path is
+// not a branch. Testing one against the other by string suffix — the shape that shipped — could never
+// match a real session at all, because an absolute path turns the needle into `//path/...`. The leg
+// looked implemented and was dead every time it ran in production.
+//
+// So identity is derived here instead, ONCE, from the join git already gave us: each
+// `repos[<id>].worktrees[]` record carries both `path` and `branch`. Longest prefix on a segment
+// boundary, the same rule mapCwd uses for repos, because a session's cwd is usually a directory
+// INSIDE its worktree and the main worktree's path is a prefix of every nested one. Exact equality
+// would resolve almost nothing; a bare `startsWith` would let `/repo/example-web-old` claim
+// `/repo/example-web` (p5 trap 8).
+//
+// NO WORKTREE RECORD, NO REPO, OR A DETACHED HEAD ⇒ `branch: null`, and the links leg of identity
+// then contributes NOTHING. There is deliberately no fallback to matching the path against branch
+// names: guessing is the wrong-target defect, not a feature.
+const trimSlash = (p) => String(p).replace(/\/+$/, '');
+
+function resolveSessionBranch(session, repos) {
+  if (!session || typeof session.repo !== 'string' || typeof session.worktree !== 'string') return null;
+  const repo = repos && repos[session.repo];
+  const worktrees = (repo && Array.isArray(repo.worktrees)) ? repo.worktrees : [];
+  const target = trimSlash(session.worktree);
+  if (!target) return null;
+  let best = null;
+  let bestLen = -1;
+  for (const w of worktrees) {
+    if (!w || typeof w.path !== 'string') continue;
+    const wp = trimSlash(w.path);
+    if (!wp) continue;
+    if (target !== wp && !target.startsWith(`${wp}/`)) continue;
+    if (wp.length > bestLen) { best = w; bestLen = wp.length; }
+  }
+  if (!best || typeof best.branch !== 'string' || !best.branch.trim()) return null;
+  return best.branch;
+}
+
+// Copies, never mutation: the fragment is the collector's, and a derivation that edited its input
+// would make a re-derive of the same fragment produce a different answer the second time.
+function enrichSessions(sessions, repos) {
+  return (Array.isArray(sessions) ? sessions : []).map((s) => (
+    s && typeof s === 'object' ? Object.assign({}, s, { branch: resolveSessionBranch(s, repos) }) : s
+  ));
+}
+
 // ---- entry ---------------------------------------------------------------------------------------
 
 function derive(input) {
@@ -580,7 +628,10 @@ function derive(input) {
   }
 
   const decisions = (Array.isArray(input.decisions) ? input.decisions : []).filter((d) => d && typeof d.id === 'string');
-  const sessions = Array.isArray(sessionsFragment.sessions) ? sessionsFragment.sessions : [];
+  // `branch` is added HERE, above every consumer, and it is PUBLISHED — dispatch.js re-resolves the
+  // route against the persisted snapshot, so an enrichment that existed only in this function would
+  // leave the identity leg dead on exactly the path that writes into a session.
+  const sessions = enrichSessions(sessionsFragment.sessions, repos);
 
   // THE SHIELD (spec §5.4). `sessions[]` now carries `vanished: true` rows — sessions still blocked
   // whose recorded tab has left the tree. They are PUBLISHED, because carry-forward is rebuilt from
@@ -761,7 +812,7 @@ function derive(input) {
 
 module.exports = {
   derive, assembleLadder, tally, buildEpic, buildAttention, epicFlag, flattenAttention,
-  suppressAttention, buildInbox,
+  suppressAttention, buildInbox, resolveSessionBranch, enrichSessions,
   LADDER_ORDER, ATTENTION_ORDER, ACTIVITY_SIGNALS, DANGLING_SIGNALS, DRIFT_SIGNALS,
   ORPHAN_GROUP_MIN, RECENT_COMMIT_MS, EPOCH, INBOX_VERDICTS, ANSWERABLE_NOTIFICATIONS,
 };
