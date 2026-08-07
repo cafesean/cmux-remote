@@ -296,16 +296,36 @@ Adding a machine is just another row. The repo ships only `config.example.json` 
 
 ## Running as a background service
 
-`start-cmux-remote.sh` submits both processes under `launchctl` (macOS) and logs to
-`~/Library/Logs/cmux-remote/`. It frees ports `8799`/`8080` first, so it doubles as a restart.
+The live instance does **not** run from the working tree. A deploy copies the tree to a release
+directory keyed by commit sha —
 
-```bash
-./start-cmux-remote.sh    # submit bridge + server via launchctl
-./stop-cmux-remote.sh     # remove both, free the ports, kill a matching cloudflared
+```
+~/Library/Application Support/cmux-remote/releases/<sha>     # + its own .env
+~/Library/Application Support/cmux-remote/CURRENT_RELEASE     # pointer to the live one
 ```
 
-Put your real values in `.env` before running these — the launchd jobs `cd` into the repo and both
-processes auto-load it.
+— and two per-user launchd agents (`<your-prefix>.cmux-remote.bridge` / `.server`) run `bridge.js`
+and `server.js` with `WorkingDirectory` set to that release. Logs go to
+`~/Library/Logs/cmux-remote/`.
+
+`scripts/cmux-remote-ctl.sh` is the only thing you should point at that deploy:
+
+```bash
+./scripts/cmux-remote-ctl.sh status            # release in play, pids, last exit, port listeners
+./scripts/cmux-remote-ctl.sh restart           # kickstart -k both agents, same release and .env
+./scripts/cmux-remote-ctl.sh stop              # bootout (KeepAlive relaunches anything merely killed)
+./scripts/cmux-remote-ctl.sh start             # bootstrap both plists again
+./scripts/cmux-remote-ctl.sh logs [--follow]   # tail both stderr logs
+```
+
+It resolves the agent label prefix from launchd, so no machine-specific identifier is committed
+here; override with `CMUX_REMOTE_LABEL_PREFIX`. It talks to launchd only — it never launches a
+process out of the working tree (a repo-cwd job has no `.env` and would take `8080`/`8799` from the
+release it displaced) and never kills by port (that is what used to take the live server down).
+`status` prints a `!!` line if an agent is running out of the working tree.
+
+To run the tree directly for development, start it in the foreground instead — `npm run server` and
+`npm run bridge`, with your own `.env` — and stop the deployed agents first so the ports are free.
 
 ---
 
@@ -419,7 +439,7 @@ unset, nothing under `radar/` is required, no timer is installed, no handler is 
 every `/api/radar/*` path 404s exactly as it did before radar existed.
 
 ```bash
-RADAR_ENABLED=1 node server.js          # or add RADAR_ENABLED=1 to .env, then ./start-cmux-remote.sh
+RADAR_ENABLED=1 node server.js          # or set RADAR_ENABLED=1 in the release .env, then restart
 ```
 
 | Method & path | Purpose |
@@ -446,7 +466,7 @@ the old process is still serving instead of after you have killed it:
 
 ```bash
 cd /path/to/cmux-remote
-node -c server.js && node -c radar-server.js && npm test && ./start-cmux-remote.sh
+node -c server.js && node -c radar-server.js && npm test && ./scripts/cmux-remote-ctl.sh restart
 ```
 
 **Rollback is unsetting one variable.** Remove `RADAR_ENABLED` from `.env` (or the environment) and
@@ -519,8 +539,7 @@ cmux-remote/
 │   ├── icon-180.png       # Home-Screen icon
 │   └── vendor/            # committed client libs (marked, DOMPurify, highlight.js) — no npm install
 ├── test/                  # node:test units (fs jail, pane layout) + Playwright smokes (phone, multi-pane)
-├── start-cmux-remote.sh   # launchctl submit both processes (doubles as restart)
-├── stop-cmux-remote.sh    # stop both, free ports
+├── scripts/               # ops + harnesses: cmux-remote-ctl.sh (launchd control), eval/browser runs
 ├── config.example.json    # placeholder machine registry
 ├── .env.example           # every env var, placeholders only
 └── LICENSE                # MIT

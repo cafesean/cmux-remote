@@ -7,7 +7,7 @@
 //   PLAYWRIGHT_DIR=/path/to/node_modules/playwright/index.mjs node test/p4-files-smoke.mjs
 //
 // (ESM ignores NODE_PATH, which is why this is an explicit path rather than a bare import.)
-// The server must be up: ./start-cmux-remote.sh
+// The server must be up: ./scripts/cmux-remote-ctl.sh status (restart if it is not)
 //
 // The XSS assertion is the one that matters. It writes a fixture markdown file into a browsable
 // root, opens it through the real UI, and asserts the payload did not execute. Verified by
