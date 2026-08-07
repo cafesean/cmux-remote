@@ -61,6 +61,11 @@ const DEFAULTS = {
   // built-in tool definitions from the prompt entirely, where the fixed tool ban only forbids
   // calling them.
   classifierFlags: null,
+  // ---- p11 operator. These are normalized here because config.js is an
+  // explicit whitelist; missing keys would otherwise be silently dropped.
+  resume: { minIdleSec: 90, maxIdleHours: 24, requireSurface: true },
+  // Deliberately off: dispatch requires an explicit real boolean to enable.
+  dispatch: { enabled: false, authorityTokenRef: 'RADAR_OPERATOR_TOKEN' },
 };
 
 // §5.2.5. `claude --help`: "Effort level for the current session (low, medium, high, xhigh, max)".
@@ -89,6 +94,7 @@ const str = (v, dflt) => (typeof v === 'string' && v.trim() ? v.trim() : dflt);
 const strList = (v, dflt) => (Array.isArray(v)
   ? v.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
   : (Array.isArray(dflt) ? dflt.slice() : null));
+const bool = (v, dflt) => (typeof v === 'boolean' ? v : dflt);
 
 // Every early return hands out its own copy of the mutable defaults; a caller that pushes onto
 // `config.classifierFlags` must not be editing DEFAULTS for the rest of the process.
@@ -96,6 +102,8 @@ const defaultConfig = () => Object.assign({}, DEFAULTS, {
   timeouts: Object.assign({}, DEFAULTS.timeouts),
   repos: DEFAULTS.repos.slice(),
   classifierFlags: Array.isArray(DEFAULTS.classifierFlags) ? DEFAULTS.classifierFlags.slice() : DEFAULTS.classifierFlags,
+  resume: Object.assign({}, DEFAULTS.resume),
+  dispatch: Object.assign({}, DEFAULTS.dispatch),
 });
 
 // Only the shape P1 consumes is validated hard. `deploy` is carried through untouched for S-005;
@@ -156,6 +164,8 @@ function normalizeConfig(raw) {
   }
 
   const t = isObj(raw.timeouts) ? raw.timeouts : {};
+  const rz = isObj(raw.resume) ? raw.resume : {};
+  const dp = isObj(raw.dispatch) ? raw.dispatch : {};
   const config = {
     configVersion: CONFIG_VERSION,
     role,
@@ -198,6 +208,15 @@ function normalizeConfig(raw) {
     classifierModel: str(raw.classifierModel, DEFAULTS.classifierModel),
     classifierEffort: effort,
     classifierFlags: strList(raw.classifierFlags, DEFAULTS.classifierFlags),
+    resume: {
+      minIdleSec: num(rz.minIdleSec, DEFAULTS.resume.minIdleSec, 0, 86400),
+      maxIdleHours: num(rz.maxIdleHours, DEFAULTS.resume.maxIdleHours, 1, 720),
+      requireSurface: bool(rz.requireSurface, DEFAULTS.resume.requireSurface),
+    },
+    dispatch: {
+      enabled: bool(dp.enabled, DEFAULTS.dispatch.enabled),
+      authorityTokenRef: str(dp.authorityTokenRef, DEFAULTS.dispatch.authorityTokenRef),
+    },
   };
 
   if (config.role === 'viewer' && !config.leaderBaseUrl) issues.push('role=viewer but leaderBaseUrl is unset');
