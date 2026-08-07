@@ -219,6 +219,18 @@ function createCollector(opts) {
       }
     }
 
+    // p11: the Agile side channel is NOT a MODULES name, so every path that skips mod-jira — the
+    // 60 s session sweep's `only` filter, an unimplemented module, a hard throw — fell out of the
+    // loop with `fragments.jiraAgile` unset and no `sources.jiraAgile` at all. derive() then
+    // rebuilt workRefs from zero items and the source badge vanished: the sweep destroyed, once a
+    // minute, exactly the data `fragmentsFromState` reconstructs. Observed live: a full scan
+    // published 261 workRefs and the next sweep published 0. Same rule as the skipped modules:
+    // keep the fragment AND the previous source metadata, because we did not re-observe it.
+    if (!fragments.jiraAgile) fragments.jiraAgile = carried.jiraAgile;
+    if (!sources.jiraAgile && prev && prev.sources && prev.sources.jiraAgile) {
+      sources.jiraAgile = prev.sources.jiraAgile;
+    }
+
     // p6: the handoff module is the server's, not the collector's (principle 8 — one writer), so
     // its published view arrives through runOpts rather than being constructed here. Without this
     // line derive() always sees handoffs: [] and suppression is inert: every dispatched row stays
