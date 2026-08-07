@@ -1,0 +1,14 @@
+{
+  "phase": "p11-operator",
+  "scope": "radar-half",
+  "tests": { "baseline": 975, "afterP11": 1063, "failures": 0 },
+  "cliProof": {
+    "radarWork": { "workRefs": 3, "selectable": 2, "rendersNativeStatus": true, "rendersCanonicalStatus": true, "foldedByDefault": true },
+    "radarRoute": { "resolvedRoutes": 1, "nullRoutesWithReason": 1, "unknownUrnExitCode": 2 }
+  },
+  "routeOutcomes": { "resume": 1, "spawn": 1, "refused": 1 },
+  "refusalReasons": ["cluster-running", "cluster-blocked", "wrong-cluster", "no-surface"],
+  "dispatchGate": { "operatorEnabled": false, "operatorRefusalStatus": 503, "clusterBusyStatus": 409, "targetMismatchStatus": 409 },
+  "liveDispatchProof": "blocked",
+  "liveDispatchBlockedBy": "E-001 two-leader topology"
+}

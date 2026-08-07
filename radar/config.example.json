@@ -16,7 +16,19 @@
   ],
 
   "_comment_jira": "OPTIONAL (mod-jira, S-008). Omit the block entirely and sources.jira reports `disabled`. tokenRef NAMES an env var holding a Jira Data Center personal access token; the value is never stored here. Two JQL queries run per scan: open epics in `projects`, and the status of every epic key git already knows about regardless of status — the second is what makes Jira-Done-but-git-live drift detectable.",
-  "jira": { "baseUrl": "https://jira.example.com", "tokenRef": "JIRA_API_TOKEN", "projects": ["PROJ", "ALPHA", "BETA"] },
+  "_comment_jira_agile": "OPTIONAL (p11 S-003). `agile.enabled` turns on the Agile REST intake (boards, active/future sprints, board issues) that emits WorkRefs; it is OFF by default and the two JQL queries above are unaffected either way. An Agile failure degrades `sources.jiraAgile` on its own and never takes epic drift detection down with it. `maxIssuesPerScan` bounds one scan's issue intake; the remainder is reported in `sources.jiraAgile.pending`, never silently dropped.",
+  "jira": {
+    "baseUrl": "https://jira.example.com",
+    "tokenRef": "JIRA_API_TOKEN",
+    "projects": ["PROJ", "ALPHA", "BETA"],
+    "agile": { "enabled": false, "maxIssuesPerScan": 500 }
+  },
+
+  "_comment_resume": "OPTIONAL (p11 S-005). Bounds on which idle session may be RESUMED rather than replaced by a fresh spawn. `minIdleSec` is the anti-race wait after a turn ends. `maxIdleHours` is the point past which a cold session is not worth reviving. `requireSurface` keeps a session with no resolvable tab ineligible — guessing a tab lands work in a stranger's session, so leave it true.",
+  "resume": { "minIdleSec": 90, "maxIdleHours": 24, "requireSurface": true },
+
+  "_comment_dispatch": "OPTIONAL (p11 S-006) — THE AUTONOMY SWITCH, and it is OFF unless this says otherwise in a real JSON boolean (the string \"true\" does NOT enable it). With `enabled: false` the dispatch route answers 503 and only the human-pressed, confirm-gated handoff path works. `authorityTokenRef` NAMES the env var holding the operator's token; the value is never stored here.",
+  "dispatch": { "enabled": false, "authorityTokenRef": "RADAR_OPERATOR_TOKEN" },
 
   "_comment_specs": "OPTIONAL (mod-specs, S-009). `{}` is enough and takes the default root. Scans <root>/*/_specs/p*/ , skipping symlinks. A folder is `draft`; a specs.md carrying a GO verdict is `done`. story_list.json statuses are never read — they demonstrably lie.",
   "specs": { "root": "/Users/you/Docs/_context" },
