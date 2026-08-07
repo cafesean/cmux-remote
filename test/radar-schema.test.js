@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { validate } = require('../radar/schema-lite');
 const { createCollector } = require('../radar/collector');
+const { mapCwd } = require('../radar/mod-sessions');
 const { buildFixtureRepo } = require('./helpers/git-fixture');
 
 const schema = require('../radar/state.schema.json');
@@ -98,6 +99,129 @@ test('the schema is LOAD-BEARING: plausible corruptions are rejected', () => {
   assert.strictEqual(mutate((s) => { s.repos['app-web'].branches[0].unpushed = '3'; }).valid, false, 'unpushed is a count or null, never a string');
   assert.strictEqual(mutate((s) => { s.attention[0] = { type: 'blocked', actions: [] }; }).valid, false, 'a blocked item without a sessionKey');
   assert.strictEqual(mutate((s) => { s.machines[0].bridge = 'maybe'; }).valid, false);
+});
+
+// ---- fixture provenance (p11 D11) ---------------------------------------------------------------
+//
+// state.full.json carried a session with repo:'app-web' and worktree:null — a pair mapCwd CANNOT
+// emit. It returns the all-null triple or {repo, worktree, epic} with the cwd path in `worktree`;
+// there is no branch that sets one without the other. That drift is exactly how a dead links-matching
+// leg survived a green suite: the resolver's links match reads `session.worktree`, and a fixture
+// where the field is permanently null exercises the refusal path forever while looking like coverage.
+//
+// So the guard does not restate the invariant, it EXECUTES the real publisher: the fixture's own
+// repos[] become mapCwd's config, and the row must be exactly what mapCwd returns for its own cwd.
+
+// The two reachable shapes, named so a failure says which one was expected.
+const isAllNull = (s) => s.repo == null && s.worktree == null && s.epic == null;
+const isMapped = (s) => typeof s.repo === 'string' && s.repo !== '' && typeof s.worktree === 'string' && s.worktree.startsWith('/');
+
+// mapCwd resolves the epic through mod-git's branch mapper, with the path tail playing the branch's
+// role. A fixture epic that no issue-key spells out is reachable via an alias, so synthesize the one
+// an operator would have configured; an issue-key tail wins before aliases are consulted anyway.
+const aliasesFor = (s) => (s.epic == null ? {} : { epics: { [s.epic]: [path.basename(s.worktree || '')] } });
+const configFor = (state) => ({ repos: Object.keys(state.repos || {}).map((id) => ({ id, path: state.repos[id].path })) });
+
+for (const name of FIXTURES) {
+  test(`PROVENANCE: every session in ${name} is a shape mapCwd can actually emit`, () => {
+    const state = load(name);
+    const config = configFor(state);
+    for (const s of state.sessions) {
+      const where = `${name} session ${s.key.sessionId}`;
+      assert.ok(isAllNull(s) || isMapped(s), `${where}: neither all-null nor repo+absolute-worktree — mapCwd emits no third shape`);
+      if (isAllNull(s)) continue;
+
+      // The real mapper, on the row's own cwd, must reproduce the row's own identity fields.
+      const produced = mapCwd(s.worktree, config, aliasesFor(s));
+      assert.deepStrictEqual(
+        { repo: produced.repo, worktree: produced.worktree, epic: produced.epic },
+        { repo: s.repo, worktree: s.worktree, epic: s.epic == null ? null : s.epic },
+        `${where}: mapCwd cannot produce this row from its own worktree path`,
+      );
+
+      // …and the worktree must be one the fixture's own repos[] actually records, so a session
+      // cannot sit in a worktree that does not exist in the snapshot that carries it.
+      const known = (state.repos[s.repo].worktrees || []).map((w) => w.path);
+      assert.ok(known.indexOf(s.worktree) !== -1, `${where}: worktree ${s.worktree} is in no repos['${s.repo}'].worktrees[]`);
+      if (s.branch !== undefined && s.branch !== null) {
+        const wt = (state.repos[s.repo].worktrees || []).find((w) => w.path === s.worktree);
+        assert.strictEqual(s.branch, wt.branch, `${where}: branch disagrees with the worktree record it names`);
+      }
+    }
+  });
+}
+
+test('the PROVENANCE guard is LOAD-BEARING: the exact D11 drift is rejected', () => {
+  const state = load('state.full.json');
+  const config = configFor(state);
+  const s = JSON.parse(JSON.stringify(state.sessions[0]));
+
+  // The shape that was actually committed: a repo with no worktree.
+  s.worktree = null;
+  assert.strictEqual(isAllNull(s) || isMapped(s), false, 'repo set with worktree null must fail the shape gate');
+
+  // A worktree that no repo contains falls out of mapCwd as the all-null triple, so it can never
+  // reproduce a row claiming a repo.
+  const stray = JSON.parse(JSON.stringify(state.sessions[0]));
+  stray.worktree = '/somewhere/else/entirely';
+  const produced = mapCwd(stray.worktree, config, aliasesFor(stray));
+  assert.deepStrictEqual(produced, { repo: null, worktree: null, epic: null });
+  assert.notStrictEqual(produced.repo, stray.repo, 'a cwd outside every configured repo cannot yield a repo');
+
+  // p5 trap 8 still holds at the boundary the resolver depends on: a sibling path that merely SHARES
+  // a prefix is not inside the repo.
+  assert.strictEqual(mapCwd(state.repos['app-web'].path + '-old', config, {}).repo, null);
+});
+
+test('the session def is CLOSED (p11 D10): the resolver fields are declared and a typo cannot hide', () => {
+  const base = load('state.full.json');
+  const mutate = (fn) => { const c = JSON.parse(JSON.stringify(base)); fn(c); return validate(schema, c); };
+
+  // The fields the resume resolver reads are now part of the contract, at their real types.
+  assert.strictEqual(mutate((s) => { s.sessions[0].lastEventAt = 12345; }).valid, false, 'lastEventAt is an ISO string or null, never a number');
+  assert.strictEqual(mutate((s) => { s.sessions[0].lastSubmitAt = 12345; }).valid, false);
+  assert.strictEqual(mutate((s) => { s.sessions[0].worktree = 42; }).valid, false, 'worktree is a path string or null');
+  assert.strictEqual(mutate((s) => { s.sessions[0].branch = 42; }).valid, false);
+
+  // The whole point of closing the def: before this, every one of these typos validated clean while
+  // the resolver silently read undefined and refused the session forever.
+  for (const typo of ['lastEventAtt', 'lastsubmitAt', 'worktee', 'branchName', 'epicc']) {
+    assert.strictEqual(mutate((s) => { s.sessions[0][typo] = 'x'; }).valid, false, `typo "${typo}" must be rejected`);
+  }
+
+  // Still additive: a pre-p11 row that carries none of the new fields remains valid.
+  assert.strictEqual(mutate((s) => {
+    for (const k of ['worktree', 'branch', 'lastEventAt', 'lastSubmitAt', 'lastStopAt', 'stale', 'observedAt', 'transcriptPath', 'blockedSince']) delete s.sessions[0][k];
+  }).valid, true, 'every new field is OPTIONAL');
+});
+
+test('the closed session def accepts everything a publisher can actually emit', () => {
+  const base = load('state.full.json');
+  const c = JSON.parse(JSON.stringify(base));
+  // Every field from mod-sessions' publish site, the events-outage carry-forward (stale), the
+  // vanished bit, and the three the classify stage attaches in place before derive publishes the
+  // same array as state.sessions.
+  Object.assign(c.sessions[0], {
+    transcriptPath: null,
+    lastStopAt: '2026-07-30T13:46:52.000Z',
+    stale: true,
+    observedAt: '2026-07-30T14:32:11.000Z',
+    vanished: true,
+    lastAssistant: { text: 'May I write to /repo/app-web?', ts: '2026-07-30T14:17:10.000Z' },
+    sessionTitle: { text: 'search index rollout', source: 'custom' },
+    intent: { verdict: 'needs-decision', reason: 'asks for approval', model: 'test-model', at: '2026-07-30T14:17:12.000Z', inferred: true },
+  });
+  assert.deepStrictEqual(validate(schema, c).errors, [], 'a closed def must not reject its own publisher');
+
+  // offer-more and status-only are real session verdicts — buildInbox filters them, the schema does not.
+  for (const verdict of ['offer-more', 'status-only', 'unknown']) {
+    const v = JSON.parse(JSON.stringify(c));
+    v.sessions[0].intent.verdict = verdict;
+    assert.deepStrictEqual(validate(schema, v).errors, [], `${verdict} is a legal session verdict`);
+  }
+  const bad = JSON.parse(JSON.stringify(c));
+  bad.sessions[0].intent.verdict = 'probably';
+  assert.strictEqual(validate(schema, bad).valid, false, 'but the verdict vocabulary is still fixed');
 });
 
 test('a snapshot derived from REAL repos validates against the schema', async () => {

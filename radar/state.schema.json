@@ -279,6 +279,8 @@
     },
     "session": {
       "type": "object",
+      "description": "CLOSED (p11 D10). The def previously declared 9 of the 22 fields a publisher can emit and left the door open, so the two idle bounds and the identity the resume resolver reads — worktree, lastEventAt, lastSubmitAt — were undeclared AND a typo in any of them was unfalsifiable. Closing it is only safe because every reachable publisher field is now declared; the three publishers are mod-sessions' publish site (the row literal, plus `vanished` when true, plus the events-outage carry-forward which re-emits published rows with stale:true), classify's in-place mutation of that same array between the module loop and derive (collector.js §5.2.6 — derive publishes the fragment array verbatim as state.sessions, so lastAssistant/sessionTitle/intent ride along), and derive's own `branch` enrichment. Fields stay OPTIONAL — `required` is still just key+status — so a pre-p11 snapshot still validates.",
+      "additionalProperties": false,
       "required": ["key", "status"],
       "properties": {
         "key": {
@@ -289,10 +291,67 @@
         "status": { "enum": ["running", "idle", "blocked"], "description": "idle = live, never finished." },
         "epic": { "$ref": "#/$defs/nullableString" },
         "repo": { "$ref": "#/$defs/nullableString" },
-        "surface": { "type": ["object", "null"] },
+        "worktree": {
+          "$ref": "#/$defs/nullableString",
+          "description": "p11 D10: the session's ABSOLUTE cwd path, as mapCwd resolved it (mod-sessions ~209 returns `target`, an absolute trimmed cwd — never a branch name and never a relative tail). Identity is NOT matched on this field: links-matching reads the derived `branch`, and the old worktree-specificity tie-break is deleted (D8). Non-null ONLY when `repo` is non-null: mapCwd returns all-null or {repo, worktree, epic} together, so repo-set-with-worktree-null is unreachable and a fixture carrying it is drift (D11)."
+        },
+        "branch": {
+          "$ref": "#/$defs/nullableString",
+          "description": "p11: the git branch checked out at `worktree`, joined at derive time from the repo's worktree records. Null when the session has no worktree, when no worktree record matches the path, or when that worktree is on a detached HEAD."
+        },
+        "lastEventAt": {
+          "$ref": "#/$defs/nullableString",
+          "description": "p11 D10: ISO timestamp of the newest hook event for this session. The resume resolver's idle clock is measured from HERE (eligibility.js :: idleMsOf), and a session with no parseable value is refused as `no-clock` rather than treated as fresh — no clock means freshness cannot be proven."
+        },
+        "lastSubmitAt": {
+          "$ref": "#/$defs/nullableString",
+          "description": "p11 D10: ISO timestamp of the last UserPromptSubmit. The resume tie-break sorts on it, newest first (eligibility.js :: tieBreak), so a non-deterministic value here would make a wrong-target incident unreproducible. Also the basis for cacheExpiresAt."
+        },
+        "lastStopAt": {
+          "$ref": "#/$defs/nullableString",
+          "description": "When this session's turn last ENDED — the moment it started waiting. Projected onto inbox rows so a queue of waiting sessions can be ordered."
+        },
+        "blockedSince": {
+          "$ref": "#/$defs/nullableString",
+          "description": "ISO timestamp the session began waiting on the operator; null unless status is blocked. Half of the turn-identity token a reply must echo."
+        },
         "notificationType": { "$ref": "#/$defs/nullableString" },
+        "transcriptPath": {
+          "$ref": "#/$defs/nullableString",
+          "description": "Secondary identity (latest event wins), never primary — identity is {machine, sessionId}. Null when no event carried one."
+        },
+        "surface": { "type": ["object", "null"] },
         "cacheExpiresAt": { "$ref": "#/$defs/nullableString" },
         "cacheApprox": { "type": "boolean" },
+        "stale": {
+          "type": "boolean",
+          "description": "This row was carried forward from the last good sweep rather than re-observed (the events-outage branch). Re-deriving from nothing would clear every block on the machine, which would read as \"the operator answered everything\"."
+        },
+        "observedAt": { "$ref": "#/$defs/nullableString" },
+        "vanished": {
+          "type": "boolean",
+          "description": "The session is still blocked but its recorded tab has left the tree. Present ONLY when true, so a consumer that never heard of it sees the row it always saw. Published (carry-forward is rebuilt from published rows) but shielded: every p5 derivation reads liveSessions, and only buildInbox reads the full list — a closed tab removes the Jump, it does not answer the prompt."
+        },
+        "lastAssistant": {
+          "type": ["object", "null"],
+          "description": "Attached in place by the classify stage for blocked rows: {text, ts} of the last assistant turn, or null. The inbox projects it into `question`/`turn.assistantTs`; it is declared here because derive publishes the classifier's own array verbatim."
+        },
+        "sessionTitle": {
+          "type": ["object", "null"],
+          "description": "Attached in place by the classify stage: {text, source} where source is custom (an explicit rename — authoritative) or ai (the automatic titler), or null. Projected onto inbox rows as title/titleSource."
+        },
+        "intent": {
+          "type": ["object", "null"],
+          "description": "Attached in place by the classify stage for blocked rows. WIDER than inboxItem.intent on purpose: offer-more and status-only are real verdicts here and are filtered out by buildInbox, so the queue only ever shows the two that reach it.",
+          "required": ["verdict"],
+          "properties": {
+            "verdict": { "enum": ["needs-decision", "offer-more", "status-only", "unknown"] },
+            "reason": { "$ref": "#/$defs/nullableString" },
+            "model": { "$ref": "#/$defs/nullableString", "description": "null on every unknown path; a successful verdict must never write that null." },
+            "at": { "type": "string" },
+            "inferred": { "const": true }
+          }
+        },
         "surfaceReason": {
           "$ref": "#/$defs/nullableString",
           "description": "Why the surface join produced null, from a fixed vocabulary (no-cwd, shared-cwd, no-workspace-for-cwd, ambiguous-workspace, no-terminal-tab, ambiguous-tabs:<n>, no-tab-uuid, tree-unavailable, recorded-tab-gone). Null when a surface WAS resolved — including the exact case, where the session recorded its own cmux surface id and the tree confirmed it."

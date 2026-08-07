@@ -455,15 +455,19 @@
         "tabUuid": "f2b0a1c4-0000-4000-8000-000000000001"
       },
       "repo": "app-web",
-      "worktree": null,
+      "worktree": "/path/to/workspace/app-web/.claude/worktrees/searchindex",
+      "branch": "feature/PROJ-108-searchindex",
       "epic": "PROJ-108",
       "status": "blocked",
       "blockedSince": "2026-07-30T14:17:11.000Z",
       "notificationType": "permission_prompt",
+      "lastStopAt": "2026-07-30T13:46:52.000Z",
       "lastSubmitAt": "2026-07-30T13:47:11.000Z",
       "lastEventAt": "2026-07-30T14:17:11.000Z",
       "cacheExpiresAt": "2026-07-30T14:47:11.000Z",
-      "cacheApprox": true
+      "cacheApprox": true,
+      "stale": false,
+      "observedAt": "2026-07-30T14:32:11.000Z"
     }
   ],
   "attention": [
