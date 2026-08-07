@@ -289,3 +289,45 @@ test('fragmentsFromState rebuilds every module slice, including deploy nested un
   assert.deepStrictEqual(f.sessions.sessions, [{ id: 's' }]);
   assert.deepStrictEqual(fragmentsFromState(null).git.repos, {});
 });
+
+test('the 60s sweep carries workRefs AND sources.jiraAgile forward — a sweep may not destroy what it did not observe', async () => {
+  const dir = await tmp();
+  await seedConfig(dir);
+  const agileAt = '2026-07-30T10:00:00.000Z';
+  let jiraRuns = 0;
+  const jira = async () => {
+    jiraRuns++;
+    return {
+      fragment: { epics: {}, drift: [] },
+      source: { status: 'ok', observedAt: agileAt },
+      agile: {
+        items: [{
+          source: 'jira', sourceId: 'PROJ-9', sourceUrl: 'https://jira.example.com/browse/PROJ-9',
+          kind: 'issue', title: 'a real row', nativeStatus: 'In Progress', nativeCategory: 'indeterminate',
+          assignee: null, updatedAt: agileAt, description: null, epicKey: 'PROJ-1',
+          board: null, sprint: null, connector: 'mod-jira',
+        }],
+        source: { status: 'ok', observedAt: agileAt, boards: 1, pending: 0 },
+        pending: 0,
+      },
+      warnings: [],
+    };
+  };
+  const c = createCollector({ radarDir: dir, modules: { git: okModule('x'), jira } });
+
+  const full = await c.scan();
+  assert.strictEqual(jiraRuns, 1);
+  assert.strictEqual(full.state.counts.workRefs, 1, 'the full scan published the ref');
+  assert.strictEqual(full.state.sources.jiraAgile.status, 'ok');
+
+  // The session sweep: mod-jira is skipped. Before the fix this published counts.workRefs 0 and no
+  // sources.jiraAgile key at all — data loss under a green board, once a minute.
+  const sweep = await c.scan({ only: ['sessions'], fetch: false });
+  assert.strictEqual(jiraRuns, 1, 'the sweep must not run mod-jira');
+  assert.strictEqual(sweep.state.counts.workRefs, 1, 'the sweep carries the ref forward');
+  assert.strictEqual(sweep.state.workRefs[0].urn, 'urn:work:jira:PROJ-9');
+  assert.ok(sweep.state.sources.jiraAgile, 'the source badge survives the sweep');
+  assert.strictEqual(sweep.state.sources.jiraAgile.observedAt, agileAt,
+    'carried metadata keeps its original observedAt — we did not re-observe it');
+  c.stop();
+});
