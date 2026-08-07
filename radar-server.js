@@ -27,8 +27,10 @@ const { readLastAssistantText } = require('./radar/classify');
 // The one prompt-detection implementation in this repository. Gate 3 classifies a pane by importing
 // it, never by re-deriving it — a private heuristic here would drift from the one the UI shows.
 const { paneKind } = require('./public/menuparse.js');
-// P11 dispatch delegates to the existing handoff path; its gate remains off
-// until a runtime config explicitly enables it.
+// p11 S-006. The dispatch mechanism and, above all, its refusals. Every decision it makes — the
+// authority gate, the leader gate, the eligibility re-check, the whole error table — is ITS, and the
+// route below is wiring plus a verbatim relay. The operator arm stays off until a config on disk
+// sets dispatch.enabled, which nothing in this phase does.
 const { createDispatcher } = require('./radar/dispatch');
 
 const BODY_CAP = 16 * 1024;            // spec §7
@@ -319,6 +321,83 @@ function createRadar(opts) {
   // safe direction.
   const handoffPublish = () => (handoff ? handoff.publish() : null);
 
+  // ---- p11 dispatch (spec S-006) ---------------------------------------------------------------
+  // radar/dispatch.js owns every judgment; this is five deps and nothing else. A copy of any of its
+  // rules here would be a second answer to "may this dispatch happen?", and the one that runs at
+  // dispatch time is the only one that can enforce "never two writers".
+  //
+  // Every dep is a CLOSURE THAT RE-READS AT CALL TIME, never a captured value. The §8.1 switch only
+  // means something if flipping `dispatch.enabled` on disk takes effect without a restart, and the
+  // server-side eligibility re-check only means something against the CURRENT snapshot — a config
+  // or a state read hoisted to construction time would quietly restore the stale-snapshot race the
+  // re-check exists to close.
+  const radarConfig = async () => ((typeof paths.config === 'string' && paths.config)
+    ? (await loadConfig(paths.config, nowMs())).config
+    : normalizeConfig(null).config);
+
+  // The injection transport: the SAME bridge resolution and the SAME /cmux/send contract the p9
+  // reply route uses (§5.5 steps 3 and 8), through the same injectable http so the suite stays
+  // offline. It carries no expect_seq — that precondition guards a pane a human is watching, while a
+  // dispatch is gated by eligibility: an idle session on a cluster the re-check proved free. This
+  // function decides nothing about whether to send; it sends, and reports what the bridge said.
+  async function dispatchSend(args) {
+    const a = args || {};
+    const cfg = await radarConfig();
+    // The RAW file through the EXPORTED normalizeBridges, exactly as the reply route does it: the
+    // v1 config schema does not model bridges, so the normalized config carries none at all.
+    const rawCfg = (typeof paths.config === 'string' && paths.config)
+      ? (await store.readJson(paths.config, null)).value
+      : null;
+    const bridges = sessions.normalizeBridges(rawCfg, cfg.collectorId || os.hostname(), []);
+    const bridge = bridges.find((x) => x.id === a.machine) || null;
+    if (!bridge) return { ok: false, error: 'unknown_machine' };
+    const secret = bridge.secretRef ? (env[bridge.secretRef] || '') : '';
+    // The deadline is the ROUTE's, on a controller it created — an injected transport then times out
+    // exactly like the real one instead of ignoring the clock.
+    const ctl = new AbortController();
+    const timer = timers.setTimeout(() => ctl.abort(), SEND_TIMEOUT_MS);
+    try {
+      const r = await bridgeHttp(`${bridge.baseUrl}/cmux/send`, {
+        method: 'POST',
+        headers: secret ? { 'x-bridge-secret': secret } : {},
+        body: JSON.stringify({ surface: a.surface, text: a.text, submit: a.submit === true }),
+        signal: ctl.signal,
+        timeoutMs: SEND_TIMEOUT_MS,
+      });
+      // Only the bridge's own {ok:true} is a send. A 4xx, a non-JSON body, a 200 that does not say
+      // so — each is a failure the dispatcher records and falls back from, never a silent success.
+      if (r && r.ok && r.json && r.json.ok === true) return { ok: true };
+      return { ok: false, error: (r && r.json && r.json.error) || `bridge status ${(r && r.status) || 0}` };
+    } catch (e) {
+      // A thrown transport is evidence, not a crash: same shape, so the dispatcher has one rule.
+      return { ok: false, error: (e && e.message) || String(e) };
+    } finally {
+      timers.clearTimeout(timer);
+    }
+  }
+
+  const dispatcher = (o.createDispatcher || createDispatcher)({
+    config: radarConfig,
+    readState: () => collector.getState(),
+    now: nowMs,
+    // The config names the env var; the ENVIRONMENT holds the value (radar/config.js — an
+    // authorityTokenRef never carries a secret). A config file that leaks therefore tells a reader
+    // which variable to want and nothing more.
+    authorityToken: async () => {
+      const cfg = await radarConfig();
+      const ref = cfg.dispatch && cfg.dispatch.authorityTokenRef;
+      return ref ? (env[ref] || null) : null;
+    },
+    bridgeSend: dispatchSend,
+    // `spawn` IS DELIBERATELY NOT WIRED, and the dispatcher's own 501 spawn_unavailable is the
+    // honest answer for it. p6 owns the only session spawn in this repository and it exists only at
+    // the end of preview -> commit, which is what makes the seed file, the durable reservation and
+    // the stop-capture wrapper exist; there is no spawn({workRef, seed}) to hand over. A second
+    // implementation here would be a second way to start a session, competing with the one whose
+    // recovery path is tested. So this route surfaces the resume arm, and says so when asked for
+    // the other.
+  });
+
   // ---- lifecycle ------------------------------------------------------------------------------
   // start()/stop() are the ENTIRE rollback mechanism. stop() clears the collector's single
   // setInterval; with RADAR_ENABLED unset start() is never called, so there is no timer to clear.
@@ -433,6 +512,25 @@ function createRadar(opts) {
       if (req.method === 'GET' && hid) {
         if (await viewerRefusal(res)) return;
         return await routeHandoffCall(res, (h) => h.get(decodeURIComponent(hid[1])));
+      }
+
+      // ----- p11 dispatch (spec S-006) — ONE route, mounted here with the p6 five so it inherits
+      // the same three gates rather than restating them: authed() from server.js, the token-in-url
+      // refusal above, and the §7 16 KB body cap through p6Body. A dispatch from a VIEWER is refused
+      // for the same reason a handoff is (§3) and one gate earlier than the dispatcher's own
+      // not_leader: a viewer would inject into its own machine's pane against a route computed from
+      // the leader's snapshot, so it is stopped before the body is read.
+      if (req.method === 'POST' && p === '/api/radar/dispatch') {
+        if (await viewerRefusal(res)) return;
+        const b = await p6Body(req, res);
+        if (b === null) return;
+        // VERBATIM, exactly like routeHandoffCall. radar/dispatch.js already answers the right code
+        // for every refusal — 503 dispatch_disabled while the switch is off, 403 authority_refused,
+        // 409 for not_leader / cluster_busy / target_mismatch / no_surface, 404 for an unknown
+        // workRef, 501 when no spawn is wired — and a mapping layer here would be a second copy of
+        // that table, free to drift from the one the module's own tests pin.
+        const out = await dispatcher.dispatch(b);
+        return sendJson(res, out.status, out.payload);
       }
       // GET /api/radar/scan lands here on purpose: a force-scan is a mutation, so it is POST-only
       // and must not be reachable from a link, a prefetch, or an <img src>.
