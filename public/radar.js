@@ -23,6 +23,10 @@
   'use strict';
 
   var QUEUE_MAX = 4;                       // mockup-v2 limit is canonical
+  // p11: rows inside the OPEN work-refs fold before the "+K more" expander. Smaller than the real
+  // list by a wide margin on purpose — a tracker publishes hundreds of refs and the fold's job is to
+  // show the head of the list, not to become a second board.
+  var REFS_MAX = 6;
   var POLL_MS = 60000;                     // spec §7: one fetch of our OWN server every 60s
   var STALE_MULT = 2;                      // snapshot-age badge fires past 2x the scan cadence
   var CHIP_MS = 9000;                      // how long an inline failure chip stays up
@@ -241,6 +245,36 @@
     '  text-align:left;cursor:pointer;font:inherit}',
     '#radar .wt.dirty-toggle .caret{color:var(--rdim);font-family:var(--rmono);flex:none}',
 
+    // p11 work refs. The status pair is NEUTRAL, deliberately: a tracker status is neither an action
+    // nor an emergency, and §7's two-colour law spends green and red on nothing else. The only
+    // emphasis is the fold count, which reuses .n like every other fold.
+    '#radar .refs{display:flex;flex-direction:column;gap:8px}',
+    '#radar .wr{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;',
+    '  border:none;border-top:1px solid var(--rline);padding:8px 14px 8px 22px;cursor:pointer;',
+    '  font:inherit;color:var(--rink)}',
+    '#radar .wr .caret{color:var(--rdim);font-family:var(--rmono);flex:none}',
+    '#radar .wr .k{font-family:var(--rmono);font-size:12px;color:var(--rink);flex:none;width:118px;',
+    '  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '#radar .wr .ti{font-family:var(--rsans);font-size:13px;color:var(--rmuted);flex:1 1 80px;min-width:0;',
+    '  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '#radar .wr .st{flex:none;font-family:var(--rmono);font-size:11.5px;color:var(--rink)}',
+    '#radar .wr .st .nat{color:var(--rdim)}',
+    '#radar .wr .kd{flex:none;font-family:var(--rmono);font-size:11px;color:var(--rdim)}',
+    '#radar .wr .rt{flex:none;font-family:var(--rmono);font-size:11px;color:var(--rmuted);max-width:34%;',
+    '  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '#radar .wr-detail{padding:2px 14px 12px 40px;border-top:1px dotted var(--rline)}',
+    '#radar .wr-detail dl{margin:0;font-size:12px}',
+    '#radar .wr-detail dt{color:var(--rdim);margin-top:6px}',
+    '#radar .wr-detail dd{margin:2px 0 0;color:var(--rink);font-family:var(--rmono);font-size:11.5px;',
+    '  overflow-wrap:anywhere}',
+    '#radar .wr-detail a{color:var(--rink)}',
+    '#radar .rfilt{display:flex;flex-wrap:wrap;gap:6px;padding:9px 14px 3px 22px;border-top:1px solid var(--rline)}',
+    '#radar .rfilt button{background:none;border:1px solid var(--rline);color:var(--rdim);',
+    '  border-radius:6px;padding:2px 9px;font:11px var(--rmono);cursor:pointer}',
+    '#radar .rfilt button.on{border-color:#d7e2ee59;color:var(--rink)}',
+    '#radar .rfilt .sep{align-self:center;color:var(--rdim);font:11px var(--rmono)}',
+    '#radar .fold-open .q-more{margin:8px 0 12px 22px}',
+
     // p6 select mode + confirm sheet + recovery (spec §7.2). Checkboxes exist ONLY in select mode;
     // the resting board renders none of this.
     '#radar .selbtn{flex:none;background:none;border:1px solid var(--rline);color:var(--rdim);',
@@ -331,8 +365,12 @@
     nowZone.style.cssText = 'display:flex;flex-direction:column;gap:10px';
     var queueZone = el('section', 'queue');
     var foldsZone = el('div', 'folds');
+    // p11 work refs get their OWN zone, below the folds: they are a roster of tracker work, not an
+    // interrupt, and a zone of their own is what lets renderFolds keep its rebuild discipline
+    // untouched while this section is rebuilt on the same pass.
+    var refsZone = el('section', 'refs');
     var selBar = el('div', 'selbar');
-    surface.append(head, badges, recoverZone, nowZone, queueZone, foldsZone, selBar);
+    surface.append(head, badges, recoverZone, nowZone, queueZone, foldsZone, refsZone, selBar);
     var pop = el('div', 'rpop'); pop.hidden = true;
     var sheetHost = el('div');
     pane.append(surface, pop, sheetHost);
@@ -351,7 +389,11 @@
     // meant 44 epic rows dumped onto the resting screen the moment the tab opened — the exact
     // "scan everything" clutter the v2 mockup was approved to kill. The board's job is to answer
     // "what needs me", and a moving epic by definition does not: it is moving.
-    var folds = { moving: false, parked: false, worktrees: false, queue: false, dirty: false, drift: false };
+    // `refs` (the p11 section) and `refsMore` (its "+K more" expander) join the same rule: closed,
+    // like everything else, until the operator asks. A tracker roster is the largest list the board
+    // can carry, so it is the last one that may open itself.
+    var folds = { moving: false, parked: false, worktrees: false, queue: false, dirty: false, drift: false,
+      refs: false, refsMore: false };
     try {
       var saved = JSON.parse(localStorage.getItem(LS_FOLDS) || 'null');
       if (saved && typeof saved === 'object') {
@@ -370,6 +412,12 @@
     // Which orphan groups are open. Deliberately NOT persisted: expanding 131 spec folders is an
     // act of triage you perform now, not a preference you want restored tomorrow morning.
     var expanded = {};
+    // p11: the work-refs filters and per-row detail, not persisted for the same reason — narrowing
+    // to one kind, or opening one ref's links, is this morning's triage, not a standing preference.
+    // Keyed on the urn so both survive a re-render and a re-fetch, exactly as itemKey() does for
+    // attention rows: the array index would not.
+    var refFilter = { scope: 'selectable', kind: null };
+    var refExpanded = {};
 
     // ---- p6 state -------------------------------------------------------------------------------
     // A selection is COMPOSED, never presented (spec §2): sel.on is entered deliberately, and the
@@ -1538,6 +1586,201 @@
       }
     }
 
+    // ---- p11 work refs (state.workRefs, spec §4.1) ----------------------------------------------
+    //
+    // READ-ONLY BY DECISION, not by omission. `dispatch.enabled` is false estate-wide and the
+    // authority layer is unbuilt, so a control here could produce nothing but a refusal — and an
+    // affordance whose only outcome is a refusal is itself a chore (the same reason §3 renders no
+    // select button on a viewer). This section renders what /api/radar/state already carries and
+    // posts nothing at all.
+    //
+    // EVERY FIELD EXCEPT urn/source/sourceId/status/cluster IS OPTIONAL in state.schema.json, which
+    // says in as many words that a consumer assuming presence is the defect rather than the snapshot
+    // that omits it. So every read below is defensive, and that is not politeness: render() catches
+    // one throw for the WHOLE board, so a single absent Jira field would cost the queue and the folds
+    // their paint, not just this row.
+
+    function allRefs() {
+      return (snapshot && Array.isArray(snapshot.workRefs)) ? snapshot.workRefs : [];
+    }
+    // urn is the identity; the source pair is the fallback for a hand-made or older record. Never an
+    // index — refExpanded has to survive the next fetch.
+    function refKey(w) {
+      if (!w) return '?';
+      return w.urn || ((w.source || '?') + ':' + (w.sourceId || '?'));
+    }
+    // What you would paste back into the tracker, which is the sourceId when there is one.
+    function refLabel(w) { return String(w.sourceId || w.urn || '?'); }
+    function refKinds(list) {
+      var seen = {}, out = [];
+      list.forEach(function (w) {
+        var k = w && w.kind;
+        if (k && !seen[k]) { seen[k] = true; out.push(k); }
+      });
+      return out.sort();
+    }
+    function refsMatching(list) {
+      return list.filter(function (w) {
+        if (refFilter.scope === 'selectable' && !w.selectable) return false;
+        if (refFilter.kind && w.kind !== refFilter.kind) return false;
+        return true;
+      });
+    }
+
+    // BOTH statuses, side by side and in that order. `canonical` is radar's PROJECTION and `native`
+    // is the source's own word, which is the authority (radar/workref.js says so at more length).
+    // Rendering only the projection would hide the disagreement the projection exists to report:
+    // radar's `unknown` sitting next to Jira's `Done` IS the contested case, not a gap in the data.
+    function refStatusCell(w) {
+      var st = w.status || {};
+      var cell = el('span', 'st', st.canonical || 'unknown');
+      if (st.native) cell.append(el('span', 'nat', ' · ' + st.native));
+      return cell;
+    }
+    // `route: null` is UNRESOLVED. A route object whose `kind` is null is a different fact — the
+    // cluster gate refused it, and the reason names which gate. Both must read as themselves.
+    function refRouteCell(w) {
+      var r = w.route;
+      if (!r) return el('span', 'rt', 'route unresolved');
+      var word = r.kind || 'no route';
+      // Reasons are the fixed vocabulary radar/eligibility.js mints (`cluster-running`,
+      // `idle 612s · epic PROJ-108`). VERBATIM: rewording them here would mint a second vocabulary
+      // for one fact, and the reason is the entire answer to "why can't this resume?".
+      return el('span', 'rt', r.reason ? word + ' — ' + r.reason : word);
+    }
+
+    function refRow(w) {
+      var k = refKey(w);
+      var openNow = !!refExpanded[k];
+      // A button, like the dirty-worktree toggle, so the detail opens from the keyboard too. NOT a
+      // selRow: p11 refs carry no §6.1 selector, so select mode ignores them entirely.
+      var row = el('button', 'wr');
+      row.type = 'button';
+      row.dataset.urn = k;
+      row.dataset.role = 'workref';
+      row.setAttribute('aria-expanded', openNow ? 'true' : 'false');
+      row.append(el('span', 'caret', openNow ? '▾' : '▸'));
+      row.append(el('span', 'k', refLabel(w)));
+      if (w.title) row.append(el('span', 'ti', w.title));
+      row.append(refStatusCell(w));
+      if (w.kind) row.append(el('span', 'kd', w.kind));
+      row.append(refRouteCell(w));
+      row.onclick = function () { refExpanded[k] = !refExpanded[k]; render(); };
+      return row;
+    }
+
+    // board and sprint arrive as { urn, name } from mod-jira; a snapshot carrying a bare string is
+    // read the same way rather than printed as [object Object].
+    function refContext(v) {
+      if (!v) return null;
+      if (typeof v === 'string') return v;
+      return v.name || v.urn || null;
+    }
+    function refDetail(w) {
+      var box = el('div', 'wr-detail');
+      // defList drops every empty pair, so an absent field costs a line rather than a render.
+      box.append(defList([
+        ['urn', w.urn], ['cluster', w.cluster],
+        ['board', refContext(w.board)], ['sprint', refContext(w.sprint)],
+        ['assignee', w.assignee], ['updated', w.updatedAt],
+      ]));
+      var links = Array.isArray(w.links) ? w.links : [];
+      if (links.length) {
+        // ONE dd per link. Joined into a single string they render as one run-on line, and the link
+        // list is the one place here where a reader counts the entries.
+        var dl = el('dl');
+        dl.append(el('dt', null, 'links'));
+        links.forEach(function (u) { dl.append(el('dd', null, String(u))); });
+        box.append(dl);
+      }
+      if (w.sourceUrl) {
+        var dl2 = el('dl');
+        dl2.append(el('dt', null, 'source'));
+        var dd = el('dd');
+        var a = el('a', null, w.sourceUrl);
+        a.setAttribute('href', w.sourceUrl);
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noreferrer noopener');
+        dd.append(a);
+        dl2.append(dd);
+        box.append(dl2);
+      }
+      return box;
+    }
+
+    function refFilterBtn(label, on, pick) {
+      var b = el('button', on ? 'on' : null, label);
+      b.type = 'button';
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      b.onclick = function () { pick(); render(); };
+      return b;
+    }
+    function refFilterBar(list) {
+      var bar = el('div', 'rfilt');
+      bar.append(refFilterBtn('selectable', refFilter.scope === 'selectable', function () { refFilter.scope = 'selectable'; }));
+      bar.append(refFilterBtn('all', refFilter.scope === 'all', function () { refFilter.scope = 'all'; }));
+      var kinds = refKinds(list);
+      // A control with ONE option filters nothing, and a row of them is exactly the clutter the v2
+      // mockup was approved for removing. The kind row appears once there is a choice to make.
+      if (kinds.length > 1) {
+        bar.append(el('span', 'sep', '·'));
+        bar.append(refFilterBtn('any kind', !refFilter.kind, function () { refFilter.kind = null; }));
+        kinds.forEach(function (k) {
+          bar.append(refFilterBtn(k, refFilter.kind === k, function () { refFilter.kind = k; }));
+        });
+      }
+      return bar;
+    }
+
+    function renderRefs() {
+      clear(refsZone);
+      if (!snapshot) return;
+      var list = allRefs();
+      // No refs at all — a pre-p11 collector, or an estate with no tracker configured — renders
+      // NOTHING. A permanent "0 refs" line is a row that can never become actionable, which is the
+      // one thing the resting screen is built to keep off the board.
+      if (!list.length) return;
+
+      var counts = snapshot.counts || {};
+      // The counts are the SOURCE LIST's, never the filtered or folded view's (state.schema.json:
+      // "counted from the source list"). Array lengths are the fallback for a snapshot whose counts
+      // predate p11 — the two agree today, and the schema's wording is what keeps them agreeing if a
+      // producer ever publishes a truncated array.
+      var total = typeof counts.workRefs === 'number' ? counts.workRefs : list.length;
+      var selectableCount = typeof counts.workRefsSelectable === 'number'
+        ? counts.workRefsSelectable
+        : list.filter(function (w) { return !!w.selectable; }).length;
+
+      var shown = refsMatching(list);
+      var peek = shown.slice(0, 3).map(refLabel).join(' · ');
+      refsZone.appendChild(foldSection('refs', '⌗', 'refs · ' + selectableCount + ' selectable',
+        total, peek, function (wrap) {
+          wrap.appendChild(refFilterBar(list));
+          if (!shown.length) {
+            wrap.appendChild(el('div', 'q-empty', refFilter.scope === 'selectable'
+              ? 'nothing here a session could act on'
+              : 'no refs of that kind'));
+            return;
+          }
+          // Server order is kept: buildWorkRefs sorts by urn, so the head of this list is the same
+          // head on every scan and a row does not move under a finger between renders.
+          var cut = folds.refsMore ? shown : shown.slice(0, REFS_MAX);
+          cut.forEach(function (w) {
+            wrap.appendChild(refRow(w));
+            if (refExpanded[refKey(w)]) wrap.appendChild(refDetail(w));
+          });
+          if (shown.length > REFS_MAX) {
+            var more = el('button', 'q-more', folds.refsMore
+              ? '− collapse'
+              : '+' + (shown.length - REFS_MAX) + ' more');
+            more.type = 'button';
+            more.dataset.role = 'refs-more';
+            more.onclick = function () { folds.refsMore = !folds.refsMore; saveFolds(); render(); };
+            wrap.appendChild(more);
+          }
+        }));
+    }
+
     function render() {
       var t = now();
       try {
@@ -1548,6 +1791,7 @@
         renderHero(t);
         renderQueue(t);
         renderFolds(t);
+        renderRefs();
         renderSelBar();
         renderSheet();
       } catch (e) {
