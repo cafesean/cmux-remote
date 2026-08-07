@@ -359,24 +359,84 @@ async function agileGet(pathAndQuery, ctx) {
   return { body: r.body || {} };
 }
 
-// Paged list helper. `values` is the Agile API's envelope key throughout, and `isLast` is its
-// end-of-pages signal; an empty page also stops the loop, for the same reason searchAll does it.
+// Paged list helper. THE AGILE API HAS TWO ENVELOPES, NOT ONE, and assuming otherwise is a silent
+// total loss rather than a partial one:
+//
+//   /board and /board/{id}/sprint   → { values: [...], isLast: bool }
+//   /board/{id}/issue               → { issues: [...], total: n, startAt, maxResults }
+//
+// The issue endpoint never sends `values` and never sends `isLast` — live-probed against a Jira Data
+// Center instance, whose 200 carried exactly expand,startAt,maxResults,total,issues,warningMessages,
+// names,schema. Reading only `values` therefore intook ZERO issues on every scan while every call
+// succeeded, which is the worst shape a bug can take: nothing to see in the status, nothing on the
+// board.
+//
+// So the helper reads whichever envelope arrived, and returns the `total` the server claimed so the
+// caller can check its rows against it — a count is the only thing that can catch this class again.
 async function agileList(pathBase, ctx, cap) {
   const out = [];
   let startAt = 0;
+  let total = null;
   for (let page = 0; page < MAX_AGILE_PAGES; page++) {
     const sep = pathBase.includes('?') ? '&' : '?';
     const r = await agileGet(`${pathBase}${sep}startAt=${startAt}&maxResults=${AGILE_PAGE}`, ctx);
-    if (r.error) return { error: r.error, items: out };
-    const values = Array.isArray(r.body.values) ? r.body.values : [];
-    for (const v of values) {
-      if (cap != null && out.length >= cap) return { items: out, truncated: true };
+    if (r.error) return { error: r.error, items: out, total };
+    const rows = Array.isArray(r.body.values) ? r.body.values
+      : Array.isArray(r.body.issues) ? r.body.issues
+        : [];
+    const t = Number(r.body.total);
+    if (Number.isFinite(t)) total = t;
+    for (const v of rows) {
+      if (cap != null && out.length >= cap) return { items: out, total, truncated: true };
       out.push(v);
     }
-    if (values.length === 0 || r.body.isLast === true) break;
-    startAt += values.length;
+    // Three stops, because the two envelopes end differently: `isLast` is the /board and /sprint
+    // signal, `startAt >= total` is the issue endpoint's (it has no isLast at all), and an EMPTY
+    // PAGE stops both — including a server that keeps claiming a total it never delivers, which
+    // would otherwise spin this loop to MAX_AGILE_PAGES on every scan.
+    if (rows.length === 0 || r.body.isLast === true) break;
+    startAt += rows.length;
+    if (Number.isFinite(t) && startAt >= t) break;
   }
-  return { items: out };
+  return { items: out, total };
+}
+
+// The board list, SCOPED BY THE SERVER whenever an allowlist exists.
+//
+// `/board` is INSTANCE-WIDE, and on Jira Data Center it answers without the `location` block that
+// names a board's project — live-observed. Filtering that unscoped list client-side on
+// `b.location.projectKey` therefore cannot work: the arm that has to let a location-less board
+// through lets EVERY board through, and a two-project allowlist intook all 39 boards on the
+// instance. Scope has to be ASKED OF THE SERVER, which is what `projectKeyOrId` is for; a field the
+// response need not carry cannot be a filter.
+async function agileBoards(cfg, ctx) {
+  const projects = (cfg && Array.isArray(cfg.projects)) ? cfg.projects : [];
+  // No allowlist means there is no scope to apply, and the whole instance is the honest answer.
+  if (projects.length === 0) return agileList('board', ctx, null);
+
+  const byId = new Map();
+  const degraded = [];
+  let firstError = null;
+  for (const p of projects) {
+    const r = await agileList(`board?projectKeyOrId=${encodeURIComponent(p)}`, ctx, null);
+    // One project failing (an archived key, a permission gap) costs that project's boards and
+    // nothing else — the same per-board degradation rule the sprint fetch below follows.
+    if (r.error) {
+      if (!firstError) firstError = r.error;
+      degraded.push(`boards for project ${p} could not be listed (${r.error})`);
+      continue;
+    }
+    // One board can serve several projects, so the union dedupes by id instead of concatenating —
+    // otherwise a shared board is walked, and its issues intaken, once per project that shares it.
+    for (const b of r.items) {
+      const id = b && b.id != null ? String(b.id) : null;
+      if (id && !byId.has(id)) byId.set(id, b);
+    }
+  }
+  // EVERY project failing is not a partial loss, it is the board list being unavailable, and is
+  // reported exactly as an unscoped `/board` failure is rather than as an empty instance.
+  if (firstError && degraded.length === projects.length) return { error: firstError, items: [] };
+  return { items: Array.from(byId.values()), degraded };
 }
 
 // An Agile issue → the raw shape workref.buildWorkRefs consumes. Status mapping is by CATEGORY
@@ -412,16 +472,16 @@ async function collectAgile(cfg, ctx, observedAt) {
   const agile = (cfg && cfg.agile) || { enabled: false, maxIssuesPerScan: 500 };
   if (!agile.enabled) return { items: [], source: { status: 'disabled' }, pending: 0 };
 
-  const boardsR = await agileList('board', ctx, null);
+  const boardsR = await agileBoards(cfg, ctx);
   if (boardsR.error) return { items: [], source: { status: 'error', observedAt, error: boardsR.error }, pending: 0 };
-  const boards = boardsR.items;
+  const scopedBoards = boardsR.items;
 
   const items = [];
   let pending = 0;
-  const scopedBoards = boards.filter((b) => {
-    const key = b && b.location && typeof b.location.projectKey === 'string' ? b.location.projectKey : null;
-    return !key || !Array.isArray(cfg.projects) || cfg.projects.includes(key);
-  });
+  // Reasons this scan is less than complete, merged into ONE `error` string at the end. The
+  // published source object has a closed key set (state.schema.json), so a partial loss has to be
+  // said in the status and the reason — there is no field to hide it in, and hiding it is the bug.
+  const degraded = boardsR.degraded ? boardsR.degraded.slice() : [];
 
   for (const b of scopedBoards) {
     items.push({
@@ -453,6 +513,14 @@ async function collectAgile(cfg, ctx, observedAt) {
     if (budget <= 0) { pending += 1; continue; }
     const r = await agileList(`board/${encodeURIComponent(b.id)}/issue?fields=summary,status,issuetype,assignee,updated,epic`, ctx, budget);
     if (r.error) continue;
+    // ROWS OBSERVED, NEVER CALLS THAT RETURNED 200. A server reporting work while this code extracts
+    // none of it means the response was not read — the D1 envelope bug did exactly that on every
+    // board — and the one thing that must not happen then is a plain `ok`. "The call succeeded" is
+    // not "the rows arrived", and only counting the difference can tell them apart.
+    if (Number.isFinite(r.total) && r.total > 0 && r.items.length === 0) {
+      degraded.push(`board ${b.id} reports ${r.total} issue${r.total === 1 ? '' : 's'} but none could be read from the response`);
+      continue;
+    }
     const sprints = sprintByBoard.get(String(b.id)) || [];
     const activeSprint = sprints.find((s) => s && s.state === 'active') || null;
     for (const issue of r.items) {
@@ -466,9 +534,9 @@ async function collectAgile(cfg, ctx, observedAt) {
 
   return {
     items,
-    source: pending > 0
-      ? { status: 'ok', observedAt, boards: scopedBoards.length, pending }
-      : { status: 'ok', observedAt, boards: scopedBoards.length, pending: 0 },
+    source: degraded.length
+      ? { status: 'stale', observedAt, boards: scopedBoards.length, pending, error: `jira-agile: ${degraded.join('; ')}` }
+      : { status: 'ok', observedAt, boards: scopedBoards.length, pending },
     pending,
   };
 }
@@ -573,7 +641,7 @@ async function collectJira(opts) {
 module.exports = {
   collectJira,
   loadJiraConfig,
-  normalizeAgile, collectAgile, agileIssueToRaw, agileList, agileGet,
+  normalizeAgile, collectAgile, agileIssueToRaw, agileList, agileBoards, agileGet,
   openEpicsJql,
   keysJql,
   knownEpicKeys,
