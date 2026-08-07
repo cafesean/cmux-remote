@@ -40,6 +40,7 @@ const P11_FILES = [
   'test/radar-p11-jira-agile.test.js',
   'test/radar-p11-state-additive.test.js',
   'test/radar-p11-dispatch.test.js',
+  'test/radar-p11-dispatch-route.test.js',
   'test/radar-p11-privacy.test.js',
   'test/radar-p11-cli.test.js',
 ];
