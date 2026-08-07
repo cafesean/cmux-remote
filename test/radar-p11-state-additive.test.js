@@ -97,7 +97,9 @@ test('a route is resolved per WorkRef and carried on the snapshot', () => {
   const sessions = [{
     key: { machine: 'leader-1', sessionId: 'sess-a' },
     surface: { tabRef: 'surface:2' }, surfaceReason: null,
-    repo: 'example-web', worktree: 'feature/PROJ-1-thing', epic: 'PROJ-1',
+    // An ABSOLUTE cwd path, because that is the only thing mapCwd puts in `worktree` — a branch name
+    // here is the same drift radar-schema.test.js's provenance guard exists to catch.
+    repo: 'example-web', worktree: '/repo/example-web/.claude/worktrees/PROJ-1-thing', branch: 'feature/PROJ-1-thing', epic: 'PROJ-1',
     status: 'idle', lastEventAt: new Date(NOW - 600000).toISOString(), lastSubmitAt: new Date(NOW - 660000).toISOString(),
   }];
   const input = baseInput({
@@ -115,7 +117,7 @@ test('a RUNNING session on the cluster leaves route null on the published snapsh
   const sessions = [{
     key: { machine: 'leader-1', sessionId: 'sess-a' },
     surface: { tabRef: 'surface:2' }, surfaceReason: null,
-    repo: 'example-web', worktree: 'feature/PROJ-1-thing', epic: 'PROJ-1',
+    repo: 'example-web', worktree: '/repo/example-web/.claude/worktrees/PROJ-1-thing', branch: 'feature/PROJ-1-thing', epic: 'PROJ-1',
     status: 'running', lastEventAt: new Date(NOW - 1000).toISOString(), lastSubmitAt: new Date(NOW - 2000).toISOString(),
   }];
   const state = derive(baseInput({
@@ -127,4 +129,51 @@ test('a RUNNING session on the cluster leaves route null on the published snapsh
   assert.strictEqual(state.workRefs[0].route.kind, null, 'the cluster gate must survive the wiring');
   assert.strictEqual(state.workRefs[0].route.reason, 'cluster-running');
   assert.strictEqual(validateState(state).ok, true);
+});
+
+// p11 D10 — the session def declares what the RESOLVER reads, and is closed so a typo cannot pass.
+//
+// The additive rule is unchanged and is what these two tests hold together: the new fields are in
+// `properties`, absent from `required`, so a session row that predates p11 still validates while a
+// misspelling of any of them is now a hard failure instead of a silent forever-refusal.
+
+test('a session carrying the resolver-facing fields validates through derive', () => {
+  const sessions = [{
+    key: { machine: 'leader-1', sessionId: 'sess-a' },
+    surface: { tabRef: 'surface:2' }, surfaceReason: null,
+    repo: 'example-web', worktree: '/repo/example-web/.claude/worktrees/PROJ-1-thing',
+    branch: 'feature/PROJ-1-thing', epic: 'PROJ-1', status: 'idle',
+    lastEventAt: new Date(NOW - 600000).toISOString(),
+    lastSubmitAt: new Date(NOW - 660000).toISOString(),
+    lastStopAt: new Date(NOW - 620000).toISOString(),
+    transcriptPath: '/repo/transcripts/sess-a.jsonl', blockedSince: null,
+    stale: false, observedAt: new Date(NOW).toISOString(),
+  }];
+  const state = derive(baseInput({
+    fragments: Object.assign(baseInput().fragments, { sessions: { sessions, machines: [{ id: 'leader-1', bridge: 'ok', lastSeenAt: null }] } }),
+  }));
+  const v = validateState(state);
+  assert.strictEqual(v.ok, true, JSON.stringify(v.errors || []));
+  assert.strictEqual(state.sessions[0].worktree, '/repo/example-web/.claude/worktrees/PROJ-1-thing');
+});
+
+test('a pre-p11 session row — none of the new fields — is still valid, but a typo is not', () => {
+  const legacy = [{
+    key: { machine: 'leader-1', sessionId: 'sess-old' },
+    surface: null, surfaceReason: 'no-cwd', repo: null, epic: null, status: 'idle',
+    notificationType: null, cacheExpiresAt: null, cacheApprox: true,
+  }];
+  const build = (rows) => derive(baseInput({
+    fragments: Object.assign(baseInput().fragments, { sessions: { sessions: rows, machines: [{ id: 'leader-1', bridge: 'ok', lastSeenAt: null }] } }),
+  }));
+
+  assert.strictEqual(validateState(build(legacy)).ok, true, 'optional means optional');
+
+  // The D10 defect made concrete: before the def was closed, this validated clean while the resolver
+  // read `undefined` for the idle clock and refused the session on every scan, forever.
+  const typo = JSON.parse(JSON.stringify(legacy));
+  typo[0].lastEventAtt = new Date(NOW - 600000).toISOString();
+  const v = validateState(build(typo));
+  assert.strictEqual(v.ok, false, 'a misspelled resolver field must not validate');
+  assert.match(v.errors.join('\n'), /unexpected property "lastEventAtt"/);
 });
