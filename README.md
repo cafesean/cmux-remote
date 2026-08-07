@@ -324,6 +324,37 @@ process out of the working tree (a repo-cwd job has no `.env` and would take `80
 release it displaced) and never kills by port (that is what used to take the live server down).
 `status` prints a `!!` line if an agent is running out of the working tree.
 
+### Publishing a release
+
+```bash
+./scripts/cmux-remote-deploy.sh deploy            # HEAD -> releases/<sha12>, then activate it
+./scripts/cmux-remote-deploy.sh deploy <ref>      # any commit
+./scripts/cmux-remote-deploy.sh rollback          # back to PREVIOUS_RELEASE (itself undoable)
+./scripts/cmux-remote-deploy.sh list              # releases, newest first, LIVE / previous marked
+```
+
+A release is `git archive <ref>` exploded into `releases/<sha12>`, plus the `.env` carried forward
+from the release currently live (`--env <file>` to seed the first one). **Only tracked content at a
+commit can ship** — uncommitted work cannot leak into, or silently differ from, what is running, and
+a dirty worktree is refused outright (`--ignore-dirty` to override, having been told what will not
+ship). Re-exporting an existing release needs `--force`.
+
+The order is: export to a temp dir → `node -c` every entry point *inside the new release*, while the
+old one is still serving → rename into place → repoint both plists → flip `CURRENT_RELEASE` →
+`kickstart -k` → probe. **A failed probe rolls itself back** and leaves the bad release on disk for
+inspection. If the rollback target is unhealthy too, the script says the deploy is down rather than
+pretending otherwise. Old releases are pruned to `CMUX_REMOTE_KEEP` (default 5); the live release
+and the rollback target are never pruned.
+
+The probe is `GET http://127.0.0.1:8080/` by default. `CMUX_REMOTE_HEALTH_CMD` replaces it with any
+command (exit 0 = healthy) for when a bare GET is not a real answer; `CMUX_REMOTE_HEALTH_URL=`
+disables it.
+
+Both scripts share `scripts/lib/cmux-launchd.sh`, and every path, label and binary in it is
+overridable — which is how `test/release-deploy.test.js` exercises deploy, rollback, prune and the
+auto-rollback against a sandbox (temp support/agents dirs, a stub `launchctl`) instead of the real
+deploy.
+
 To run the tree directly for development, start it in the foreground instead — `npm run server` and
 `npm run bridge`, with your own `.env` — and stop the deployed agents first so the ports are free.
 
@@ -466,7 +497,7 @@ the old process is still serving instead of after you have killed it:
 
 ```bash
 cd /path/to/cmux-remote
-node -c server.js && node -c radar-server.js && npm test && ./scripts/cmux-remote-ctl.sh restart
+npm test && ./scripts/cmux-remote-deploy.sh deploy   # deploy syntax-gates the release itself
 ```
 
 **Rollback is unsetting one variable.** Remove `RADAR_ENABLED` from `.env` (or the environment) and

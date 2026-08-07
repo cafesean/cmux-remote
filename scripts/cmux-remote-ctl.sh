@@ -17,45 +17,23 @@
 #   * discovers the label prefix from launchd, so no personal identifier is
 #     committed here. Override with CMUX_REMOTE_LABEL_PREFIX.
 #
+# Publishing a new release is scripts/cmux-remote-deploy.sh, not this.
+#
 # Usage: scripts/cmux-remote-ctl.sh {status|restart|stop|start|logs} [--follow]
 set -euo pipefail
 
-SUPPORT="$HOME/Library/Application Support/cmux-remote"
-AGENTS="$HOME/Library/LaunchAgents"
-LOGDIR="$HOME/Library/Logs/cmux-remote"
-DOMAIN="gui/$(id -u)"
+PROG=cmux-remote-ctl
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-die() { printf 'cmux-remote-ctl: %s\n' "$1" >&2; exit 1; }
-
-# Explicit env wins; otherwise derive the prefix from the loaded agents.
-resolve_prefix() {
-  if [ -n "${CMUX_REMOTE_LABEL_PREFIX:-}" ]; then printf '%s' "$CMUX_REMOTE_LABEL_PREFIX"; return; fi
-  local found count
-  found=$(launchctl list \
-    | awk '$3 ~ /\.cmux-remote\.(bridge|server)$/ { sub(/\.(bridge|server)$/, "", $3); print $3 }' \
-    | sort -u)
-  [ -n "$found" ] || die "no cmux-remote agents loaded — set CMUX_REMOTE_LABEL_PREFIX=<prefix ending in .cmux-remote>"
-  count=$(printf '%s\n' "$found" | wc -l | tr -d ' ')
-  [ "$count" = 1 ] || die "$(printf 'several prefixes loaded:\n%s\nset CMUX_REMOTE_LABEL_PREFIX to pick one' "$found")"
-  printf '%s' "$found"
-}
+# shellcheck source=lib/cmux-launchd.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/cmux-launchd.sh"
 
 PREFIX="$(resolve_prefix)"
 LABELS=("$PREFIX.bridge" "$PREFIX.server")
 
-plist_of()  { printf '%s/%s.plist' "$AGENTS" "$1"; }
-workdir_of() { /usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' "$(plist_of "$1")" 2>/dev/null || printf '(unset)'; }
-
-# "<pid> <last-exit>" for a label, or "- -" when it is not loaded.
-jobline_of() {
-  launchctl list | awk -v L="$1" '$3 == L { print $1, $2; found = 1 } END { if (!found) print "-", "-" }'
-}
-
 status() {
-  local ptr; ptr=$(cat "$SUPPORT/CURRENT_RELEASE" 2>/dev/null || printf '(no CURRENT_RELEASE)')
   printf 'prefix          %s\n' "$PREFIX"
-  printf 'CURRENT_RELEASE %s\n' "$ptr"
+  printf 'CURRENT_RELEASE %s\n' "$(current_release || printf '(unset)')"
+  printf 'PREVIOUS        %s\n' "$(previous_release || printf '(unset)')"
   printf '\n%-14s %-8s %-5s %s\n' JOB PID EXIT WORKINGDIRECTORY
   local label short wd
   for label in "${LABELS[@]}"; do
@@ -78,15 +56,13 @@ case "${1:-status}" in
   restart)
     # kickstart -k: SIGKILL the current instance and relaunch from the SAME
     # plist, so the release and .env in play are unchanged.
-    for label in "${LABELS[@]}"; do
-      launchctl kickstart -k "$DOMAIN/$label" && printf 'restarted %s\n' "$label"
-    done
+    kickstart_all "${LABELS[@]}"
     printf '\n'; status ;;
 
   stop)
     # bootout, not kill: KeepAlive relaunches anything that merely dies.
     for label in "${LABELS[@]}"; do
-      launchctl bootout "$DOMAIN/$label" 2>/dev/null && printf 'booted out %s\n' "$label" \
+      "$LAUNCHCTL" bootout "$DOMAIN/$label" 2>/dev/null && printf 'booted out %s\n' "$label" \
         || printf '%s was not loaded\n' "$label"
     done
     printf 'bring them back with: %s start\n' "$0" ;;
@@ -94,7 +70,7 @@ case "${1:-status}" in
   start)
     for label in "${LABELS[@]}"; do
       [ -f "$(plist_of "$label")" ] || die "no plist at $(plist_of "$label")"
-      launchctl bootstrap "$DOMAIN" "$(plist_of "$label")" && printf 'bootstrapped %s\n' "$label"
+      "$LAUNCHCTL" bootstrap "$DOMAIN" "$(plist_of "$label")" && printf 'bootstrapped %s\n' "$label"
     done
     printf '\n'; status ;;
 
