@@ -27,7 +27,16 @@ resolve_prefix() {
   found=$("$LAUNCHCTL" list \
     | awk '$3 ~ /\.cmux-remote\.(bridge|server)$/ { sub(/\.(bridge|server)$/, "", $3); print $3 }' \
     | sort -u)
-  [ -n "$found" ] || die "no cmux-remote agents loaded — set CMUX_REMOTE_LABEL_PREFIX=<prefix ending in .cmux-remote>"
+  # Nothing loaded is exactly the state `start` exists to leave — and discovering
+  # the prefix from the loaded agents cannot work there. Fall back to the plist
+  # FILES, which survive a bootout. Without this, `stop` prints "bring them back
+  # with: ctl start" and `start` then refuses to run.
+  # sed -E: BSD sed has no \| alternation in a basic regex, so the GNU spelling
+  # silently matches nothing here and the fallback looks like "no plists found".
+  [ -n "$found" ] || found=$(ls "$AGENTS" 2>/dev/null \
+    | sed -nE 's/^(.*\.cmux-remote)\.(bridge|server)\.plist$/\1/p' \
+    | sort -u)
+  [ -n "$found" ] || die "no cmux-remote agents loaded or installed — set CMUX_REMOTE_LABEL_PREFIX=<prefix ending in .cmux-remote>"
   count=$(printf '%s\n' "$found" | wc -l | tr -d ' ')
   [ "$count" = 1 ] || die "$(printf 'several prefixes loaded:\n%s\nset CMUX_REMOTE_LABEL_PREFIX to pick one' "$found")"
   printf '%s' "$found"
@@ -63,12 +72,39 @@ write_file_atomic() {
 current_release() { [ -f "$POINTER" ] && head -n 1 "$POINTER" || true; }
 previous_release() { [ -f "$PREVIOUS" ] && head -n 1 "$PREVIOUS" || true; }
 
+# RESTART the running job from the spec launchd ALREADY HOLDS. Correct only when
+# the plist has not changed — `ctl restart`, where the point is to bounce the
+# process without touching which release is in play.
 kickstart_all() {
   local label
   for label in "$@"; do
     "$LAUNCHCTL" kickstart -k "$DOMAIN/$label" >/dev/null 2>&1 \
       || die "kickstart failed for $label — check: $LAUNCHCTL print $DOMAIN/$label"
     say "restarted $label"
+  done
+}
+
+# RELOAD the job so launchd re-reads the plist FILE. This is what a deploy needs
+# and kickstart cannot do.
+#
+# launchd caches the job spec at bootstrap time. Editing WorkingDirectory on disk
+# and then calling `kickstart -k` relaunches the process from the CACHED spec, so
+# it comes back in the OLD release directory while the plist, the pointer and
+# `ctl status` all read as the new one — status reports the plist, not the
+# process. The deploy then health-probes the old release, passes, and reports a
+# release that is not running. Two deploys shipped nothing that way before the
+# process cwd was checked directly:
+#
+#   lsof -a -p <pid> -d cwd     # the only honest answer
+#
+# bootout can fail legitimately (job not loaded), so only bootstrap is fatal.
+reload_all() {
+  local label
+  for label in "$@"; do
+    "$LAUNCHCTL" bootout "$DOMAIN/$label" >/dev/null 2>&1 || true
+    "$LAUNCHCTL" bootstrap "$DOMAIN" "$(plist_of "$label")" >/dev/null 2>&1 \
+      || die "bootstrap failed for $label — check: $LAUNCHCTL print $DOMAIN/$label"
+    say "reloaded $label"
   done
 }
 

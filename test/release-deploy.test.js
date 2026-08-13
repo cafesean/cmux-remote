@@ -148,7 +148,7 @@ test('deploy exports exactly the tracked content of the commit, plus the .env', 
   assert.equal(fs.readFileSync(path.join(dir, '.env'), 'utf8'), fs.readFileSync(box.env, 'utf8'));
 });
 
-test('deploy repoints both plists, flips the pointer, and kickstarts both agents', () => {
+test('deploy repoints both plists, flips the pointer, and RELOADS both agents', () => {
   const head = sha('HEAD');
   const dir = path.join(box.support, 'releases', head);
   const out = deploy(['deploy', 'HEAD', '--ignore-dirty', '--env', box.env]).stdout;
@@ -156,8 +156,26 @@ test('deploy repoints both plists, flips the pointer, and kickstarts both agents
   assert.equal(workdirOf(LABELS[0]), dir);
   assert.equal(workdirOf(LABELS[1]), dir);
   assert.equal(pointer('CURRENT_RELEASE'), dir);
-  for (const l of LABELS) assert.match(stubLog(), new RegExp(`kickstart -k gui/\\d+/${l.replace(/\./g, '\\.')}`));
+  for (const l of LABELS) {
+    const q = l.replace(/\./g, '\\.');
+    assert.match(stubLog(), new RegExp(`bootout gui/\\d+/${q}`));
+    assert.match(stubLog(), new RegExp(`bootstrap gui/\\d+ .*${q}\\.plist`));
+  }
   assert.match(out, new RegExp(`live: ${head}`));
+});
+
+// The regression that made two deploys ship nothing. launchd caches the job spec
+// at bootstrap; `kickstart -k` relaunches from that cache, so a WorkingDirectory
+// edited on disk is ignored and both agents come back in the PREVIOUS release —
+// while the plists, the pointer and `ctl status` all read as the new one, and the
+// health probe passes against the old code. Only the process cwd tells the truth.
+test('deploy never repoints a plist and then merely kickstarts — launchd would ignore the edit', () => {
+  deploy(['deploy', 'HEAD', '--ignore-dirty', '--env', box.env]);
+  const log = stubLog();
+  const bootstrapAt = log.indexOf('bootstrap');
+  assert.ok(bootstrapAt >= 0, 'a deploy must bootstrap the agents so the new plist is read');
+  const kick = log.indexOf('kickstart');
+  assert.ok(kick < 0, `a deploy must not rely on kickstart to pick up a plist change: ${log}`);
 });
 
 test('a second deploy of the same commit is refused unless forced', () => {
@@ -300,4 +318,19 @@ test('ctl stop boots out rather than killing', () => {
   const log = stubLog();
   for (const l of LABELS) assert.match(log, new RegExp(`bootout gui/\\d+/${l.replace(/\./g, '\\.')}`));
   assert.ok(!/kill/.test(log), 'KeepAlive would relaunch a mere kill');
+});
+
+// `stop` ends with "bring them back with: ctl start", and prefix discovery reads
+// the LOADED agents — which stop just unloaded. Discovery therefore has to fall
+// back to the plist files, or the documented recovery path cannot run at all.
+test('ctl start still resolves the prefix after stop unloaded everything', () => {
+  const empty = `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >>"$STUB_LOG"\nexit 0\n`;
+  fs.writeFileSync(box.stub, empty, { mode: 0o755 });   // `list` now reports nothing loaded
+  // run() throws on a non-zero exit, so reaching the assertions IS the pass.
+  const r = ctl(['start'], { extraEnv: { CMUX_REMOTE_LABEL_PREFIX: '' } });
+  assert.ok(r.ok, 'start must work from a fully stopped state');
+  assert.match(r.stdout, new RegExp(`prefix\\s+${PREFIX}`), 'the prefix came from the plist files, not launchctl list');
+  for (const l of LABELS) {
+    assert.match(stubLog(), new RegExp(`bootstrap gui/\\d+ .*${l.replace(/\./g, '\\.')}\\.plist`));
+  }
 });
