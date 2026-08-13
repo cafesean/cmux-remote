@@ -48,6 +48,10 @@ case "$1" in
     printf '4761\\t0\\t${PREFIX}.server\\n'
     ;;
   kickstart) [ -n "\${STUB_KICKSTART_FAIL:-}" ] && exit 1 ;;
+  # A reload waits for the label to disappear before bootstrapping, because real
+  # bootout is async. Report "not loaded" so that wait terminates immediately —
+  # a stub that answered 0 here would spin the loop to its cap on every deploy.
+  print) exit 1 ;;
 esac
 exit 0
 `;
@@ -176,6 +180,21 @@ test('deploy never repoints a plist and then merely kickstarts — launchd would
   assert.ok(bootstrapAt >= 0, 'a deploy must bootstrap the agents so the new plist is read');
   const kick = log.indexOf('kickstart');
   assert.ok(kick < 0, `a deploy must not rely on kickstart to pick up a plist change: ${log}`);
+});
+
+// bootout returns before the job is gone. Bootstrapping into that window fails,
+// and a failure between the two agents leaves them on DIFFERENT releases — which
+// is worse than not deploying at all.
+test('reload waits for the label to disappear between bootout and bootstrap', () => {
+  deploy(['deploy', 'HEAD', '--ignore-dirty', '--env', box.env]);
+  const lines = stubLog().trim().split('\n');
+  for (const l of LABELS) {
+    const out = lines.findIndex((x) => x.startsWith(`bootout gui/`) && x.includes(l));
+    const boot = lines.findIndex((x) => x.startsWith('bootstrap gui/') && x.includes(l));
+    assert.ok(out >= 0 && boot > out, `${l} must be booted out before it is bootstrapped`);
+    const probed = lines.slice(out, boot).some((x) => x.startsWith('print ') && x.includes(l));
+    assert.ok(probed, `${l} must be probed with print between bootout and bootstrap: ${lines.join(' | ')}`);
+  }
 });
 
 test('a second deploy of the same commit is refused unless forced', () => {
