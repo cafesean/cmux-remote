@@ -43,7 +43,10 @@ activate() {
   set_workdir "$BRIDGE" "$dir"
   set_workdir "$SERVER" "$dir"
   write_file_atomic "$POINTER" "$dir"
-  kickstart_all "$BRIDGE" "$SERVER"
+  # reload, NOT kickstart: the plists just changed, and launchd only re-reads them
+  # on bootstrap. kickstart would relaunch both agents in the previous release and
+  # the probe below would happily pass against it. See reload_all().
+  reload_all "$BRIDGE" "$SERVER"
   health_wait
 }
 
