@@ -99,11 +99,21 @@ kickstart_all() {
 #
 # bootout can fail legitimately (job not loaded), so only bootstrap is fatal.
 reload_all() {
-  local label
+  local label i
   for label in "$@"; do
     "$LAUNCHCTL" bootout "$DOMAIN/$label" >/dev/null 2>&1 || true
+    # bootout is ASYNCHRONOUS: it returns while the job is still tearing down, and
+    # bootstrapping a half-unloaded label fails ("Input/output error" / "service
+    # already loaded"). That failure took the bridge down and left the two agents
+    # on DIFFERENT releases. Wait for the label to actually disappear.
+    i=0
+    while "$LAUNCHCTL" print "$DOMAIN/$label" >/dev/null 2>&1; do
+      i=$((i + 1))
+      [ "$i" -ge 50 ] && break     # ~5s, then try anyway rather than hang a deploy
+      sleep 0.1
+    done
     "$LAUNCHCTL" bootstrap "$DOMAIN" "$(plist_of "$label")" >/dev/null 2>&1 \
-      || die "bootstrap failed for $label — check: $LAUNCHCTL print $DOMAIN/$label"
+      || die "bootstrap failed for $label — it is now DOWN, bring it back with: $LAUNCHCTL bootstrap $DOMAIN $(plist_of "$label")"
     say "reloaded $label"
   done
 }
