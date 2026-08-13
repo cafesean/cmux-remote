@@ -1502,14 +1502,18 @@
       const gg = g; g = null;
       if (!gg || state.tabType !== 'terminal') return;
       if (gg.max >= 8 || Date.now() - gg.t >= 500) return;    // a scroll or a long-press (text select)
-      if (state.focusPane !== v.paneId) { focusPane(v.paneId); return; }
+      // takeComposer, not focusPane: tapping the pane is what REVEALS the box, so the same gesture
+      // must also put the caret in it — otherwise the operator taps twice to type once. This runs
+      // synchronously inside pointerup because iOS only honours .focus() from within the gesture;
+      // deferring it behind a timeout or await silently drops the keyboard.
+      if (state.focusPane !== v.paneId) { takeComposer(v.paneId); return; }
       if (!state.tab) return;
       const rowEl = (e.target && e.target.closest) ? e.target.closest('.trow') : null;
       if (rowEl) tryMenuClick(v, rowEl);
     };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', () => { g = null; });
-    v.headEl.addEventListener('click', () => focusPane(v.paneId));
+    v.headEl.addEventListener('click', () => takeComposer(v.paneId));
   }
 
   // ---- browser surface: a refreshing screenshot you can tap / scroll / type into ----
