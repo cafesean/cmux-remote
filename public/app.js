@@ -43,6 +43,7 @@
 
   const $ = (id) => document.getElementById(id);
   const elTabs = $('tabs'), elPanes = $('panes'), elEmpty = $('empty'), elStatus = $('status'), elJump = $('jump');
+  const elWrap = $('wrap');
   const elText = $('text'), elSend = $('send'), elRefresh = $('refresh'), elFilesBtn = $('filesBtn');
   const elRadarBtn = $('radarBtn'), elInboxBtn = $('inboxBtn');
   const elWsChip = $('wsChip'), elWsLabel = $('wsLabel'), elHost = $('hostLabel'), elWsMenu = $('wsMenu');
@@ -480,6 +481,19 @@
     // padding — otherwise the chip shouts "jump to bottom" while you are already reading the tail.
     const atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight < 40) || isNearTail(v, el);
     elJump.classList.toggle('show', !atBottom);
+    if (!atBottom) placeJump(el);
+  }
+  // The chip is a child of #wrap (one chip, not one per pane), but the thing it must sit above is the
+  // PANE's scroll area — and since p7 the composer lives INSIDE the pane (.pfoot), so #wrap's own
+  // bottom is the bottom of the input box. A static `bottom: 12px` therefore parked the chip right on
+  // top of the text field: it covered the box it was asking you to type into. Anchor it to the focused
+  // pane's screen rect instead, which is also what puts it over the RIGHT pane in a split.
+  function placeJump(el) {
+    const wr = elWrap.getBoundingClientRect();
+    const sr = el.getBoundingClientRect();
+    if (!sr.height) return;
+    elJump.style.bottom = Math.max(4, Math.round(wr.bottom - sr.bottom + 12)) + 'px';
+    elJump.style.left = Math.round(sr.left - wr.left + sr.width / 2) + 'px';
   }
 
   // ---- tree: workspaces + tabs ----
@@ -2485,6 +2499,9 @@
     closeWsMenu(); closeSettings();
     if (canSplit() !== wasSplit) { wasSplit = canSplit(); renderPanes(); }
     else fitAllFonts();
+    // The chip is placed from the focused pane's rect, so a rotate/split change moves the thing it
+    // is anchored to. A live stream re-places it on the next frame; an idle pane never would.
+    updateJump();
   });
   elJump.onclick = () => {
     const v = focusedView(); if (!v) return;
