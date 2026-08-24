@@ -90,6 +90,10 @@ function cmux(args, cb, timeout = 8000, tries = 0) {
 }
 const cmuxP = (args, timeout) => new Promise((resolve) =>
   cmux(args, (err, stdout) => resolve(err ? null : (stdout || '')), timeout));
+// Same call, inverted: the cmux STDERR text when it refused, null when it worked. Every close path
+// wants the refusal verbatim — the CLI's own wording is what tells an operator which rule it hit.
+const cmuxErr = (args, timeout = 8000) => new Promise((resolve) =>
+  cmux(args, (err, stdout, stderr) => resolve(err ? String(stderr || err.message || '') : null), timeout));
 function cmuxReadBody(req, cb, cap = 256 * 1024) {
   let body = '';
   req.on('data', (c) => { body += c; if (body.length > cap) req.destroy(); });
@@ -943,16 +947,32 @@ function cmuxNewWorkspace(req, res) {
 }
 
 // POST /cmux/close-tab { surface } — close a tab (surface).
+//
+// SCOPE IS MANDATORY (cmux >= 0.64.22): `close-surface` refuses a bare `--surface` with
+// `close-surface requires --workspace or --window with explicit --surface`. An interactive shell
+// gets that scope from its own cmux window; this bridge is detached under launchd and has none, so
+// every close it issued failed until the workspace was passed explicitly. It is read from the live
+// tree rather than trusted from the client — the client only ever knew the surface.
 function cmuxCloseTab(req, res) {
   cmuxReadBody(req, (b) => {
     if (!b) return send(res, 400, { error: 'bad_json' });
     const surface = String(b.surface || '');
     if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
-    cmux(['close-surface', '--surface', surface], async (err, stdout, stderr) => {
-      if (err) return send(res, 502, { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 400) });
+    (async () => {
+      const tree = await loadTree();
+      if (tree == null) return send(res, 502, { error: 'cmux_failed', detail: 'tree unavailable' });
+      const ws = tree.find((w) => (w.tabs || []).some((t) => t.id === surface || t.ref === surface));
+      if (!ws) return send(res, 404, { error: 'no_such_surface' });
+      // And cmux will not close a workspace's LAST surface at all (`invalid_state: Cannot close the
+      // last surface`). Closing that tab used to take the workspace with it, so it still does.
+      const args = (ws.tabs || []).length <= 1
+        ? ['close-workspace', '--workspace', ws.id]
+        : ['close-surface', '--surface', surface, '--workspace', ws.id];
+      const out = await cmuxErr(args);
+      if (out) return send(res, 502, { error: 'cmux_failed', detail: out.slice(0, 400) });
       const workspaces = await treePayload();
       send(res, 200, { ok: true, closed: surface, workspaces: workspaces || [] });
-    }, 8000);
+    })();
   });
 }
 
@@ -1177,9 +1197,20 @@ function cmuxClosePane(req, res) {
       const ws = (tree || []).find((w) => w.id === workspace);
       const surfaces = ((ws && ws.tabs) || []).filter((t) => t.pane === pane).map((t) => t.id);
       if (!surfaces.length) return send(res, 404, { error: 'no_such_pane' });
+      // A pane holding every surface in its workspace cannot be emptied surface-by-surface: cmux
+      // refuses the last one (`invalid_state: Cannot close the last surface`). Closing that pane
+      // always did take the workspace with it, so close the workspace and say so.
+      if (surfaces.length >= ((ws && ws.tabs) || []).length) {
+        const out = await cmuxErr(['close-workspace', '--workspace', workspace]);
+        if (out) return send(res, 502, { error: 'cmux_failed', detail: out.slice(0, 400) });
+        const workspaces = await treePayload();
+        return send(res, 200, { ok: true, closed: surfaces, closedWorkspace: workspace,
+          workspaces: workspaces || [], layout: null });
+      }
       for (const s of surfaces) {
-        const out = await new Promise((resolve) => cmux(['close-surface', '--surface', s],
-          (err, stdout, stderr) => resolve(err ? String(stderr || err.message || '') : null), 8000));
+        // `--workspace` is REQUIRED, not decoration — see cmuxCloseTab for why the bridge never
+        // gets the implicit scope an interactive shell does.
+        const out = await cmuxErr(['close-surface', '--surface', s, '--workspace', workspace]);
         if (out) return send(res, 502, { error: 'cmux_failed', detail: out.slice(0, 400) });
       }
       const [workspaces, layout] = await Promise.all([treePayload(), layoutPayload(workspace)]);
