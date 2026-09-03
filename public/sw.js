@@ -8,11 +8,9 @@
 // `url.pathname` and cache-matches by that, so a query-bearing precache key would leave nothing the
 // pathname fallback could find and the first offline load would 503. The versioned tags live in
 // index.html alone, and they still bust caches because this CACHE version bumps with them.
-// v16: inbox.js changed (hidden-attribute enforcement + the new verdict chips). The script fetch
-// branch is network-first, so an online reload already gets the new module — the bump is for the
-// OFFLINE copy, and for the cache-first '/' shell, which is what leaves a device showing no ✉ at all
-// when its index.html predates the inbox.
-const CACHE = 'cmux-shell-v16';
+// v17: app.js changed after the v16 shell shipped. Bump both the cache generation and the service
+// worker registration URL so installed clients replace any older cache-first worker immediately.
+const CACHE = 'cmux-shell-v17';
 const SHELL = ['/', '/app.js', '/radar.js', '/inbox.js'];
 
 self.addEventListener('install', (e) => {
