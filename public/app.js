@@ -2981,7 +2981,7 @@
 
   // Both caches are keyed by path AND dotfile mode — the two modes hold different entry lists and
   // different totals, so sharing one key would paint the other mode's rows on toggle.
-  const ckey = (p) => p + (showHidden() ? '' : ' nodot');
+  const ckey = (p) => p + (showHidden() ? '' : '\0nodot');
 
   function lsGet(p) { try { return JSON.parse(localStorage.getItem(FS_LS_KEY + ckey(p)) || 'null'); } catch (_) { return null; } }
   function lsSet(p, v) {
