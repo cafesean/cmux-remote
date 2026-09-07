@@ -243,7 +243,7 @@ A `.env` in the working directory is auto-loaded by both processes.
 |---|---|---|---|
 | `BRIDGE_SECRET` | bridge (each Mac) | password the server presents to reach this bridge | `openssl rand -hex 16` |
 | `CMUX_MACHINE_SECRET` | server | **must equal that bridge's `BRIDGE_SECRET`** | copy the same value |
-| `CMUX_MACHINE_URL` | server | how the server reaches the bridge | `http://<mac-ip>:8799`, or a tunnel URL |
+| `CMUX_MACHINE_URL` | server | how the server reaches the bridge | `http://localhost:8799` on the same Mac; for another Mac `http://<mac-ip>:8799` **with `BRIDGE_HOST=0.0.0.0` set on that bridge**, or a tunnel URL |
 | `SERVER_TOKEN` | server | password to open the web UI | `openssl rand -hex 16` |
 
 If `SERVER_TOKEN` or `BRIDGE_SECRET` is left empty, that layer is **open** — only acceptable on a fully
@@ -291,6 +291,25 @@ CMUX_CONFIG=./config.json
 ```
 
 Adding a machine is just another row. The repo ships only `config.example.json` with placeholders.
+
+What each extra Mac needs, and the two things that trip a first multi-machine setup:
+
+- **Its own `bridge.js` with its own `BRIDGE_SECRET`** — `secret` in the row must equal it. A mismatch
+  shows in the UI as *bridge refused the secret*.
+- **A bridge the server can actually reach.** The bridge binds `127.0.0.1` by default, which only a
+  server on the same Mac can reach; the startup log says so. On every other Mac either set
+  `BRIDGE_HOST=0.0.0.0` (LAN — the secret is the only gate, so trusted networks only) or leave it on
+  loopback and point a tunnel at `:8799`, using that URL as `baseUrl` (add `accessId`/`accessSecret`
+  if Cloudflare Access fronts it). A wrong `baseUrl` or a loopback-only bridge shows as *bridge
+  unreachable*.
+
+Pick a stable `id`: the phone remembers it across launches and reopens on that machine. The switcher
+is in the workspace menu (tap the header) whenever more than one machine is registered. The server
+log lists every machine it parsed at startup — a Mac missing there was never read out of
+`CMUX_MACHINES` / `CMUX_CONFIG`.
+
+Radar keeps its own per-machine list (`bridges[]` in its config, see [Radar](#radar-p5)); registering
+a machine here does not register it there.
 
 ---
 

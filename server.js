@@ -677,6 +677,12 @@ httpServer.listen(PORT, HOST, () => {
   // tests boot a server without colliding with the real one on :8080.
   const bound = (httpServer.address() && httpServer.address().port) || PORT;
   console.log(`cmux-remote server on http://${HOST}:${bound} with ${MACHINES.length} machine(s)`);
+  // id, label and host only — never the secret. This is the first place a two-Mac setup can be
+  // checked: a machine missing here was never parsed out of CMUX_MACHINES / CMUX_CONFIG.
+  for (const m of MACHINES) {
+    let host = m.baseUrl; try { host = new URL(m.baseUrl).host; } catch (_) { /* print as given */ }
+    console.log(`  machine "${m.id}" (${m.label}) → ${host}${m.accessId ? ' [CF Access]' : ''}`);
+  }
   if (!SERVER_TOKEN) console.log('WARNING: SERVER_TOKEN empty → UI/API open. Set it before exposing outside a trusted LAN.');
 });
 

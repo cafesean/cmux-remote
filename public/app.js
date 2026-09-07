@@ -543,7 +543,7 @@
       let data;
       try { data = await (await jget('/api/cmux/tree?machine=' + encodeURIComponent(state.machine))).json(); }
       catch (_) { setStatus('tree failed', true); return; }
-      if (data && data.error) { setStatus(data.error, true); return; }
+      if (data && data.error) { setStatus(machineErr(data.error), true); return; }
       applyTree((data && data.workspaces) || []);
     } finally { treeBusy = false; }
   }
@@ -602,13 +602,35 @@
   function closeWsMenu() { elWsMenu.hidden = true; elWsChip.setAttribute('aria-expanded', 'false'); }
   function toggleWsMenu() { if (elWsMenu.hidden) openWsMenu(); else closeWsMenu(); }
 
+  // The chosen machine outlives the page. iOS kills a backgrounded standalone app, so every open is
+  // a cold boot — without this a two-Mac setup landed on the first registered machine on every launch.
+  const MACHINE_LS_KEY = 'cmux_machine';
+  const savedMachine = () => { try { return localStorage.getItem(MACHINE_LS_KEY) || ''; } catch (_) { return ''; } };
+  const rememberMachine = (id) => { try { id ? localStorage.setItem(MACHINE_LS_KEY, id) : localStorage.removeItem(MACHINE_LS_KEY); } catch (_) {} };
+  // What a bridge error means to the person holding the phone, with the machine named. The codes are
+  // server.js's; a second Mac fails HERE first, and "bridge_unreachable" alone does not say which of
+  // the two settings is wrong.
+  function machineErr(code, id) {
+    const m = state.machines.find((x) => x.id === (id || state.machine));
+    const who = (m && m.label) || id || state.machine || 'machine';
+    if (code === 'bridge_unreachable') return who + ': bridge unreachable — check its baseUrl, and that its BRIDGE_HOST is not 127.0.0.1';
+    if (code === 'forbidden') return who + ': bridge refused the secret — it must equal that Mac\'s BRIDGE_SECRET';
+    if (code === 'no_machine') return who + ' is not registered on this server';
+    return who + ': ' + code;
+  }
   function switchMachine(id) {
     if (id === state.machine) return;
     if (state.tabType === 'browser') { exitBrowserMode(); state.tabType = 'terminal'; }
+    // a directory listing from the other Mac must not sit under this label
+    if (state.tabType === 'files' || state.tabType === 'viewer') exitFilesMode();
     state.machine = id; state.wsRef = null; state.tab = null; state.focusPane = null; state.layout = null;
+    rememberMachine(id);
     teardownPanes(); stopLayoutStream();
     const cur = state.machines.find((m) => m.id === id); elHost.textContent = (cur && cur.label) || '';
-    elEmpty.style.display = 'flex'; setStatus('');
+    // Drop the previous machine's tree NOW. On a failed fetch loadTree keeps whatever is on screen —
+    // right for a blip on the same Mac, wrong here: it listed the other Mac's workspaces under this label.
+    applyTree([]);
+    setStatus('');
     loadTree();
   }
   function selectWorkspace(ref) {
@@ -2971,9 +2993,11 @@
   // Where the user was last browsing. Persisted, not just held in memory: iOS kills the
   // standalone app whenever it is backgrounded, so every open is a cold boot and an in-memory
   // value would be lost exactly when it matters most.
+  // Per machine: a path remembered on one Mac means nothing on another.
   const FS_LAST_KEY = 'p4files:lastPath';
-  const lastPath = () => { try { return localStorage.getItem(FS_LAST_KEY) || ''; } catch (_) { return ''; } };
-  const setLastPath = (p) => { try { p ? localStorage.setItem(FS_LAST_KEY, p) : localStorage.removeItem(FS_LAST_KEY); } catch (_) {} };
+  const fsLastKey = () => FS_LAST_KEY + ':' + (state.machine || '');
+  const lastPath = () => { try { return localStorage.getItem(fsLastKey()) || ''; } catch (_) { return ''; } };
+  const setLastPath = (p) => { try { p ? localStorage.setItem(fsLastKey(), p) : localStorage.removeItem(fsLastKey()); } catch (_) {} };
 
   const FS_DOT_KEY = 'p4files:showHidden';
   const showHidden = () => { try { return localStorage.getItem(FS_DOT_KEY) !== '0'; } catch (_) { return true; } };
@@ -2981,7 +3005,8 @@
 
   // Both caches are keyed by path AND dotfile mode — the two modes hold different entry lists and
   // different totals, so sharing one key would paint the other mode's rows on toggle.
-  const ckey = (p) => p + (showHidden() ? '' : '\0nodot');
+  // — and by machine, so /Users/you on one Mac never paints the other Mac's rows.
+  const ckey = (p) => (state.machine || '') + '|' + p + (showHidden() ? '' : '\0nodot');
 
   function lsGet(p) { try { return JSON.parse(localStorage.getItem(FS_LS_KEY + ckey(p)) || 'null'); } catch (_) { return null; } }
   function lsSet(p, v) {
@@ -3378,7 +3403,9 @@
     // full-size view which renderPanes discards as soon as the real panes exist.
     try {
       const lt = localStorage.getItem('cmux_last_tab');
-      const raw = lt && localStorage.getItem(GRID_LS_PREFIX + lt);
+      // the key is machine|surface — never paint another machine's grid under the one we will boot into
+      const mine = !savedMachine() || (lt && lt.startsWith(savedMachine() + '|'));
+      const raw = mine && lt && localStorage.getItem(GRID_LS_PREFIX + lt);
       if (raw) {
         const d = JSON.parse(raw);
         if (d && d.grid) {
@@ -3392,7 +3419,8 @@
     } catch (_) {}
     // One round trip: machines + default machine's tree together.
     let boot = null, r = null;
-    try { r = await jget('/api/cmux/bootstrap'); } catch (_) { gate('Could not reach the server.'); return; }
+    const want = savedMachine();
+    try { r = await jget('/api/cmux/bootstrap' + (want ? '?machine=' + encodeURIComponent(want) : '')); } catch (_) { gate('Could not reach the server.'); return; }
     if (r.status === 401) { gate(TOKEN ? 'Access token was rejected. Enter the current token.' : 'An access token is required.', true); return; }
     if (r.ok) boot = await r.json().catch(() => null);
     if (!boot) { gate('Could not reach the server.'); return; }
@@ -3401,9 +3429,13 @@
     const cur = state.machines.find((m) => m.id === state.machine);
     elHost.textContent = (cur && cur.label) || '';
     if (!state.machine) { gate('No machines configured. Set CMUX_MACHINE_URL on the server.'); return; }
-    if (boot.error) setStatus(boot.error, true);
+    rememberMachine(state.machine);
+    if (boot.error) setStatus(machineErr(boot.error), true);
     applyTree(boot.workspaces || []);
     syncLayout(true);                 // geometry is a second call — the tree paints first, then splits
+    // A remembered machine that is no longer registered comes back as machine:null with an empty
+    // tree, so the fallback machine has not been fetched yet — fetch it now, not in five seconds.
+    if (want && !boot.machine) loadTree();
     state.treeTimer = setInterval(loadTree, 5000);
   })();
 })();
