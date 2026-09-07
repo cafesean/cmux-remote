@@ -1696,5 +1696,8 @@ server.listen(PORT, HOST, () => {
   // is how the test suite starts throwaway bridges without ever touching the live :8799.
   const bound = (server.address() && server.address().port) || PORT;
   console.log(`cmux-remote bridge on ${HOST}:${bound}`);
+  if (HOST === '127.0.0.1' || HOST === 'localhost') {
+    console.log(`note: bound to loopback — only a server on THIS Mac can reach it. To register this Mac on a server elsewhere, set BRIDGE_HOST=0.0.0.0 (LAN, secret-gated) or point a tunnel at :${bound}.`);
+  }
   if (!SECRET) console.log('WARNING: BRIDGE_SECRET empty → /cmux/* is open. Only run on a trusted LAN.');
 });

@@ -142,7 +142,9 @@ const server = spawn(process.execPath, ['server.js'], {
   cwd: REPO,
   env: { ...process.env, PORT: String(SERVER_PORT), HOST: '127.0.0.1', SERVER_TOKEN: TOKEN,
     CMUX_MACHINE_URL: `http://127.0.0.1:${BRIDGE_PORT}`, CMUX_MACHINE_SECRET: 'stub',
-    CMUX_MACHINE_LABEL: 'stub-mac', CMUX_MACHINES: '', CMUX_CONFIG: '' },
+    CMUX_MACHINE_LABEL: 'stub-mac', CMUX_CONFIG: '',
+    // a second, unplugged machine: nothing listens on port 1, so every call to it is refused at once
+    CMUX_MACHINES: JSON.stringify([{ id: 'unplugged', label: 'Unplugged Mac', baseUrl: 'http://127.0.0.1:1', secret: 'x' }]) },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 server.stderr.on('data', (d) => process.stderr.write('[server] ' + d));
@@ -412,6 +414,40 @@ try {
   check('a text paste is left alone', seen.upload.length === uploadsBeforeText);
   check('there is a clipboard button for iOS (no ⌘V there)',
     await page.locator('#pasteBtn').count() === 1);
+
+  // --- a second machine: listed, a dead one says so plainly, and the choice survives a reload ---
+  const openMenu = async () => { await page.locator('#wsChip').click(); await page.waitForTimeout(250); };
+  await openMenu();
+  const machineRows = page.locator('#wsMenu button', { hasText: '🖥' });
+  check('the workspace menu lists both machines', await machineRows.count() === 2, 'n=' + await machineRows.count());
+  const wsBefore = await page.locator('#wsMenu button .wsname').count();
+  await page.locator('#wsMenu button', { hasText: 'Unplugged Mac' }).click();
+  await page.waitForTimeout(1200);
+  check('switching shows the new machine\'s label', (await page.locator('#hostLabel').innerText()) === 'Unplugged Mac');
+  const deadStatus = await page.locator('#status').evaluate((e) => e.textContent);
+  check('an unreachable bridge is reported by machine name in words, not as a raw code',
+    /Unplugged Mac/.test(deadStatus) && /unreachable/i.test(deadStatus) && !/bridge_unreachable/.test(deadStatus),
+    JSON.stringify(deadStatus));
+  await openMenu();
+  const wsAfter = await page.locator('#wsMenu button .wsname').count();
+  check('the previous machine\'s workspaces are not listed under the dead one',
+    wsBefore > 0 && wsAfter === 0, 'before=' + wsBefore + ' after=' + wsAfter);
+  await page.locator('#wsMenu button', { hasText: 'stub-mac' }).click();
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(600);
+  check('switching back repaints the first machine', await page.locator('.pane').count() >= 1);
+  await openMenu();
+  await page.locator('#wsMenu button', { hasText: 'Unplugged Mac' }).click();
+  await page.waitForTimeout(800);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(1500);
+  const afterReload = await page.locator('#hostLabel').innerText();
+  check('a reload comes back on the machine that was chosen, not the first registered one',
+    afterReload === 'Unplugged Mac', JSON.stringify(afterReload));
+  await openMenu();
+  await page.locator('#wsMenu button', { hasText: 'stub-mac' }).click();
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(600);
 
   // --- narrow viewport collapses to one pane (the phone path) ---
   await page.setViewportSize({ width: 390, height: 844 });
