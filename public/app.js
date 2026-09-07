@@ -1402,14 +1402,22 @@
     }
     return out;
   }
+  // Every file in the batch gets its own try. One refusal must not abort the loop: before this, a
+  // folder in a Finder selection (it arrives as a 0-byte File, which the bridge refuses as `empty`)
+  // or one photo over the size cap killed the whole batch AND threw away the paths already uploaded
+  // — so a bulk attach "gave an error and did not work" while every single file worked. Now the
+  // good files land in the composer and the status names each file that did not, and why.
   async function uploadFiles(files, paneId) {
     const list = [...files].filter(Boolean);
     if (!list.length || !state.machine) return;
     if (paneId && paneId !== state.focusPane) focusPane(paneId);
-    const done = [];
+    const done = [], failed = [];
     for (let i = 0; i < list.length; i++) {
       const f = list[i];
       const name = pastedName(f);
+      // a dropped folder, or a genuinely empty file: the bridge would refuse it anyway (`empty`), so
+      // skip it here with a reason instead of spending a round trip to learn that
+      if (!f.size) { failed.push(name + ' (empty — a folder?)'); continue; }
       setStatus('uploading ' + (list.length > 1 ? (i + 1) + '/' + list.length + ' ' : '') + name + '…');
       try {
         const r = await fetch('/api/cmux/upload?machine=' + encodeURIComponent(state.machine), {
@@ -1421,14 +1429,18 @@
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok || !d.ok) {
-          setStatus(d.error === 'too_large' ? 'file too large' : (d.error || 'upload failed'), true);
-          return;
+          failed.push(name + ' (' + (d.error === 'too_large' ? 'too large' : (d.error || 'upload failed')) + ')');
+          continue;
         }
         done.push(d.path);
-      } catch (_) { setStatus('upload failed', true); return; }
+      } catch (_) { failed.push(name + ' (upload failed)'); }
     }
     insertPaths(done);
-    setStatus(done.length > 1 ? done.length + ' files on the Mac' : 'on the Mac: ' + done[0].split('/').pop());
+    const landed = done.length > 1 ? done.length + ' files on the Mac'
+      : done.length === 1 ? 'on the Mac: ' + done[0].split('/').pop() : '';
+    if (!failed.length) return setStatus(landed);
+    // what landed first, then what did not — a failure must never hide the files that made it
+    setStatus((landed ? landed + ' · ' : '') + 'skipped ' + failed.join(', '), true);
   }
   function paneUnder(x, y) {
     for (const [id, v] of state.views) {
@@ -1467,7 +1479,13 @@
     });
     if (elAttachBtn && elAttachInput) {
       elAttachBtn.onclick = () => elAttachInput.click();
-      elAttachInput.onchange = () => { uploadFiles(elAttachInput.files, state.focusPane); elAttachInput.value = ''; };
+      // Copy the FileList before resetting the input, and reset only once the batch is done: the
+      // reset is what lets the same file be picked again, but a File whose input was cleared mid-batch
+      // is exactly the kind of handle a mobile browser is entitled to invalidate.
+      elAttachInput.onchange = async () => {
+        const picked = [...elAttachInput.files];
+        try { await uploadFiles(picked, state.focusPane); } finally { elAttachInput.value = ''; }
+      };
     }
     // iOS has no ⌘V and its paste menu does not fire a paste event at a plain page, so the clipboard
     // has to be READ on a tap instead. Needs a user gesture and permission, and does not exist on

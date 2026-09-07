@@ -8,6 +8,9 @@
 // Playwright is BORROWED, not depended on — this repo stays npm-install-free:
 //   PLAYWRIGHT_DIR=/path/to/node_modules/playwright/index.mjs node test/multipane-smoke.mjs
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { spawn } from 'child_process';
 
 async function loadPlaywright() {
@@ -122,6 +125,8 @@ const bridge = http.createServer((req, res) => {
     if (u.pathname === '/cmux/upload') {
       const name = decodeURIComponent(String(req.headers['x-file-name'] || ''));
       seen.upload.push({ name, bytes: body.length });
+      // the real bridge refuses a 0-byte body (bridge.js cmuxUpload) — mirror it, or the batch tests lie
+      if (!body.length) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: 'empty' })); }
       return json({ ok: true, path: '/Users/stub/Downloads/cmux-remote/2026-07-31/' + name, name, bytes: body.length });
     }
     if (u.pathname === '/cmux/focus-surface') { seen.focusSurface.push(b); return json({ ok: true }); }
@@ -345,6 +350,35 @@ try {
     composed === "'/Users/stub/Downloads/cmux-remote/2026-07-31/my reference shot.png'", JSON.stringify(composed));
   check('there is an attach button for phones (no drag there)',
     await page.locator('#attachBtn').count() === 1);
+  await page.locator('#text').fill('');
+
+  // --- several files at once: every one lands, and one bad file does not take the batch down ---
+  // A folder dragged out of Finder arrives as a 0-byte File. The bridge refuses it (`empty`), and
+  // the first refusal used to abort the loop and throw away the paths already uploaded — so a bulk
+  // attach with one folder in it "gave an error and did not work" while every single file worked.
+  const bulkBefore = seen.upload.length;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmux-bulk-'));
+  const mk = (n, bytes) => { const p = path.join(tmp, n); fs.writeFileSync(p, Buffer.alloc(bytes, 65)); return p; };
+  await page.setInputFiles('#attachInput', [mk('one.txt', 10), mk('two.png', 20), mk('three.pdf', 30)]);
+  await page.waitForTimeout(1500);
+  const bulkComposed = await page.locator('#text').inputValue();
+  check('attaching three files uploads all three', seen.upload.length === bulkBefore + 3,
+    'n=' + (seen.upload.length - bulkBefore));
+  check('all three paths land in the composer',
+    ['one.txt', 'two.png', 'three.pdf'].every((n) => bulkComposed.includes('/' + n)), JSON.stringify(bulkComposed));
+  await page.locator('#text').fill('');
+  const mixedBefore = seen.upload.length;
+  await page.setInputFiles('#attachInput', [mk('good.txt', 10), mk('folder', 0), mk('also-good.txt', 12)]);
+  await page.waitForTimeout(1500);
+  const mixedComposed = await page.locator('#text').inputValue();
+  const mixedStatus = await page.locator('#status').evaluate((e) => e.textContent);
+  check('a 0-byte entry does not abort the batch: the good files still land',
+    mixedComposed.includes('/good.txt') && mixedComposed.includes('/also-good.txt'), JSON.stringify(mixedComposed));
+  check('the status names the skipped file and says why',
+    /folder/.test(mixedStatus) && /empty/i.test(mixedStatus), JSON.stringify(mixedStatus));
+  check('the 0-byte entry never crosses the wire',
+    !seen.upload.slice(mixedBefore).some((u) => u.name === 'folder'),
+    JSON.stringify(seen.upload.slice(mixedBefore).map((u) => u.name)));
   await page.locator('#text').fill('');
 
   // --- pasting a screenshot is the same gesture without the drag ---
