@@ -46,7 +46,7 @@
   const elWrap = $('wrap');
   const elText = $('text'), elSend = $('send'), elRefresh = $('refresh'), elFilesBtn = $('filesBtn');
   const elRadarBtn = $('radarBtn'), elInboxBtn = $('inboxBtn');
-  const elWsChip = $('wsChip'), elWsLabel = $('wsLabel'), elHost = $('hostLabel'), elWsMenu = $('wsMenu');
+  const elWsChip = $('wsChip'), elWsLabel = $('wsLabel'), elHost = $('hostLabel');
   const elKeys = $('keys'), elKbToggle = $('kbToggle'), elHint = $('hint');
   const elModeCompose = $('modeCompose'), elModeLive = $('modeLive');
   const elFooter = document.querySelector('footer'), elModeSeg = $('modeSeg'), elGitBtn = $('gitBtn');
@@ -123,7 +123,16 @@
     : ((tabs || []).filter((t) => t.type !== 'browser').find((t) => t.inPane || t.selected) || (tabs || [])[0] || null);
   let sidebar = null;        // the view, mounted later; null = feature absent, badge still works
   let lastFleet = [];        // last /fleet machines array — switchMachine seeds the tree from it
-  function renderSideBadge(snap) { if (sidebar) sidebar.render(snap); }   // extended when the view mounts
+  const elSideBadge = $('sideBadge');
+  function renderSideBadge(snap) {
+    if (sidebar) sidebar.render(snap);
+    if (!elSideBadge) return;
+    const t = (snap && snap.totals) || { waiting: 0, done: 0 };
+    const n = t.waiting + t.done;
+    elSideBadge.hidden = !n;
+    elSideBadge.textContent = String(n);
+    elSideBadge.className = 'wbadge ' + (t.waiting ? 'waiting' : 'done');
+  }
 
   function gate(msg, showToken) {
     const g = $('gate'); g.replaceChildren(); g.style.flexDirection = 'column';
@@ -587,54 +596,13 @@
   function renderHeader() {
     const ws = currentWs();
     elWsLabel.textContent = ws ? (ws.title || ws.ref) : '—';
+    if (sidebar) sidebar.render(null);   // the panel's selected row follows the header
   }
 
-  // ---- workspace list popover (workspaces only + New workspace [+ machines when >1]) ----
-  function openWsMenu() {
-    elWsMenu.replaceChildren();
-    state.workspaces.forEach((w) => {
-      const b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'menuitem');
-      const running = (w.tabs || []).some((t) => /run|need/i.test(t.status || ''));
-      if (running) b.classList.add('run');
-      if (w.ref === state.wsRef) b.classList.add('sel');
-      const dot = document.createElement('span'); dot.className = 'wsdot';
-      const nm = document.createElement('span'); nm.className = 'wsname'; nm.textContent = w.title || w.ref;
-      // Rename lives HERE because the header label is the dropdown's trigger — tapping it has to open
-      // the list, so it can never also be an edit target. cmux names an unnamed workspace after
-      // whatever tab is in front of it, which is why three of them can read "Claude Code".
-      const pen = document.createElement('span'); pen.className = 'wsedit'; pen.textContent = '✎';
-      pen.setAttribute('role', 'button'); pen.setAttribute('aria-label', 'Rename workspace');
-      pen.title = 'Rename workspace';
-      pen.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closeWsMenu(); doRenameWorkspace(w); };
-      const x = document.createElement('span'); x.className = 'wsclose'; x.textContent = '×';
-      x.setAttribute('role', 'button'); x.setAttribute('aria-label', 'Close workspace');
-      x.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closeWsMenu(); doCloseWorkspace(w); };
-      b.append(dot, nm, pen, x);
-      b.onclick = () => { closeWsMenu(); selectWorkspace(w.ref); };
-      elWsMenu.appendChild(b);
-    });
-    const sep = document.createElement('div'); sep.className = 'sep'; elWsMenu.appendChild(sep);
-    const nw = document.createElement('button'); nw.type = 'button'; nw.className = 'new'; nw.textContent = '+ New workspace';
-    nw.onclick = () => { closeWsMenu(); doNewWorkspace(); };
-    elWsMenu.appendChild(nw);
-    if (state.machines.length > 1) {
-      const sep2 = document.createElement('div'); sep2.className = 'sep'; elWsMenu.appendChild(sep2);
-      state.machines.forEach((m) => {
-        const mb = document.createElement('button'); mb.type = 'button';
-        if (m.id === state.machine) mb.classList.add('sel');
-        mb.textContent = '🖥 ' + m.label;
-        mb.onclick = () => { closeWsMenu(); switchMachine(m.id); };
-        elWsMenu.appendChild(mb);
-      });
-    }
-    elWsMenu.hidden = false;
-    const rc = elWsChip.getBoundingClientRect();
-    elWsMenu.style.left = Math.round(rc.left) + 'px';
-    elWsMenu.style.top = Math.round(rc.bottom + 6) + 'px';
-    elWsChip.setAttribute('aria-expanded', 'true');
-  }
-  function closeWsMenu() { elWsMenu.hidden = true; elWsChip.setAttribute('aria-expanded', 'false'); }
-  function toggleWsMenu() { if (elWsMenu.hidden) openWsMenu(); else closeWsMenu(); }
+  // The workspace dropdown is gone (p17): the sidebar owns machines and workspaces. Callers that
+  // used to dismiss the popover now dismiss the phone drawer, which is the same gesture — a tap
+  // somewhere else. The persistent desktop panel is never touched by this.
+  function closeWsMenu() { if (sidebar && !canSplit() && sidebar.mode() === 'full') sidebar.setMode('hidden'); }
 
   // The chosen machine outlives the page. iOS kills a backgrounded standalone app, so every open is
   // a cold boot — without this a two-Mac setup landed on the first registered machine on every launch.
@@ -2534,7 +2502,6 @@
   wireFileDrop();
   if (elModeCompose) elModeCompose.onclick = null;   // modes are gone (§5.3); markup kept one cache epoch
   if (elModeLive) elModeLive.onclick = null;
-  elWsChip.onclick = (e) => { e.stopPropagation(); toggleWsMenu(); };
   if (elSettingsBtn) elSettingsBtn.onclick = (e) => { e.stopPropagation(); toggleSettings(); };
   if (elFontUp) elFontUp.onclick = () => nudgeZoom(1.15);
   if (elFontDown) elFontDown.onclick = () => nudgeZoom(1 / 1.15);
@@ -2562,7 +2529,6 @@
     renderPanes(); renderTabs();
   };
   document.addEventListener('click', (e) => {
-    if (!elWsMenu.hidden && !elWsMenu.contains(e.target) && !elWsChip.contains(e.target)) closeWsMenu();
     if (!elSetMenu.hidden && !elSetMenu.contains(e.target) && !elSettingsBtn.contains(e.target)) closeSettings();
     if (elSplitMenu && !elSplitMenu.hidden && !elSplitMenu.contains(e.target)
         && !(state.menuBtn && state.menuBtn.contains(e.target))) closeSplitMenu();
@@ -2884,6 +2850,25 @@
   } catch (e) { inboxUI = null; if (window.console) console.error('inbox failed to mount', e); }
   if (!inboxUI && elInboxBtn && elInboxBtn.parentNode) elInboxBtn.remove();
   if (inboxUI && elInboxBtn) elInboxBtn.onclick = (e) => { e.stopPropagation(); toggleInbox(); };
+  // p17 sidebar view. Absent sidebar.js (404, stale cache, threw) leaves the chip as a plain label:
+  // the badge and the fleet model still work without it.
+  try {
+    if (window.cmuxSidebar && typeof window.cmuxSidebar.createSidebar === 'function') {
+      sidebar = window.cmuxSidebar.createSidebar({
+        model: sideModel, doc: document, mount: $('side'), scrim: $('sidescrim'), store: sideStore,
+        isPhone: () => !canSplit(),
+        current: () => ({ machine: state.machine, wsRef: state.wsRef, surfaceId: state.tab && state.tab.id }),
+        errorText: (code, id) => machineErr(code, id),
+        onJump: (target) => { if (!jumpTo(target)) setStatus('cannot reach that tab', true, 3000); },
+        onRename: (mid, w) => { if (mid !== state.machine) switchMachine(mid); doRenameWorkspace({ id: w.id, ref: w.ref, title: w.title }); },
+        onClose: (mid, w) => { if (mid !== state.machine) switchMachine(mid); doCloseWorkspace({ id: w.id, ref: w.ref, title: w.title }); },
+        onNew: (mid) => { if (mid !== state.machine) switchMachine(mid); doNewWorkspace(); },
+        onRetry: () => loadFleet(),
+      });
+    }
+  } catch (e) { sidebar = null; if (window.console) console.error('sidebar failed to mount', e); }
+  if (elWsChip) elWsChip.onclick = (e) => { e.stopPropagation(); if (sidebar) sidebar.toggle(); };
+  window.addEventListener('resize', () => { if (sidebar) sidebar.render(null); });   // phone ↔ desktop flips the drawer rule
 
   function toggleInbox() {
     if (!inboxUI) return;
