@@ -40,12 +40,15 @@ const SF = { a: 'AAAAAAAA-0000-0000-0000-000000000001', b: 'BBBBBBBB-0000-0000-0
   a2: 'CCCCCCCC-0000-0000-0000-000000000003' };
 const PANE = { a: 'PPPPPPPP-0000-0000-0000-00000000000A', b: 'PPPPPPPP-0000-0000-0000-00000000000B' };
 const WS = 'WWWWWWWW-0000-0000-0000-00000000000W';
+// Mutable per-surface status, so the smoke can drive a tab through Running → idle the way cmux does
+// and watch `done` appear. /stub/set-status is the only writer.
+const STATUS = { [SF.a]: 'Running', [SF.a2]: 'Needs input', [SF.b]: '' };
 const tree = () => ({ workspaces: [{
   ref: 'workspace:1', id: WS, title: 'SMOKE', selected: true, window: 'win',
   tabs: [
-    { id: SF.a, ref: 'surface:1', title: 'left-agent', type: 'terminal', selected: true, pane: PANE.a, paneRef: 'pane:1', inPane: true, status: 'Running' },
-    { id: SF.a2, ref: 'surface:3', title: 'left-second', type: 'terminal', selected: false, pane: PANE.a, paneRef: 'pane:1', inPane: false, status: 'Needs input' },
-    { id: SF.b, ref: 'surface:2', title: 'right-agent', type: 'terminal', selected: false, pane: PANE.b, paneRef: 'pane:2', inPane: true, status: '' },
+    { id: SF.a, ref: 'surface:1', title: 'left-agent', type: 'terminal', selected: true, pane: PANE.a, paneRef: 'pane:1', inPane: true, status: STATUS[SF.a] },
+    { id: SF.a2, ref: 'surface:3', title: 'left-second', type: 'terminal', selected: false, pane: PANE.a, paneRef: 'pane:1', inPane: false, status: STATUS[SF.a2] },
+    { id: SF.b, ref: 'surface:2', title: 'right-agent', type: 'terminal', selected: false, pane: PANE.b, paneRef: 'pane:2', inPane: true, status: STATUS[SF.b] },
   ],
   panes: [
     { ref: 'pane:1', id: PANE.a, index: 0, focused: true, selected: SF.a, tabs: [SF.a, SF.a2] },
@@ -95,6 +98,13 @@ const bridge = http.createServer((req, res) => {
     req.on('close', () => layoutClients.delete(res));
     return;
   }
+  // test-only: pretend a session on the Mac started or finished, so the next /cmux/tree read (and so
+  // the next fleet beat) carries the new status. Same precedent as /stub/push-layout below.
+  if (u.pathname === '/stub/set-status') {
+    const s = u.searchParams.get('surface');
+    if (s && Object.prototype.hasOwnProperty.call(STATUS, s)) STATUS[s] = u.searchParams.get('status') || '';
+    return json({ ok: true, status: STATUS });
+  }
   // test-only: pretend the divider was dragged ON THE MAC and push the new layout down the stream
   if (u.pathname === '/stub/push-layout') {
     dividerAt = Number(u.searchParams.get('target') || 0.3);
@@ -143,8 +153,14 @@ const server = spawn(process.execPath, ['server.js'], {
   env: { ...process.env, PORT: String(SERVER_PORT), HOST: '127.0.0.1', SERVER_TOKEN: TOKEN,
     CMUX_MACHINE_URL: `http://127.0.0.1:${BRIDGE_PORT}`, CMUX_MACHINE_SECRET: 'stub',
     CMUX_MACHINE_LABEL: 'stub-mac', CMUX_CONFIG: '',
-    // a second, unplugged machine: nothing listens on port 1, so every call to it is refused at once
-    CMUX_MACHINES: JSON.stringify([{ id: 'unplugged', label: 'Unplugged Mac', baseUrl: 'http://127.0.0.1:1', secret: 'x' }]) },
+    // Three machines. `second` is REACHABLE — the same stub bridge answers for it, so it serves the
+    // same tree, which is what makes switching machines (and coming back to the remembered one after
+    // a reload) testable. `unplugged` has nothing listening on port 1, so every call to it is refused
+    // at once; it is the unreachable row, and it is not switchable from the panel by design.
+    CMUX_MACHINES: JSON.stringify([
+      { id: 'second', label: 'Second Mac', baseUrl: `http://127.0.0.1:${BRIDGE_PORT}`, secret: 'stub' },
+      { id: 'unplugged', label: 'Unplugged Mac', baseUrl: 'http://127.0.0.1:1', secret: 'x' },
+    ]) },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 server.stderr.on('data', (d) => process.stderr.write('[server] ' + d));
@@ -421,23 +437,107 @@ try {
     await page.locator('#pasteBtn').count() === 1);
 
   // --- p17 sidebar: every machine, what is waiting, three modes, drawer on a phone ---
+  // TWO of the three machines are reachable and answered by the same stub bridge, so they carry the
+  // same tree: every FLEET-wide count is double the per-machine one. Machine-scoped locators keep the
+  // per-machine assertions honest about which machine they are reading.
+  const box = (id) => page.locator(`#side .sidem[data-machine="${id}"]`);
+  const machineLabel = () => page.locator('#hostLabel').innerText();
   check('the dropdown is gone', await page.locator('#wsMenu').count() === 0);
   check('desktop opens with the panel in full mode', await page.locator('#side').getAttribute('data-mode') === 'full');
   const mh = page.locator('#side .sidemh');
-  check('both machines are listed', await mh.count() === 2, 'n=' + await mh.count());
-  check('the unreachable machine says so in words', /unreachable/i.test(await page.locator('#side .sideerr').innerText()));
-  check('the waiting tab badges its workspace', await page.locator('#side .siderow.ws .sidecount').first().innerText() === '1');
+  check('every machine is listed', await mh.count() === 3, 'n=' + await mh.count());
+  // The panel is where a dead machine is now reported, so the wording regression that used to be
+  // checked on #status lives here: named machine, plain words, never the raw bridge code.
+  const deadText = await page.locator('#side .sideerr').innerText();
+  check('an unreachable bridge is reported by machine name in words, not as a raw code',
+    /unreachable/i.test(deadText) && !/bridge_unreachable/.test(deadText) && /Unplugged Mac/.test(deadText),
+    JSON.stringify(deadText));
+  check('the waiting tab badges its workspace',
+    await box('default').locator('.siderow.ws .sidecount').first().innerText() === '1');
   check('the waiting tab badges its machine', await mh.first().locator('.sidecount').innerText() === '1');
-  check('the header badge carries the total', await page.locator('#sideBadge').innerText() === '1');
-  const subRows = page.locator('#side .siderow.tab');
+  check('the header badge carries the fleet total (one waiting on each reachable machine)',
+    await page.locator('#sideBadge').innerText() === '2', 'badge=' + await page.locator('#sideBadge').innerText());
+  const subRows = box('default').locator('.siderow.tab');
   check('only the running and waiting tabs are listed under the workspace', await subRows.count() === 2, 'n=' + await subRows.count());
   const focusBefore = seen.focusSurface.length;
-  await page.locator('#side .siderow.tab', { hasText: 'left-second' }).click();
+  await box('default').locator('.siderow.tab', { hasText: 'left-second' }).click();
   await page.waitForTimeout(500);
   check('tapping the waiting tab lands on it', seen.focusSurface.length > focusBefore && seen.focusSurface[seen.focusSurface.length - 1].surface === SF.a2,
     JSON.stringify(seen.focusSurface.slice(-1)));
-  const wsRows = await page.locator('#side .siderow.ws').count();
-  check('the dead machine lists no workspaces', wsRows === 1, 'ws rows=' + wsRows);
+  const wsRows = await box('unplugged').locator('.siderow.ws').count();
+  check('the dead machine lists no workspaces', wsRows === 0, 'ws rows=' + wsRows);
+
+  // --- switching machines from the panel, and the remembered machine surviving a reload (23e6667) --
+  // The panel replaced the machine dropdown, so it is the only way to change machine now. The dead
+  // machine is deliberately NOT switchable here: it has no workspace rows to tap.
+  await box('second').locator('.siderow.ws').first().click();
+  await page.waitForTimeout(1500);
+  check('tapping a workspace under another machine switches to it', (await machineLabel()) === 'Second Mac',
+    JSON.stringify(await machineLabel()));
+  const secondPanes = await page.locator('.pane').count();
+  check('the second machine paints its own panes', secondPanes >= 1, 'panes=' + secondPanes);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('a reload comes back on the machine that was chosen, not the first registered one',
+    (await machineLabel()) === 'Second Mac', JSON.stringify(await machineLabel()));
+  await box('default').locator('.siderow.ws').first().click();
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('switching back repaints the first machine',
+    (await machineLabel()) === 'stub-mac' && await page.locator('.pane').count() >= 1,
+    JSON.stringify(await machineLabel()) + ' panes=' + await page.locator('.pane').count());
+
+  // --- a tab that finishes OFF SCREEN badges `done`, and opening it clears it (spec §2.3, §6) ---
+  // Land on left-agent first: a surface mirrored in a pane is ON screen, and an on-screen tab never
+  // badges done — so left-second has to be the one nobody is looking at.
+  await box('default').locator('.siderow.tab', { hasText: 'left-agent' }).click();
+  await page.waitForTimeout(700);
+  // the client polls the fleet every 5 s, so each transition is waited for in the DOM, not slept on
+  const glyph = (mid, sid, st) => page.waitForFunction(
+    ([m, s, g]) => {
+      const r = document.querySelector(`#side .sidem[data-machine="${m}"] .siderow.tab[data-surface="${s}"]`);
+      return !!(r && r.querySelector('.sideglyph.' + g));
+    }, [mid, sid, st], { timeout: 20000, polling: 250 });
+  const setStatus_ = (sid, st) => fetch(`http://127.0.0.1:${BRIDGE_PORT}/stub/set-status?surface=${sid}&status=${encodeURIComponent(st)}`);
+  await setStatus_(SF.a2, 'Running');
+  let ranOffScreen = true;
+  await glyph('default', SF.a2, 'running').catch(() => { ranOffScreen = false; });
+  check('a tab that starts running off screen shows as running', ranOffScreen);
+  await setStatus_(SF.a2, '');
+  let doneShown = true;
+  await glyph('default', SF.a2, 'done').catch(() => { doneShown = false; });
+  check('a tab that went Running → idle off screen badges done', doneShown);
+  check('the done tab still counts on its workspace',
+    await box('default').locator('.siderow.ws .sidecount').first().innerText() === '1',
+    'count=' + await box('default').locator('.siderow.ws .sidecount').first().innerText());
+  const focusBeforeDone = seen.focusSurface.length;
+  await box('default').locator('.siderow.tab', { hasText: 'left-second' }).click();
+  await page.waitForTimeout(700);
+  check('tapping the done tab lands on it',
+    seen.focusSurface.length > focusBeforeDone && seen.focusSurface[seen.focusSurface.length - 1].surface === SF.a2,
+    JSON.stringify(seen.focusSurface.slice(-1)));
+  const doneRowsLeft = await box('default').locator(`.siderow.tab[data-surface="${SF.a2}"]`).count();
+  check('opening it clears the done row at once', doneRowsLeft === 0, 'rows=' + doneRowsLeft);
+  check('and the header badge drops by one', await page.locator('#sideBadge').innerText() === '1',
+    'badge=' + await page.locator('#sideBadge').innerText());
+
+  // --- the panel keeps its scroll position across a beat ---
+  // A repaint rebuilds the list every 5 s; a fleet taller than the panel was unscrollable because of
+  // it. The fixture fleet is short, so the overflow a real fleet has is created by capping the list.
+  const style = await page.addStyleTag({ content: '#side .sidelist { max-height: 90px !important; }' });
+  const listTop = () => page.locator('#side .sidelist').evaluate((e) => e.scrollTop);
+  await page.locator('#side .sidelist').evaluate((e) => { e.scrollTop = 45; });
+  const scrolledTo = await listTop();
+  await setStatus_(SF.a, 'Needs input');                        // a real change, so a repaint must happen
+  await glyph('default', SF.a, 'waiting').catch(() => {});
+  const keptScroll = await listTop();
+  check('the panel keeps its scroll position across a beat', scrolledTo > 0 && keptScroll === scrolledTo,
+    'before=' + scrolledTo + ' after=' + keptScroll);
+  await setStatus_(SF.a, 'Running');
+  await glyph('default', SF.a, 'running').catch(() => {});
+  await style.evaluate((e) => e.remove());
+
   // rail ↔ full persists across a reload
   await page.locator('#side .siderail').click();
   await page.waitForTimeout(200);
@@ -462,7 +562,35 @@ try {
   const narrow = await page.locator('.pane').count();
   const solo = await page.locator('.pane.solo').count();
   check('a phone viewport mirrors one pane at a time', narrow === 1 && solo === 1, 'panes=' + narrow + ' solo=' + solo);
-  check('a phone starts with the panel hidden', await page.locator('#side').getAttribute('data-mode') === 'hidden');
+  check('resizing down to a phone puts the panel away', await page.locator('#side').getAttribute('data-mode') === 'hidden');
+  // ...and so does a COLD BOOT on a phone, which is the case the resize above cannot prove: the
+  // desktop's stored mode is still `full`, and the phone reads its own key (cmux_side_phone).
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1000);
+  check('a phone starts with the panel hidden', await page.locator('#side').getAttribute('data-mode') === 'hidden',
+    'mode=' + await page.locator('#side').getAttribute('data-mode'));
+  check('the desktop mode is remembered separately, and is still full',
+    await page.evaluate(() => localStorage.getItem('cmux_side')) === 'full',
+    JSON.stringify(await page.evaluate(() => localStorage.getItem('cmux_side'))));
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(250);
+  await page.locator('#side .siderail').click();
+  await page.waitForTimeout(250);
+  check('the foot control collapses the phone drawer to the rail',
+    await page.locator('#side').getAttribute('data-mode') === 'rail');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1000);
+  check('the phone remembers its OWN mode across a reload',
+    await page.locator('#side').getAttribute('data-mode') === 'rail',
+    'mode=' + await page.locator('#side').getAttribute('data-mode'));
+  await page.locator('#side .siderail').click();   // back to full, so the chip below reopens as a drawer
+  await page.waitForTimeout(200);
+  await page.locator('#wsChip').click();           // and away, so the remaining phone checks start hidden
+  await page.waitForTimeout(250);
+  check('the chip puts the phone panel away again',
+    await page.locator('#side').getAttribute('data-mode') === 'hidden');
   await page.locator('#wsChip').click();
   await page.waitForTimeout(250);
   check('on a phone full is a drawer with a scrim', await page.locator('#side').getAttribute('data-mode') === 'full'
@@ -479,6 +607,33 @@ try {
     'n=' + await page.locator('#tabs .tab.add').count());
   check('the Files toggle is still in the toolbar on a phone',
     await page.locator('header #filesBtn').isVisible());
+
+  // --- the long-press sheet is placed in the VIEWPORT, so #side's overflow cannot swallow it ---
+  // A short viewport puts the last workspace row near the bottom edge — the case where a sheet
+  // positioned inside the panel was painted past #side's clipped box and never appeared at all.
+  await page.setViewportSize({ width: 390, height: 320 });
+  await page.waitForTimeout(400);
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(300);
+  await page.locator('#side .siderow.ws').last().evaluate((e) => e.scrollIntoView({ block: 'end' }));
+  await page.waitForTimeout(200);
+  await page.locator('#side .siderow.ws').last().dispatchEvent('touchstart');
+  await page.waitForTimeout(700);
+  const sheetGeom = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#side .siderow.ws')].pop();
+    const sheet = document.querySelector('#side .sidesheet');
+    if (!row || !sheet) return { sheet: !!sheet };
+    const rc = row.getBoundingClientRect(), sr = sheet.getBoundingClientRect();
+    const mr = document.getElementById('side').getBoundingClientRect();
+    return { sheet: true, pos: getComputedStyle(sheet).position, top: sr.top, bottom: sr.bottom,
+      // where the pre-fix code put it, and how far past the panel's clipped box that was
+      insidePanelWouldOverflow: rc.bottom + 4 + sr.height > mr.bottom, vh: window.innerHeight };
+  });
+  check('a long-press near the bottom opens a sheet that is fully on screen',
+    !!sheetGeom.sheet && sheetGeom.pos === 'fixed' && sheetGeom.top >= 0 && sheetGeom.bottom <= sheetGeom.vh
+    && sheetGeom.insidePanelWouldOverflow, JSON.stringify(sheetGeom));
+  check('the sheet offers rename and close', await page.locator('#side .sidesheet button').count() === 2,
+    'n=' + await page.locator('#side .sidesheet button').count());
 } catch (e) {
   check('smoke run completed', false, e && e.message);
 } finally {
