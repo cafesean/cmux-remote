@@ -8,12 +8,10 @@
 // `url.pathname` and cache-matches by that, so a query-bearing precache key would leave nothing the
 // pathname fallback could find and the first offline load would 503. The versioned tags live in
 // index.html alone, and they still bust caches because this CACHE version bumps with them.
-// v16: inbox.js changed (hidden-attribute enforcement + the new verdict chips). The script fetch
-// branch is network-first, so an online reload already gets the new module — the bump is for the
-// OFFLINE copy, and for the cache-first '/' shell, which is what leaves a device showing no ✉ at all
-// when its index.html predates the inbox.
-const CACHE = 'cmux-shell-v16';
-const SHELL = ['/', '/app.js', '/radar.js', '/inbox.js'];
+// v18: p17 sidebar — a new script and new shell markup. Bump both the cache generation and the
+// service worker registration URL so installed clients replace any older worker immediately.
+const CACHE = 'cmux-shell-v18';
+const SHELL = ['/', '/app.js', '/sidebar.js', '/radar.js', '/inbox.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -38,7 +36,7 @@ self.addEventListener('fetch', (e) => {
   // offline fallback. Cache-first here made every deploy "one launch behind". Precaching a script
   // WITHOUT listing it here leaves the copy sitting unused in Cache Storage — this branch is the only
   // thing that ever reads it.
-  if (path === '/app.js' || path === '/radar.js' || path === '/inbox.js') {
+  if (path === '/app.js' || path === '/sidebar.js' || path === '/radar.js' || path === '/inbox.js') {
     e.respondWith(
       fetch(new Request(path, { cache: 'no-store' }))
         .then((r) => putCache(path, r))

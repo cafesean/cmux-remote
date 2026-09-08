@@ -8,6 +8,9 @@
 // Playwright is BORROWED, not depended on — this repo stays npm-install-free:
 //   PLAYWRIGHT_DIR=/path/to/node_modules/playwright/index.mjs node test/multipane-smoke.mjs
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { spawn } from 'child_process';
 
 async function loadPlaywright() {
@@ -37,12 +40,15 @@ const SF = { a: 'AAAAAAAA-0000-0000-0000-000000000001', b: 'BBBBBBBB-0000-0000-0
   a2: 'CCCCCCCC-0000-0000-0000-000000000003' };
 const PANE = { a: 'PPPPPPPP-0000-0000-0000-00000000000A', b: 'PPPPPPPP-0000-0000-0000-00000000000B' };
 const WS = 'WWWWWWWW-0000-0000-0000-00000000000W';
+// Mutable per-surface status, so the smoke can drive a tab through Running → idle the way cmux does
+// and watch `done` appear. /stub/set-status is the only writer.
+const STATUS = { [SF.a]: 'Running', [SF.a2]: 'Needs input', [SF.b]: '' };
 const tree = () => ({ workspaces: [{
   ref: 'workspace:1', id: WS, title: 'SMOKE', selected: true, window: 'win',
   tabs: [
-    { id: SF.a, ref: 'surface:1', title: 'left-agent', type: 'terminal', selected: true, pane: PANE.a, paneRef: 'pane:1', inPane: true, status: 'Running' },
-    { id: SF.a2, ref: 'surface:3', title: 'left-second', type: 'terminal', selected: false, pane: PANE.a, paneRef: 'pane:1', inPane: false, status: '' },
-    { id: SF.b, ref: 'surface:2', title: 'right-agent', type: 'terminal', selected: false, pane: PANE.b, paneRef: 'pane:2', inPane: true, status: '' },
+    { id: SF.a, ref: 'surface:1', title: 'left-agent', type: 'terminal', selected: true, pane: PANE.a, paneRef: 'pane:1', inPane: true, status: STATUS[SF.a] },
+    { id: SF.a2, ref: 'surface:3', title: 'left-second', type: 'terminal', selected: false, pane: PANE.a, paneRef: 'pane:1', inPane: false, status: STATUS[SF.a2] },
+    { id: SF.b, ref: 'surface:2', title: 'right-agent', type: 'terminal', selected: false, pane: PANE.b, paneRef: 'pane:2', inPane: true, status: STATUS[SF.b] },
   ],
   panes: [
     { ref: 'pane:1', id: PANE.a, index: 0, focused: true, selected: SF.a, tabs: [SF.a, SF.a2] },
@@ -77,7 +83,14 @@ const gridFor = (sid) => {
     spans, cursor: null }, h: 'grid-' + sid };
 };
 
-const seen = { resize: [], focusSurface: [], focusPane: [], key: [], drop: [], split: [], closePane: [], upload: [] };
+const seen = { resize: [], focusSurface: [], focusPane: [], key: [], drop: [], split: [], closePane: [], upload: [],
+  newWs: [], renameWs: [], closeWs: [] };
+// server.js routes a workspace action to a machine and relays only the action's own fields — the
+// `machine` the browser sent is consumed by the router and never reaches the bridge. So the two
+// reachable machines are given DIFFERENT bridge secrets (below), and this is how the one stub tells
+// which of them a recorded request came from.
+const SECOND_SECRET = 'stub-second';
+const machineOf = (req) => (req.headers['x-bridge-secret'] === SECOND_SECRET ? 'second' : 'default');
 const layoutClients = new Set();   // open layout-stream responses, so the stub can push like cmux does
 const bridge = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -91,6 +104,13 @@ const bridge = http.createServer((req, res) => {
     layoutClients.add(res);
     req.on('close', () => layoutClients.delete(res));
     return;
+  }
+  // test-only: pretend a session on the Mac started or finished, so the next /cmux/tree read (and so
+  // the next fleet beat) carries the new status. Same precedent as /stub/push-layout below.
+  if (u.pathname === '/stub/set-status') {
+    const s = u.searchParams.get('surface');
+    if (s && Object.prototype.hasOwnProperty.call(STATUS, s)) STATUS[s] = u.searchParams.get('status') || '';
+    return json({ ok: true, status: STATUS });
   }
   // test-only: pretend the divider was dragged ON THE MAC and push the new layout down the stream
   if (u.pathname === '/stub/push-layout') {
@@ -122,7 +142,25 @@ const bridge = http.createServer((req, res) => {
     if (u.pathname === '/cmux/upload') {
       const name = decodeURIComponent(String(req.headers['x-file-name'] || ''));
       seen.upload.push({ name, bytes: body.length });
+      // the real bridge refuses a 0-byte body (bridge.js cmuxUpload) — mirror it, or the batch tests lie
+      if (!body.length) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: 'empty' })); }
       return json({ ok: true, path: '/Users/stub/Downloads/cmux-remote/2026-07-31/' + name, name, bytes: body.length });
+    }
+    // The three workspace actions the panel took over from the deleted dropdown (spec §4). Every
+    // answer hands back the tree UNCHANGED, so the fixture the later checks read is never disturbed:
+    // `workspace`/`id` name the workspace and tab that already exist, which is what doNewWorkspace
+    // reads to land the client somewhere.
+    if (u.pathname === '/cmux/new-workspace') {
+      seen.newWs.push({ ...b, machine: machineOf(req) });
+      return json({ ok: true, workspaces: tree().workspaces, workspace: 'workspace:1', id: SF.a });
+    }
+    if (u.pathname === '/cmux/rename-workspace') {
+      seen.renameWs.push({ ...b, machine: machineOf(req) });
+      return json({ ok: true, workspaces: tree().workspaces });
+    }
+    if (u.pathname === '/cmux/close-workspace') {
+      seen.closeWs.push({ ...b, machine: machineOf(req) });
+      return json({ ok: true, workspaces: tree().workspaces });
     }
     if (u.pathname === '/cmux/focus-surface') { seen.focusSurface.push(b); return json({ ok: true }); }
     if (u.pathname === '/cmux/focus-pane') { seen.focusPane.push(b); return json({ ok: true }); }
@@ -137,7 +175,15 @@ const server = spawn(process.execPath, ['server.js'], {
   cwd: REPO,
   env: { ...process.env, PORT: String(SERVER_PORT), HOST: '127.0.0.1', SERVER_TOKEN: TOKEN,
     CMUX_MACHINE_URL: `http://127.0.0.1:${BRIDGE_PORT}`, CMUX_MACHINE_SECRET: 'stub',
-    CMUX_MACHINE_LABEL: 'stub-mac', CMUX_MACHINES: '', CMUX_CONFIG: '' },
+    CMUX_MACHINE_LABEL: 'stub-mac', CMUX_CONFIG: '',
+    // Three machines. `second` is REACHABLE — the same stub bridge answers for it, so it serves the
+    // same tree, which is what makes switching machines (and coming back to the remembered one after
+    // a reload) testable. `unplugged` has nothing listening on port 1, so every call to it is refused
+    // at once; it is the unreachable row, and it is not switchable from the panel by design.
+    CMUX_MACHINES: JSON.stringify([
+      { id: 'second', label: 'Second Mac', baseUrl: `http://127.0.0.1:${BRIDGE_PORT}`, secret: SECOND_SECRET },
+      { id: 'unplugged', label: 'Unplugged Mac', baseUrl: 'http://127.0.0.1:1', secret: 'x' },
+    ]) },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 server.stderr.on('data', (d) => process.stderr.write('[server] ' + d));
@@ -145,6 +191,11 @@ await new Promise((r) => setTimeout(r, 700));
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+// Console errors/warnings are REPORTED but not fatal. p17 shipped the sidebar dark because
+// /sidebar.js 404'd and app.js's defensive mount swallowed it — the only trace anywhere was a
+// console error nothing was listening for. A 404 on a module is not a page error, so pageerror
+// below never sees it.
+page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.log('[console] ' + m.type() + ': ' + m.text()); });
 page.on('pageerror', (e) => { console.log('FAIL — page error: ' + e.message); failed++; });
 const base = `http://127.0.0.1:${SERVER_PORT}`;
 
@@ -347,6 +398,35 @@ try {
     await page.locator('#attachBtn').count() === 1);
   await page.locator('#text').fill('');
 
+  // --- several files at once: every one lands, and one bad file does not take the batch down ---
+  // A folder dragged out of Finder arrives as a 0-byte File. The bridge refuses it (`empty`), and
+  // the first refusal used to abort the loop and throw away the paths already uploaded — so a bulk
+  // attach with one folder in it "gave an error and did not work" while every single file worked.
+  const bulkBefore = seen.upload.length;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmux-bulk-'));
+  const mk = (n, bytes) => { const p = path.join(tmp, n); fs.writeFileSync(p, Buffer.alloc(bytes, 65)); return p; };
+  await page.setInputFiles('#attachInput', [mk('one.txt', 10), mk('two.png', 20), mk('three.pdf', 30)]);
+  await page.waitForTimeout(1500);
+  const bulkComposed = await page.locator('#text').inputValue();
+  check('attaching three files uploads all three', seen.upload.length === bulkBefore + 3,
+    'n=' + (seen.upload.length - bulkBefore));
+  check('all three paths land in the composer',
+    ['one.txt', 'two.png', 'three.pdf'].every((n) => bulkComposed.includes('/' + n)), JSON.stringify(bulkComposed));
+  await page.locator('#text').fill('');
+  const mixedBefore = seen.upload.length;
+  await page.setInputFiles('#attachInput', [mk('good.txt', 10), mk('folder', 0), mk('also-good.txt', 12)]);
+  await page.waitForTimeout(1500);
+  const mixedComposed = await page.locator('#text').inputValue();
+  const mixedStatus = await page.locator('#status').evaluate((e) => e.textContent);
+  check('a 0-byte entry does not abort the batch: the good files still land',
+    mixedComposed.includes('/good.txt') && mixedComposed.includes('/also-good.txt'), JSON.stringify(mixedComposed));
+  check('the status names the skipped file and says why',
+    /folder/.test(mixedStatus) && /empty/i.test(mixedStatus), JSON.stringify(mixedStatus));
+  check('the 0-byte entry never crosses the wire',
+    !seen.upload.slice(mixedBefore).some((u) => u.name === 'folder'),
+    JSON.stringify(seen.upload.slice(mixedBefore).map((u) => u.name)));
+  await page.locator('#text').fill('');
+
   // --- pasting a screenshot is the same gesture without the drag ---
   // A clipboard image has no filename, so it must be stamped rather than left as the browser's
   // placeholder, and some browsers expose it only through `items` — never through `files`.
@@ -379,12 +459,310 @@ try {
   check('there is a clipboard button for iOS (no ⌘V there)',
     await page.locator('#pasteBtn').count() === 1);
 
+  // --- p17 sidebar: every machine, what is waiting, three modes, drawer on a phone ---
+  // TWO of the three machines are reachable and answered by the same stub bridge, so they carry the
+  // same tree: every FLEET-wide count is double the per-machine one. Machine-scoped locators keep the
+  // per-machine assertions honest about which machine they are reading.
+  const box = (id) => page.locator(`#side .sidem[data-machine="${id}"]`);
+  const machineLabel = () => page.locator('#hostLabel').innerText();
+  check('the dropdown is gone', await page.locator('#wsMenu').count() === 0);
+  check('desktop opens with the panel in full mode', await page.locator('#side').getAttribute('data-mode') === 'full');
+  const mh = page.locator('#side .sidemh');
+  check('every machine is listed', await mh.count() === 3, 'n=' + await mh.count());
+  // The panel is where a dead machine is now reported, so the wording regression that used to be
+  // checked on #status lives here: named machine, plain words, never the raw bridge code.
+  const deadText = await page.locator('#side .sideerr').innerText();
+  check('an unreachable bridge is reported by machine name in words, not as a raw code',
+    /unreachable/i.test(deadText) && !/bridge_unreachable/.test(deadText) && /Unplugged Mac/.test(deadText),
+    JSON.stringify(deadText));
+  check('the waiting tab badges its workspace',
+    await box('default').locator('.siderow.ws .sidecount').first().innerText() === '1');
+  check('the waiting tab badges its machine', await mh.first().locator('.sidecount').innerText() === '1');
+  check('the header badge carries the fleet total (one waiting on each reachable machine)',
+    await page.locator('#sideBadge').innerText() === '2', 'badge=' + await page.locator('#sideBadge').innerText());
+  const subRows = box('default').locator('.siderow.tab');
+  check('only the running and waiting tabs are listed under the workspace', await subRows.count() === 2, 'n=' + await subRows.count());
+  const focusBefore = seen.focusSurface.length;
+  await box('default').locator('.siderow.tab', { hasText: 'left-second' }).click();
+  await page.waitForTimeout(500);
+  check('tapping the waiting tab lands on it', seen.focusSurface.length > focusBefore && seen.focusSurface[seen.focusSurface.length - 1].surface === SF.a2,
+    JSON.stringify(seen.focusSurface.slice(-1)));
+  const wsRows = await box('unplugged').locator('.siderow.ws').count();
+  check('the dead machine lists no workspaces', wsRows === 0, 'ws rows=' + wsRows);
+
+  // --- switching machines from the panel, and the remembered machine surviving a reload (23e6667) --
+  // The panel replaced the machine dropdown, so it is the only way to change machine now. The dead
+  // machine is deliberately NOT switchable here: it has no workspace rows to tap.
+  await box('second').locator('.siderow.ws').first().click();
+  await page.waitForTimeout(1500);
+  check('tapping a workspace under another machine switches to it', (await machineLabel()) === 'Second Mac',
+    JSON.stringify(await machineLabel()));
+  const secondPanes = await page.locator('.pane').count();
+  check('the second machine paints its own panes', secondPanes >= 1, 'panes=' + secondPanes);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('a reload comes back on the machine that was chosen, not the first registered one',
+    (await machineLabel()) === 'Second Mac', JSON.stringify(await machineLabel()));
+  await box('default').locator('.siderow.ws').first().click();
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('switching back repaints the first machine',
+    (await machineLabel()) === 'stub-mac' && await page.locator('.pane').count() >= 1,
+    JSON.stringify(await machineLabel()) + ' panes=' + await page.locator('.pane').count());
+
+  // --- the panel's own workspace actions: + New, ✎ rename, × close (spec §4) ---
+  // These three moved out of the dropdown this branch deletes, so the panel is now the ONLY thing
+  // that fires them and each carries a machine-switch side effect. The machine in every assertion
+  // below is the one the server picked to relay to, recovered from the bridge secret it used.
+  //
+  // ✎ and × only exist on a hovered row on a desktop, and a 5-second beat can rebuild the row
+  // between the hover and the click — so the hover is retried rather than assumed to stick.
+  const clickRowAction = async (mbox, cls) => {
+    const row = mbox.locator('.siderow.ws').first();
+    for (let i = 0; i < 5; i++) {
+      await row.hover();
+      try { await row.locator(cls).click({ timeout: 1500 }); return true; } catch (_) { /* repainted under us */ }
+    }
+    return false;
+  };
+  const newBefore = seen.newWs.length;
+  await box('default').locator('.siderow.new').click();
+  await page.waitForTimeout(700);
+  check('+ New workspace sends exactly one new-workspace', seen.newWs.length === newBefore + 1,
+    'n=' + (seen.newWs.length - newBefore));
+  check('...to the machine whose row was tapped',
+    (seen.newWs[seen.newWs.length - 1] || {}).machine === 'default', JSON.stringify(seen.newWs.slice(-1)));
+
+  const renameBefore = seen.renameWs.length;
+  page.once('dialog', (d) => d.accept('Renamed'));
+  const renameClicked = await clickRowAction(box('default'), '.sideact.edit');
+  await page.waitForTimeout(700);
+  const rn = seen.renameWs[seen.renameWs.length - 1] || {};
+  check('✎ on a workspace row renames it with the title that was typed',
+    renameClicked && seen.renameWs.length === renameBefore + 1 && rn.title === 'Renamed' && rn.workspace === WS
+    && rn.machine === 'default', JSON.stringify({ clicked: renameClicked, sent: rn }));
+
+  const closeBefore = seen.closeWs.length;
+  page.once('dialog', (d) => d.dismiss());
+  const closeClicked = await clickRowAction(box('default'), '.sideact.close');
+  await page.waitForTimeout(700);
+  check('× asks first, and a dismissed confirm closes nothing',
+    closeClicked && seen.closeWs.length === closeBefore,
+    'clicked=' + closeClicked + ' n=' + (seen.closeWs.length - closeBefore));
+
+  // ...and a CONFIRMED one actually closes. The dismissed check above cannot tell "asked, and the
+  // dismissal stopped it" from "the button does nothing at all": with `cl.onclick` unwired the span
+  // is still there and still clickable, no confirm is ever raised, and no close-workspace is sent —
+  // every clause of it still passes. Accepting the confirm is the positive signal that the wiring
+  // reaches doCloseWorkspace, and the recorded body is what says which row it was for.
+  const closedBefore = seen.closeWs.length;
+  page.once('dialog', (d) => d.accept());
+  const confirmClicked = await clickRowAction(box('default'), '.sideact.close');
+  await page.waitForTimeout(900);
+  const cw = seen.closeWs[seen.closeWs.length - 1] || {};
+  check('× with the confirm accepted closes THAT workspace, once',
+    confirmClicked && seen.closeWs.length === closedBefore + 1 && cw.workspace === WS && cw.machine === 'default',
+    JSON.stringify({ clicked: confirmClicked, n: seen.closeWs.length - closedBefore, sent: cw }));
+  // The stub answers with the tree UNCHANGED, so the client tears the panes down and re-selects the
+  // same workspace. Wait for that rebuild, or the machine checks below race it.
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+
+  // the same button under the OTHER machine has to switch machine before it fires
+  const crossBefore = seen.newWs.length;
+  await box('second').locator('.siderow.new').click();
+  await page.waitForTimeout(1000);
+  check('+ New workspace under another machine switches machine first',
+    (await machineLabel()) === 'Second Mac', JSON.stringify(await machineLabel()));
+  check('...and the new-workspace lands on THAT machine',
+    seen.newWs.length === crossBefore + 1 && (seen.newWs[seen.newWs.length - 1] || {}).machine === 'second',
+    JSON.stringify(seen.newWs.slice(-1)));
+  await box('default').locator('.siderow.ws').first().click();   // back to stub-mac for the checks below
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('and the panel comes back to the first machine after that',
+    (await machineLabel()) === 'stub-mac', JSON.stringify(await machineLabel()));
+
+  // --- a tab that finishes OFF SCREEN badges `done`, and opening it clears it (spec §2.3, §6) ---
+  // Land on left-agent first: a surface mirrored in a pane is ON screen, and an on-screen tab never
+  // badges done — so left-second has to be the one nobody is looking at.
+  await box('default').locator('.siderow.tab', { hasText: 'left-agent' }).click();
+  await page.waitForTimeout(700);
+  // the client polls the fleet every 5 s, so each transition is waited for in the DOM, not slept on
+  const glyph = (mid, sid, st) => page.waitForFunction(
+    ([m, s, g]) => {
+      const r = document.querySelector(`#side .sidem[data-machine="${m}"] .siderow.tab[data-surface="${s}"]`);
+      return !!(r && r.querySelector('.sideglyph.' + g));
+    }, [mid, sid, st], { timeout: 20000, polling: 250 });
+  const setStatus_ = (sid, st) => fetch(`http://127.0.0.1:${BRIDGE_PORT}/stub/set-status?surface=${sid}&status=${encodeURIComponent(st)}`);
+  await setStatus_(SF.a2, 'Running');
+  let ranOffScreen = true;
+  await glyph('default', SF.a2, 'running').catch(() => { ranOffScreen = false; });
+  check('a tab that starts running off screen shows as running', ranOffScreen);
+  await setStatus_(SF.a2, '');
+  let doneShown = true;
+  await glyph('default', SF.a2, 'done').catch(() => { doneShown = false; });
+  check('a tab that went Running → idle off screen badges done', doneShown);
+  check('the done tab still counts on its workspace',
+    await box('default').locator('.siderow.ws .sidecount').first().innerText() === '1',
+    'count=' + await box('default').locator('.siderow.ws .sidecount').first().innerText());
+  const focusBeforeDone = seen.focusSurface.length;
+  await box('default').locator('.siderow.tab', { hasText: 'left-second' }).click();
+  await page.waitForTimeout(700);
+  check('tapping the done tab lands on it',
+    seen.focusSurface.length > focusBeforeDone && seen.focusSurface[seen.focusSurface.length - 1].surface === SF.a2,
+    JSON.stringify(seen.focusSurface.slice(-1)));
+  const doneRowsLeft = await box('default').locator(`.siderow.tab[data-surface="${SF.a2}"]`).count();
+  check('opening it clears the done row at once', doneRowsLeft === 0, 'rows=' + doneRowsLeft);
+  check('and the header badge drops by one', await page.locator('#sideBadge').innerText() === '1',
+    'badge=' + await page.locator('#sideBadge').innerText());
+
+  // --- the panel keeps its scroll position across a beat ---
+  // A repaint rebuilds the list every 5 s; a fleet taller than the panel was unscrollable because of
+  // it. The fixture fleet is short, so the overflow a real fleet has is created by capping the list.
+  const style = await page.addStyleTag({ content: '#side .sidelist { max-height: 90px !important; }' });
+  const listTop = () => page.locator('#side .sidelist').evaluate((e) => e.scrollTop);
+  await page.locator('#side .sidelist').evaluate((e) => { e.scrollTop = 45; });
+  const scrolledTo = await listTop();
+  await setStatus_(SF.a, 'Needs input');                        // a real change, so a repaint must happen
+  await glyph('default', SF.a, 'waiting').catch(() => {});
+  const keptScroll = await listTop();
+  check('the panel keeps its scroll position across a beat', scrolledTo > 0 && keptScroll === scrolledTo,
+    'before=' + scrolledTo + ' after=' + keptScroll);
+  await setStatus_(SF.a, 'Running');
+  await glyph('default', SF.a, 'running').catch(() => {});
+  await style.evaluate((e) => e.remove());
+
+  // rail ↔ full persists across a reload
+  await page.locator('#side .siderail').click();
+  await page.waitForTimeout(200);
+  check('the foot control collapses to the rail', await page.locator('#side').getAttribute('data-mode') === 'rail');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('the rail survives a reload', await page.locator('#side').getAttribute('data-mode') === 'rail');
+  await page.locator('#side .sidemh').first().click();
+  await page.waitForTimeout(200);
+  check('tapping a rail cell opens full', await page.locator('#side').getAttribute('data-mode') === 'full');
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(200);
+  check('the header chip hides the panel', await page.locator('#side').getAttribute('data-mode') === 'hidden');
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(200);
+  check('and brings it back to the last open mode', await page.locator('#side').getAttribute('data-mode') === 'full');
+
+  // --- a stale shell recovers itself: OLD markup + NEW app.js reloads exactly once ---
+  // The first launch after the p17 deploy is the one launch with no workspace or machine switcher at
+  // all: sw.js serves `/` cache-first (instant boot is a product promise) while app.js is
+  // network-first, so the cached pre-p17 index.html — no #side, no #sidescrim, and no
+  // <script src="/sidebar.js"> either — is paired with the app.js that needs them.
+  //
+  // That last omission is why the guard cannot live in sidebar.js: the module never loads on the
+  // launch it exists for. Here the shell cache is poisoned with exactly that markup, which is what a
+  // stale launch IS. page.route cannot stand in for it — a service-worker cache hit never reaches the
+  // network layer Playwright intercepts.
+  //
+  // Boots are counted from inside the page rather than from framenavigated, which also fires for the
+  // History API. The init script runs once per DOCUMENT, before app.js, so the log is one entry per
+  // real boot and each entry is the once-only flag as that boot found it.
+  const staleShell = fs.readFileSync(path.join(REPO, 'public', 'index.html'), 'utf8')
+    .split('\n').filter((l) => !/id="side"|id="sidescrim"|\/sidebar\.js/.test(l)).join('\n');
+  await page.addInitScript(() => {
+    try {
+      if (!sessionStorage.getItem('smoke_boot_watch')) return;
+      const log = JSON.parse(sessionStorage.getItem('smoke_boot_log') || '[]');
+      log.push(sessionStorage.getItem('cmux_shell_reload'));
+      sessionStorage.setItem('smoke_boot_log', JSON.stringify(log));
+    } catch (_) { /* the page under test owns this store; never fail the boot over the log */ }
+  });
+  const poison = (html) => page.evaluate(async (h) => {
+    let n = 0;
+    for (const k of await caches.keys()) {
+      const c = await caches.open(k);
+      if (await c.match('/')) { await c.put('/', new Response(h, { headers: { 'content-type': 'text/html' } })); n++; }
+    }
+    sessionStorage.setItem('smoke_boot_watch', '1');
+    sessionStorage.setItem('smoke_boot_log', '[]');
+    return n;
+  }, html);
+  const bootState = () => page.evaluate(() => ({
+    boots: JSON.parse(sessionStorage.getItem('smoke_boot_log') || '[]'),
+    side: !!document.getElementById('side'),
+    flag: sessionStorage.getItem('cmux_shell_reload'),
+  }));
+  const poisoned = await poison(staleShell);
+  check('the shell cache is what a stale launch reads (fixture sanity)', poisoned === 1,
+    'caches holding / = ' + poisoned);
+  await page.evaluate(() => sessionStorage.removeItem('cmux_shell_reload'));
+  await page.goto(`${base}/`, { waitUntil: 'commit' }).catch(() => {});
+  await page.waitForSelector('#side', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(2000);          // long enough that a SECOND reload would show in the log
+  const recovered = await bootState();
+  check('a stale shell reloads itself ONCE, and the reload lands on the revalidated markup',
+    recovered.boots.length === 2 && recovered.boots[0] === null && recovered.boots[1] === '1'
+    && recovered.side === true, JSON.stringify(recovered));
+  check('...and the good shell clears the flag, so the next deploy is armed again',
+    recovered.flag === null, JSON.stringify(recovered.flag));
+
+  // the loop guard: a shell that comes back stale a second time is left alone, not reloaded forever
+  await poison(staleShell);
+  await page.evaluate(() => sessionStorage.setItem('cmux_shell_reload', '1'));
+  await page.goto(`${base}/`, { waitUntil: 'commit' }).catch(() => {});
+  await page.waitForTimeout(2000);
+  const looped = await bootState();
+  check('a shell that is STILL stale on the second boot does not reload again',
+    looped.boots.length === 1 && looped.side === false && looped.flag === '1', JSON.stringify(looped));
+  await page.evaluate(() => { sessionStorage.removeItem('smoke_boot_watch'); sessionStorage.removeItem('cmux_shell_reload'); });
+  await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });   // the revalidate repaired the cache
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('the panel is back after all that, in the mode it was left in',
+    await page.locator('#side').getAttribute('data-mode') === 'full',
+    'mode=' + await page.locator('#side').getAttribute('data-mode'));
+
   // --- narrow viewport collapses to one pane (the phone path) ---
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(700);
   const narrow = await page.locator('.pane').count();
   const solo = await page.locator('.pane.solo').count();
   check('a phone viewport mirrors one pane at a time', narrow === 1 && solo === 1, 'panes=' + narrow + ' solo=' + solo);
+  check('resizing down to a phone puts the panel away', await page.locator('#side').getAttribute('data-mode') === 'hidden');
+  // ...and so does a COLD BOOT on a phone, which is the case the resize above cannot prove: the
+  // desktop's stored mode is still `full`, and the phone reads its own key (cmux_side_phone).
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1000);
+  check('a phone starts with the panel hidden', await page.locator('#side').getAttribute('data-mode') === 'hidden',
+    'mode=' + await page.locator('#side').getAttribute('data-mode'));
+  check('the desktop mode is remembered separately, and is still full',
+    await page.evaluate(() => localStorage.getItem('cmux_side')) === 'full',
+    JSON.stringify(await page.evaluate(() => localStorage.getItem('cmux_side'))));
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(250);
+  await page.locator('#side .siderail').click();
+  await page.waitForTimeout(250);
+  check('the foot control collapses the phone drawer to the rail',
+    await page.locator('#side').getAttribute('data-mode') === 'rail');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1000);
+  check('the phone remembers its OWN mode across a reload',
+    await page.locator('#side').getAttribute('data-mode') === 'rail',
+    'mode=' + await page.locator('#side').getAttribute('data-mode'));
+  await page.locator('#side .siderail').click();   // back to full, so the chip below reopens as a drawer
+  await page.waitForTimeout(200);
+  await page.locator('#wsChip').click();           // and away, so the remaining phone checks start hidden
+  await page.waitForTimeout(250);
+  check('the chip puts the phone panel away again',
+    await page.locator('#side').getAttribute('data-mode') === 'hidden');
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(250);
+  check('on a phone full is a drawer with a scrim', await page.locator('#side').getAttribute('data-mode') === 'full'
+    && await page.locator('#sidescrim').isVisible());
+  await page.locator('#side .siderow.ws').first().click();
+  await page.waitForTimeout(400);
+  check('a navigating tap closes the drawer', await page.locator('#side').getAttribute('data-mode') === 'hidden');
   const noHandles = await page.locator('.phandle').count();
   check('no drag handles on a phone viewport', noHandles === 0, 'handles=' + noHandles);
   // the phone never shows a split, so the strip has to come back as its switcher — and it carries
@@ -394,6 +772,53 @@ try {
     'n=' + await page.locator('#tabs .tab.add').count());
   check('the Files toggle is still in the toolbar on a phone',
     await page.locator('header #filesBtn').isVisible());
+
+  // --- the long-press sheet is placed in the VIEWPORT, so #side's overflow cannot swallow it ---
+  // A short viewport puts the last workspace row near the bottom edge — the case where a sheet
+  // positioned inside the panel was painted past #side's clipped box and never appeared at all.
+  await page.setViewportSize({ width: 390, height: 320 });
+  await page.waitForTimeout(400);
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(300);
+  await page.locator('#side .siderow.ws').last().evaluate((e) => e.scrollIntoView({ block: 'end' }));
+  await page.waitForTimeout(200);
+  await page.locator('#side .siderow.ws').last().dispatchEvent('touchstart');
+  await page.waitForTimeout(700);
+  const sheetGeom = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#side .siderow.ws')].pop();
+    const sheet = document.querySelector('#side .sidesheet');
+    if (!row || !sheet) return { sheet: !!sheet };
+    const rc = row.getBoundingClientRect(), sr = sheet.getBoundingClientRect();
+    const mr = document.getElementById('side').getBoundingClientRect();
+    return { sheet: true, pos: getComputedStyle(sheet).position, top: sr.top, bottom: sr.bottom,
+      // where the pre-fix code put it, and how far past the panel's clipped box that was
+      insidePanelWouldOverflow: rc.bottom + 4 + sr.height > mr.bottom, vh: window.innerHeight };
+  });
+  check('a long-press near the bottom opens a sheet that is fully on screen',
+    !!sheetGeom.sheet && sheetGeom.pos === 'fixed' && sheetGeom.top >= 0 && sheetGeom.bottom <= sheetGeom.vh
+    && sheetGeom.insidePanelWouldOverflow, JSON.stringify(sheetGeom));
+  check('the sheet offers rename and close', await page.locator('#side .sidesheet button').count() === 2,
+    'n=' + await page.locator('#side .sidesheet button').count());
+
+  // --- ...and it OUTLIVES a repaint, because it is the phone's only rename/close menu ---
+  // The panel rebuilds twice per 5-second beat, which used to give a long-pressed sheet about 2.5 s
+  // to live. Flip a status and wait for the glyph to change: that proves a repaint actually happened
+  // rather than sleeping through one and asserting on nothing.
+  await setStatus_(SF.a, 'Needs input');
+  await glyph('default', SF.a, 'waiting').catch(() => {});
+  check('the sheet survives a fleet repaint',
+    await page.locator('#side .sidesheet').count() === 1 && await page.locator('#side .sidesheet').isVisible(),
+    'sheets=' + await page.locator('#side .sidesheet').count());
+  // it is dismissed by a tap anywhere else instead — here the panel's own footer, which does nothing.
+  // The before-count is part of the assertion: with the sheet already gone this would pass on nothing.
+  const sheetsBeforeTap = await page.locator('#side .sidesheet').count();
+  await page.evaluate(() => document.querySelector('#side .sidefoot')
+    .dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
+  await page.waitForTimeout(250);
+  check('a tap outside the sheet dismisses it',
+    sheetsBeforeTap === 1 && await page.locator('#side .sidesheet').count() === 0,
+    'before=' + sheetsBeforeTap + ' after=' + await page.locator('#side .sidesheet').count());
+  await setStatus_(SF.a, 'Running');
 } catch (e) {
   check('smoke run completed', false, e && e.message);
 } finally {
