@@ -29,6 +29,17 @@ test('Running → idle while OFF screen becomes done; ON screen it does not', ()
   assert.deepEqual(s.totals, { waiting: 0, done: 1 });
 });
 
+test('a tab mirrored in another visible pane is on screen too (split view)', () => {
+  const m = createSidebarModel({ store: memStore() });
+  m.beat(fleet(mac('a', [tab('1', 'Running'), tab('2', 'Running')]), mac('b', [tab('9', 'Running')])), off, 1000);
+  // focus is on tab 1; tab 2 is the other pane of the split — both are in front of the user
+  const view = { machine: 'a', surfaceId: '1', visible: true, visibleSurfaces: ['1', '2', '9'] };
+  const s = m.beat(fleet(mac('a', [tab('1', ''), tab('2', '')]), mac('b', [tab('9', '')])), view, 2000);
+  assert.deepEqual(s.machines[0].workspaces[0].tabs, [], 'a pane you are looking at must not badge done');
+  assert.deepEqual(s.machines[1].workspaces[0].tabs.map((t) => t.state), ['done'],
+    'a surface id listed as visible belongs to the SELECTED machine only');
+});
+
 test('a background page counts as off screen', () => {
   const m = createSidebarModel({ store: memStore() });
   m.beat(fleet(mac('a', [tab('1', 'Running')])), off, 1000);

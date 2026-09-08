@@ -118,9 +118,14 @@
   const sideModel = (window.cmuxSidebar && window.cmuxSidebar.createSidebarModel)
     ? window.cmuxSidebar.createSidebarModel({ store: sideStore })
     : { beat: () => null, beatFailed: () => null, markSeen() {}, snapshot: () => null, nextTarget: () => null, statesFor: () => ({}) };
-  const pickLandingTab = (tabs, states) => (window.cmuxSidebar && window.cmuxSidebar.pickLandingTab)
-    ? window.cmuxSidebar.pickLandingTab(tabs, states)
-    : ((tabs || []).filter((t) => t.type !== 'browser').find((t) => t.inPane || t.selected) || (tabs || [])[0] || null);
+  // Without sidebar.js there are no per-tab states to prefer, so the fallback is the PRE-p17 rule
+  // applyTree still uses: the running or waiting tab first, then whatever cmux has in front. Dropping
+  // that clause made the degraded path open the front tab even when another one was asking for you.
+  const pickLandingTab = (tabs, states) => {
+    if (window.cmuxSidebar && window.cmuxSidebar.pickLandingTab) return window.cmuxSidebar.pickLandingTab(tabs, states);
+    const term = (tabs || []).filter((t) => t.type !== 'browser');
+    return term.find((t) => /run|need/i.test(t.status || '')) || term.find((t) => t.inPane || t.selected) || term[0] || null;
+  };
   let sidebar = null;        // the view, mounted later; null = feature absent, badge still works
   let lastFleet = [];        // last /fleet machines array — switchMachine seeds the tree from it
   const elSideBadge = $('sideBadge');
@@ -585,6 +590,9 @@
     const snap = sideModel.beat({ machines }, {
       machine: state.machine,
       surfaceId: state.tab && state.tab.id,
+      // Every surface currently mirrored in a pane, not just the focused one: in a split view you are
+      // looking at both, so neither may badge `done` when it goes idle.
+      visibleSurfaces: [...state.views.values()].map((v) => v.surfaceId).filter(Boolean),
       visible: document.visibilityState === 'visible' && state.tabType === 'terminal',
     });
     renderSideBadge(snap);

@@ -110,8 +110,9 @@
     body.solo #side .siderow.ws .sideact { display: inline-flex; }   /* no hover on a phone */
     #sidescrim { position: absolute; inset: 0; z-index: 39; background: rgba(0,0,0,.45); }
     #sidescrim[hidden], body:not(.solo) #sidescrim { display: none; }
-    /* the two-item sheet a long-press opens on a phone */
-    #side .sidesheet { position: absolute; z-index: 41; background: var(--panel2); border: 1px solid var(--line);
+    /* the two-item sheet a long-press opens on a phone. FIXED, not absolute: #side clips its
+       overflow, so an absolute sheet anchored to a row near the bottom was never visible. */
+    #side .sidesheet { position: fixed; z-index: 41; background: var(--panel2); border: 1px solid var(--line);
       border-radius: 10px; padding: 4px; display: flex; flex-direction: column; min-width: 160px;
       box-shadow: 0 10px 26px rgba(0,0,0,.5); }
     #side .sidesheet button { background: none; border: none; color: var(--fg); font: inherit; font-size: 14px;

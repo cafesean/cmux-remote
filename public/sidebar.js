@@ -33,7 +33,11 @@
     const seenRunning = load(KEYS.seen), unseen = load(KEYS.unseen);
     let fleet = [], lastGoodAt = 0, lastBeatAt = 0;
 
-    const onScreen = (view, m, sid) => !!(view && view.visible !== false && view.machine === m && view.surfaceId === sid);
+    // On screen = on the selected machine, page visible, AND either the focused tab or a surface
+    // currently mirrored in a visible pane. In a split view both panes are on screen: a pane you are
+    // looking at must never badge `done` just because the focus is in the other one.
+    const onScreen = (view, m, sid) => !!(view && view.visible !== false && view.machine === m
+      && (view.surfaceId === sid || (Array.isArray(view.visibleSurfaces) && view.visibleSurfaces.includes(sid))));
 
     // One tab, one beat. Order matters: a `Needs input` tab is waiting whatever it was before; a
     // Running tab is remembered; a tab that WAS running and is now neither becomes done unless the
@@ -168,9 +172,17 @@
       const c = el('button', null, 'Close workspace'); c.type = 'button';
       c.onclick = (e) => { e.stopPropagation(); closeSheet(); if (o.onClose) o.onClose(machineId, ws); };
       sheet.append(r, c);
-      const rc = anchor.getBoundingClientRect(), mr = mount.getBoundingClientRect();
-      sheet.style.left = Math.max(8, rc.left - mr.left + 24) + 'px'; sheet.style.top = (rc.bottom - mr.top + 4) + 'px';
+      // The sheet is `position: fixed`, so it is placed in VIEWPORT coordinates and is not clipped by
+      // #side's `overflow: hidden` — positioning it inside the panel meant a long-press on a row near
+      // the bottom opened a sheet nobody could see. It still lives inside #side so closeSheet() owns it.
+      const rc = anchor.getBoundingClientRect();
+      sheet.style.left = Math.max(8, rc.left + 24) + 'px';
+      sheet.style.top = (rc.bottom + 4) + 'px';
       mount.appendChild(sheet);
+      // ...and a row near the bottom of the SCREEN gets the sheet above it rather than off the edge.
+      const vh = (doc.defaultView && doc.defaultView.innerHeight) || 0;
+      const h = sheet.offsetHeight || 0;
+      if (vh && rc.bottom + 4 + h > vh - 8) sheet.style.top = Math.max(8, rc.top - h - 4) + 'px';
     }
     function longPress(node, fn) {
       let timer = null;
@@ -182,6 +194,11 @@
     function render(s) {
       if (s) snap = s;
       closeSheet();
+      // A repaint happens every 5-second beat and rebuilds the list, which resets the scroll to the
+      // top. On a fleet taller than the viewport that makes the panel unscrollable in practice — you
+      // scroll down and the next beat puts you back. Carry the offset across the rebuild.
+      const prevList = mount.querySelector('.sidelist');
+      const prevTop = prevList ? prevList.scrollTop : 0;
       mount.replaceChildren();
       mount.classList.toggle('stale', !!(snap && snap.stale));
       if (!snap) return;
@@ -255,6 +272,7 @@
         list.appendChild(box);
       }
       mount.appendChild(list);
+      if (prevTop) list.scrollTop = prevTop;   // after the append, or there is nothing to scroll yet
       const foot = el('div', 'sidefoot');
       const rail = el('button', 'siderail', mode === 'rail' ? '⟩' : '⟨'); rail.type = 'button';
       rail.setAttribute('aria-label', mode === 'rail' ? 'Expand sidebar' : 'Collapse to rail');
