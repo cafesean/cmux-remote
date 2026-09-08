@@ -102,6 +102,11 @@ machines, secrets, or tunnels is ever committed — the repo ships only placehol
   standalone iOS Home-Screen app.
 - **Multi-machine.** Register several Macs; switch between them in the UI. Each Mac runs its own bridge;
   the browser only ever sees machine **labels** — every URL, secret, and tunnel token stays server-side.
+- **Attention sidebar.** A left panel lists every registered machine, its workspaces in cmux order, and
+  under each the tabs that are **waiting** (`Needs input`), **done** (finished while you were not
+  looking) or **running** — with counts on the workspace, the machine and the header chip. Full, rail
+  (44px) or hidden; a drawer on a phone. Tap a row to land on the tab that needs you, even on another
+  Mac. Fed by one `GET /api/cmux/fleet` poll every 5 s.
 - **Bring your own reachability.** LAN IP, a Cloudflare tunnel, Tailscale, ngrok — anything that can
   forward a port. None of it lives in the repo.
 

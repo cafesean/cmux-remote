@@ -8,10 +8,10 @@
 // `url.pathname` and cache-matches by that, so a query-bearing precache key would leave nothing the
 // pathname fallback could find and the first offline load would 503. The versioned tags live in
 // index.html alone, and they still bust caches because this CACHE version bumps with them.
-// v17: app.js changed after the v16 shell shipped. Bump both the cache generation and the service
-// worker registration URL so installed clients replace any older cache-first worker immediately.
-const CACHE = 'cmux-shell-v17';
-const SHELL = ['/', '/app.js', '/radar.js', '/inbox.js'];
+// v18: p17 sidebar — a new script and new shell markup. Bump both the cache generation and the
+// service worker registration URL so installed clients replace any older worker immediately.
+const CACHE = 'cmux-shell-v18';
+const SHELL = ['/', '/app.js', '/sidebar.js', '/radar.js', '/inbox.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -36,7 +36,7 @@ self.addEventListener('fetch', (e) => {
   // offline fallback. Cache-first here made every deploy "one launch behind". Precaching a script
   // WITHOUT listing it here leaves the copy sitting unused in Cache Storage — this branch is the only
   // thing that ever reads it.
-  if (path === '/app.js' || path === '/radar.js' || path === '/inbox.js') {
+  if (path === '/app.js' || path === '/sidebar.js' || path === '/radar.js' || path === '/inbox.js') {
     e.respondWith(
       fetch(new Request(path, { cache: 'no-store' }))
         .then((r) => putCache(path, r))

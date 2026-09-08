@@ -44,7 +44,7 @@ const tree = () => ({ workspaces: [{
   ref: 'workspace:1', id: WS, title: 'SMOKE', selected: true, window: 'win',
   tabs: [
     { id: SF.a, ref: 'surface:1', title: 'left-agent', type: 'terminal', selected: true, pane: PANE.a, paneRef: 'pane:1', inPane: true, status: 'Running' },
-    { id: SF.a2, ref: 'surface:3', title: 'left-second', type: 'terminal', selected: false, pane: PANE.a, paneRef: 'pane:1', inPane: false, status: '' },
+    { id: SF.a2, ref: 'surface:3', title: 'left-second', type: 'terminal', selected: false, pane: PANE.a, paneRef: 'pane:1', inPane: false, status: 'Needs input' },
     { id: SF.b, ref: 'surface:2', title: 'right-agent', type: 'terminal', selected: false, pane: PANE.b, paneRef: 'pane:2', inPane: true, status: '' },
   ],
   panes: [
@@ -152,6 +152,11 @@ await new Promise((r) => setTimeout(r, 700));
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+// Console errors/warnings are REPORTED but not fatal. p17 shipped the sidebar dark because
+// /sidebar.js 404'd and app.js's defensive mount swallowed it — the only trace anywhere was a
+// console error nothing was listening for. A 404 on a module is not a page error, so pageerror
+// below never sees it.
+page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.log('[console] ' + m.type() + ': ' + m.text()); });
 page.on('pageerror', (e) => { console.log('FAIL — page error: ' + e.message); failed++; });
 const base = `http://127.0.0.1:${SERVER_PORT}`;
 
@@ -415,39 +420,41 @@ try {
   check('there is a clipboard button for iOS (no ⌘V there)',
     await page.locator('#pasteBtn').count() === 1);
 
-  // --- a second machine: listed, a dead one says so plainly, and the choice survives a reload ---
-  const openMenu = async () => { await page.locator('#wsChip').click(); await page.waitForTimeout(250); };
-  await openMenu();
-  const machineRows = page.locator('#wsMenu button', { hasText: '🖥' });
-  check('the workspace menu lists both machines', await machineRows.count() === 2, 'n=' + await machineRows.count());
-  const wsBefore = await page.locator('#wsMenu button .wsname').count();
-  await page.locator('#wsMenu button', { hasText: 'Unplugged Mac' }).click();
-  await page.waitForTimeout(1200);
-  check('switching shows the new machine\'s label', (await page.locator('#hostLabel').innerText()) === 'Unplugged Mac');
-  const deadStatus = await page.locator('#status').evaluate((e) => e.textContent);
-  check('an unreachable bridge is reported by machine name in words, not as a raw code',
-    /Unplugged Mac/.test(deadStatus) && /unreachable/i.test(deadStatus) && !/bridge_unreachable/.test(deadStatus),
-    JSON.stringify(deadStatus));
-  await openMenu();
-  const wsAfter = await page.locator('#wsMenu button .wsname').count();
-  check('the previous machine\'s workspaces are not listed under the dead one',
-    wsBefore > 0 && wsAfter === 0, 'before=' + wsBefore + ' after=' + wsAfter);
-  await page.locator('#wsMenu button', { hasText: 'stub-mac' }).click();
-  await page.waitForSelector('.pane', { timeout: 8000 });
-  await page.waitForTimeout(600);
-  check('switching back repaints the first machine', await page.locator('.pane').count() >= 1);
-  await openMenu();
-  await page.locator('#wsMenu button', { hasText: 'Unplugged Mac' }).click();
-  await page.waitForTimeout(800);
+  // --- p17 sidebar: every machine, what is waiting, three modes, drawer on a phone ---
+  check('the dropdown is gone', await page.locator('#wsMenu').count() === 0);
+  check('desktop opens with the panel in full mode', await page.locator('#side').getAttribute('data-mode') === 'full');
+  const mh = page.locator('#side .sidemh');
+  check('both machines are listed', await mh.count() === 2, 'n=' + await mh.count());
+  check('the unreachable machine says so in words', /unreachable/i.test(await page.locator('#side .sideerr').innerText()));
+  check('the waiting tab badges its workspace', await page.locator('#side .siderow.ws .sidecount').first().innerText() === '1');
+  check('the waiting tab badges its machine', await mh.first().locator('.sidecount').innerText() === '1');
+  check('the header badge carries the total', await page.locator('#sideBadge').innerText() === '1');
+  const subRows = page.locator('#side .siderow.tab');
+  check('only the running and waiting tabs are listed under the workspace', await subRows.count() === 2, 'n=' + await subRows.count());
+  const focusBefore = seen.focusSurface.length;
+  await page.locator('#side .siderow.tab', { hasText: 'left-second' }).click();
+  await page.waitForTimeout(500);
+  check('tapping the waiting tab lands on it', seen.focusSurface.length > focusBefore && seen.focusSurface[seen.focusSurface.length - 1].surface === SF.a2,
+    JSON.stringify(seen.focusSurface.slice(-1)));
+  const wsRows = await page.locator('#side .siderow.ws').count();
+  check('the dead machine lists no workspaces', wsRows === 1, 'ws rows=' + wsRows);
+  // rail ↔ full persists across a reload
+  await page.locator('#side .siderail').click();
+  await page.waitForTimeout(200);
+  check('the foot control collapses to the rail', await page.locator('#side').getAttribute('data-mode') === 'rail');
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(1500);
-  const afterReload = await page.locator('#hostLabel').innerText();
-  check('a reload comes back on the machine that was chosen, not the first registered one',
-    afterReload === 'Unplugged Mac', JSON.stringify(afterReload));
-  await openMenu();
-  await page.locator('#wsMenu button', { hasText: 'stub-mac' }).click();
   await page.waitForSelector('.pane', { timeout: 8000 });
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(1200);
+  check('the rail survives a reload', await page.locator('#side').getAttribute('data-mode') === 'rail');
+  await page.locator('#side .sidemh').first().click();
+  await page.waitForTimeout(200);
+  check('tapping a rail cell opens full', await page.locator('#side').getAttribute('data-mode') === 'full');
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(200);
+  check('the header chip hides the panel', await page.locator('#side').getAttribute('data-mode') === 'hidden');
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(200);
+  check('and brings it back to the last open mode', await page.locator('#side').getAttribute('data-mode') === 'full');
 
   // --- narrow viewport collapses to one pane (the phone path) ---
   await page.setViewportSize({ width: 390, height: 844 });
@@ -455,6 +462,14 @@ try {
   const narrow = await page.locator('.pane').count();
   const solo = await page.locator('.pane.solo').count();
   check('a phone viewport mirrors one pane at a time', narrow === 1 && solo === 1, 'panes=' + narrow + ' solo=' + solo);
+  check('a phone starts with the panel hidden', await page.locator('#side').getAttribute('data-mode') === 'hidden');
+  await page.locator('#wsChip').click();
+  await page.waitForTimeout(250);
+  check('on a phone full is a drawer with a scrim', await page.locator('#side').getAttribute('data-mode') === 'full'
+    && await page.locator('#sidescrim').isVisible());
+  await page.locator('#side .siderow.ws').first().click();
+  await page.waitForTimeout(400);
+  check('a navigating tap closes the drawer', await page.locator('#side').getAttribute('data-mode') === 'hidden');
   const noHandles = await page.locator('.phandle').count();
   check('no drag handles on a phone viewport', noHandles === 0, 'handles=' + noHandles);
   // the phone never shows a split, so the strip has to come back as its switcher — and it carries
