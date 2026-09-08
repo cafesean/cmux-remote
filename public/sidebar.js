@@ -130,5 +130,142 @@
     return by('waiting') || by('done') || by('running') || term.find((t) => t.inPane || t.selected) || term[0] || null;
   }
 
-  return { createSidebarModel, pickLandingTab, KEYS };
+  const GLYPH = { waiting: '●', done: '◑', running: '◐', idle: '○', unreachable: '✗' };
+
+  // VIEW. Paints a snapshot into `mount` (<aside id="side">). Owns the mode (full | rail | hidden),
+  // its persistence per form factor, the phone drawer's scrim, collapsed machines, and the
+  // long-press sheet. Every action goes out through a callback; it never touches app state.
+  function createSidebar(o) {
+    const doc = o.doc || document, mount = o.mount, scrim = o.scrim || null;
+    const store = o.store || { get() { return null; }, set() {}, remove() {} };
+    const isPhone = o.isPhone || (() => false);
+    const modeKey = () => (isPhone() ? KEYS.sidePhone : KEYS.side);
+    const load = (k, dflt) => { try { return store.get(k) || dflt; } catch (_) { return dflt; } };
+    let mode = load(modeKey(), isPhone() ? 'hidden' : 'full');
+    if (!['full', 'rail', 'hidden'].includes(mode)) mode = isPhone() ? 'hidden' : 'full';
+    let lastOpen = mode === 'hidden' ? 'full' : mode;
+    let collapsed = new Set(); try { collapsed = new Set(JSON.parse(load(KEYS.collapsed, '[]'))); } catch (_) {}
+    let snap = null, sheet = null;
+
+    const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+    const apply = () => {
+      mount.dataset.mode = mode;
+      if (scrim) scrim.hidden = !(mode === 'full' && isPhone());
+      try { store.set(modeKey(), mode); } catch (_) {}
+      const chip = doc.getElementById('wsChip'); if (chip) chip.setAttribute('aria-expanded', mode === 'hidden' ? 'false' : 'true');
+    };
+    function setMode(m) { if (!['full', 'rail', 'hidden'].includes(m)) return; mode = m; if (m !== 'hidden') lastOpen = m; apply(); render(snap); }
+    function toggle() { setMode(mode === 'hidden' ? lastOpen : 'hidden'); }
+    // a navigating tap closes the drawer on a phone; everything else leaves it open
+    const afterNav = () => { if (isPhone() && mode === 'full') setMode('hidden'); };
+    const closeSheet = () => { if (sheet) { sheet.remove(); sheet = null; } };
+
+    function openSheet(anchor, machineId, ws) {
+      closeSheet();
+      sheet = el('div', 'sidesheet');
+      const r = el('button', null, 'Rename workspace'); r.type = 'button';
+      r.onclick = (e) => { e.stopPropagation(); closeSheet(); if (o.onRename) o.onRename(machineId, ws); };
+      const c = el('button', null, 'Close workspace'); c.type = 'button';
+      c.onclick = (e) => { e.stopPropagation(); closeSheet(); if (o.onClose) o.onClose(machineId, ws); };
+      sheet.append(r, c);
+      const rc = anchor.getBoundingClientRect(), mr = mount.getBoundingClientRect();
+      sheet.style.left = Math.max(8, rc.left - mr.left + 24) + 'px'; sheet.style.top = (rc.bottom - mr.top + 4) + 'px';
+      mount.appendChild(sheet);
+    }
+    function longPress(node, fn) {
+      let timer = null;
+      const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+      node.addEventListener('touchstart', () => { clear(); timer = setTimeout(() => { timer = null; fn(); }, 500); }, { passive: true });
+      node.addEventListener('touchend', clear); node.addEventListener('touchmove', clear); node.addEventListener('touchcancel', clear);
+    }
+
+    function render(s) {
+      if (s) snap = s;
+      closeSheet();
+      mount.replaceChildren();
+      mount.classList.toggle('stale', !!(snap && snap.stale));
+      if (!snap) return;
+      const cur = o.current ? o.current() : {};
+      const t = snap.totals || { waiting: 0, done: 0 };
+      const sum = el('div', 'sidesum' + (snap.stale ? ' stale' : ''));
+      sum.setAttribute('role', 'button');
+      if (snap.stale) sum.textContent = 'reconnecting…';
+      else {
+        const parts = []; if (t.waiting) parts.push(t.waiting + ' waiting'); if (t.done) parts.push(t.done + ' done');
+        sum.textContent = parts.join(' · ');
+        sum.hidden = !parts.length;
+      }
+      sum.onclick = () => {
+        const n = o.model && o.model.nextTarget({ machine: cur.machine, surfaceId: cur.surfaceId });
+        if (n && o.onJump) { o.onJump(n); afterNav(); }
+      };
+      mount.appendChild(sum);
+
+      const list = el('div', 'sidelist');
+      for (const m of snap.machines) {
+        const box = el('div', 'sidem'); box.dataset.machine = m.id;
+        const head = el('button', 'sidemh'); head.type = 'button';
+        head.setAttribute('aria-expanded', collapsed.has(m.id) ? 'false' : 'true');
+        head.title = m.label;
+        const init = el('span', 'sideinit', ((m.label || m.id).trim().charAt(0) || '?').toUpperCase());
+        const g = el('span', 'sideglyph ' + (m.ok ? m.state : 'unreachable'), m.ok ? GLYPH[m.state] : GLYPH.unreachable);
+        const lab = el('span', 'sidelabel', m.label || m.id);
+        const cnt = el('span', 'sidecount ' + m.state, String(m.count)); cnt.hidden = !m.count;
+        head.append(init, g, lab, cnt);
+        head.onclick = () => {
+          if (mode === 'rail') { setMode('full'); return; }
+          if (collapsed.has(m.id)) collapsed.delete(m.id); else collapsed.add(m.id);
+          try { store.set(KEYS.collapsed, JSON.stringify([...collapsed])); } catch (_) {}
+          render(null);
+        };
+        box.appendChild(head);
+        if (!m.ok) {
+          const err = el('div', 'sideerr', (o.errorText ? o.errorText(m.error, m.id) : (m.label + ': ' + m.error)) + ' — tap to retry');
+          err.setAttribute('role', 'button');
+          err.onclick = () => { if (o.onRetry) o.onRetry(); };
+          box.appendChild(err);
+        } else if (!collapsed.has(m.id)) {
+          const wsBox = el('div', 'sidews');
+          for (const w of m.workspaces) {
+            const row = el('div', 'siderow ws' + (m.id === cur.machine && w.ref === cur.wsRef ? ' sel' : ''));
+            row.setAttribute('role', 'button'); row.dataset.ws = w.ref;
+            const wg = el('span', 'sideglyph ' + w.state, GLYPH[w.state]);
+            const wl = el('span', 'sidelabel', w.title);
+            const wc = el('span', 'sidecount ' + w.state, String(w.count)); wc.hidden = !w.count;
+            const ed = el('span', 'sideact edit', '✎'); ed.setAttribute('role', 'button'); ed.setAttribute('aria-label', 'Rename workspace');
+            ed.onclick = (e) => { e.stopPropagation(); if (o.onRename) o.onRename(m.id, w); };
+            const cl = el('span', 'sideact close', '×'); cl.setAttribute('role', 'button'); cl.setAttribute('aria-label', 'Close workspace');
+            cl.onclick = (e) => { e.stopPropagation(); if (o.onClose) o.onClose(m.id, w); };
+            row.append(wg, wl, wc, ed, cl);
+            row.onclick = () => { if (o.onJump) o.onJump({ machine: m.id, workspaceRef: w.ref }); afterNav(); };
+            longPress(row, () => openSheet(row, m.id, w));
+            wsBox.appendChild(row);
+            for (const tb of w.tabs) {
+              const tr = el('div', 'siderow tab'); tr.setAttribute('role', 'button'); tr.dataset.surface = tb.id;
+              tr.append(el('span', 'sideglyph ' + tb.state, GLYPH[tb.state]), el('span', 'sidelabel', tb.title));
+              tr.onclick = (e) => { e.stopPropagation(); if (o.onJump) o.onJump({ machine: m.id, workspaceRef: w.ref, surfaceId: tb.id }); afterNav(); };
+              wsBox.appendChild(tr);
+            }
+          }
+          const nw = el('button', 'siderow new', '+ New workspace'); nw.type = 'button';
+          nw.onclick = () => { if (o.onNew) o.onNew(m.id); };
+          wsBox.appendChild(nw);
+          box.appendChild(wsBox);
+        }
+        list.appendChild(box);
+      }
+      mount.appendChild(list);
+      const foot = el('div', 'sidefoot');
+      const rail = el('button', 'siderail', mode === 'rail' ? '⟩' : '⟨'); rail.type = 'button';
+      rail.setAttribute('aria-label', mode === 'rail' ? 'Expand sidebar' : 'Collapse to rail');
+      rail.onclick = () => setMode(mode === 'rail' ? 'full' : 'rail');
+      foot.appendChild(rail);
+      mount.appendChild(foot);
+    }
+    if (scrim) scrim.onclick = () => setMode('hidden');
+    apply();
+    return { render, mode: () => mode, setMode, toggle, destroy() { closeSheet(); mount.replaceChildren(); } };
+  }
+
+  return { createSidebarModel, createSidebar, pickLandingTab, KEYS };
 });

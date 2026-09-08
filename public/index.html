@@ -55,26 +55,68 @@
     header button.icon.primary { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 700; }
     header button.icon:disabled { opacity: .55; }
 
-    /* workspace list popover — just workspaces + New workspace */
-    #wsMenu { position: fixed; z-index: 30; background: var(--panel2); border: 1px solid var(--line);
-      border-radius: 12px; padding: 5px; min-width: 200px; max-width: 82vw; max-height: 70vh; overflow: auto;
-      box-shadow: 0 14px 34px rgba(0,0,0,.6); }
-    #wsMenu[hidden] { display: none; }
-    #wsMenu button { display: flex; width: 100%; align-items: center; gap: 10px; background: transparent;
-      border: none; color: var(--fg); font-size: 14px; font-weight: 600; padding: 10px 11px; border-radius: 8px; text-align: left; }
-    #wsMenu button:active { background: var(--panel); }
-    #wsMenu button.sel { color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
-    #wsMenu button .wsdot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
-    #wsMenu button.run .wsdot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
-    #wsMenu button .wsname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #wsMenu button .wsedit { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%;
-      display: inline-flex; align-items: center; justify-content: center; color: var(--dim); font-size: 13px; line-height: 1; }
-    #wsMenu button .wsedit:active { background: rgba(255,255,255,.12); color: var(--fg); }
-    #wsMenu button .wsclose { flex: 0 0 auto; margin-left: auto; width: 24px; height: 24px; border-radius: 50%;
-      display: inline-flex; align-items: center; justify-content: center; color: var(--dim); font-size: 17px; line-height: 1; }
-    #wsMenu button .wsclose:active { background: rgba(255,255,255,.12); color: var(--fg); }
-    #wsMenu .sep { height: 1px; background: var(--line); margin: 5px 6px; }
-    #wsMenu button.new { color: var(--accent); font-weight: 600; }
+    /* p17 attention sidebar. #main is the row under the header; #content keeps the old column
+       (#tabs over #wrap) so nothing inside it moves. */
+    #main { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: row; position: relative; }
+    #content { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    #side { flex: 0 0 240px; width: 240px; min-height: 0; display: flex; flex-direction: column;
+      background: var(--panel); border-right: 1px solid var(--line); overflow: hidden; position: relative; }
+    #side[data-mode="rail"] { flex-basis: 44px; width: 44px; }
+    #side[data-mode="hidden"] { display: none; }
+    #side.stale { opacity: .55; }
+    #side .sidesum { flex: 0 0 auto; padding: 9px 12px; font-size: 12px; font-weight: 700; color: var(--accent);
+      border-bottom: 1px solid var(--line); cursor: pointer; }
+    #side .sidesum[hidden] { display: none; }
+    #side .sidesum.stale { color: var(--dim); }
+    #side .sidelist { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 0; }
+    #side .sidemh { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px; background: none;
+      border: none; color: var(--fg); font-size: 12px; font-weight: 700; text-align: left; }
+    #side .sidemh .sideinit { display: none; width: 24px; height: 24px; border-radius: 6px; background: var(--panel2);
+      align-items: center; justify-content: center; font-family: var(--mono); font-size: 12px; }
+    #side .sideerr { padding: 0 12px 8px 34px; font-size: 11px; color: var(--warn); line-height: 1.35; cursor: pointer; }
+    #side .siderow { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 12px 7px 22px; background: none;
+      border: none; color: var(--fg); font-size: 13px; text-align: left; font-family: var(--mono); cursor: pointer; }
+    #side .siderow.tab { padding-left: 40px; font-size: 12px; color: var(--dim); }
+    #side .siderow.sel { color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    #side .siderow:active, #side .sidemh:active { background: var(--panel2); }
+    #side .siderow.new { color: var(--accent); font-family: var(--sans); font-weight: 600; }
+    #side .sidelabel { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #side .sidecount, .wschip .wbadge { flex: 0 0 auto; min-width: 18px; padding: 0 5px; border-radius: 999px; font-size: 11px;
+      font-weight: 700; text-align: center; line-height: 18px; background: var(--faint); color: #fff; }
+    #side .sidecount[hidden], .wschip .wbadge[hidden] { display: none; }
+    #side .sidecount.waiting, .wschip .wbadge.waiting { background: var(--warn); color: #111; }
+    #side .sidecount.done, .wschip .wbadge.done { background: var(--accent); }
+    #side .sideglyph { flex: 0 0 auto; width: 12px; text-align: center; font-size: 11px; color: var(--faint); }
+    #side .sideglyph.waiting { color: var(--warn); animation: sidepulse 1.2s ease-in-out infinite; }
+    #side .sideglyph.done { color: var(--accent); }
+    #side .sideglyph.running { color: var(--ok); }
+    #side .sideglyph.unreachable { color: var(--warn); }
+    @keyframes sidepulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+    #side .sideact { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%; display: none; align-items: center;
+      justify-content: center; color: var(--dim); font-size: 13px; line-height: 1; }
+    #side .siderow.ws:hover .sideact { display: inline-flex; }
+    #side .sideact:active { background: rgba(255,255,255,.12); color: var(--fg); }
+    #side .sidefoot { flex: 0 0 auto; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; }
+    #side .siderail { background: none; border: none; color: var(--dim); font-size: 14px; padding: 8px 14px; }
+    /* rail: machines only, as initials with a badge */
+    #side[data-mode="rail"] .sidesum, #side[data-mode="rail"] .sidews, #side[data-mode="rail"] .sideerr,
+    #side[data-mode="rail"] .sidemh .sidelabel, #side[data-mode="rail"] .sidemh .sideglyph { display: none; }
+    #side[data-mode="rail"] .sidemh { flex-direction: column; gap: 3px; padding: 8px 0; align-items: center; }
+    #side[data-mode="rail"] .sidemh .sideinit { display: inline-flex; }
+    #side[data-mode="rail"] .sidefoot { justify-content: center; }
+    /* phone: `full` is a drawer over the content */
+    body.solo #side[data-mode="full"] { position: absolute; top: 0; bottom: 0; left: 0; z-index: 40;
+      width: min(300px, 84vw); box-shadow: 0 0 40px rgba(0,0,0,.6); }
+    body.solo #side .siderow.ws .sideact { display: inline-flex; }   /* no hover on a phone */
+    #sidescrim { position: absolute; inset: 0; z-index: 39; background: rgba(0,0,0,.45); }
+    #sidescrim[hidden], body:not(.solo) #sidescrim { display: none; }
+    /* the two-item sheet a long-press opens on a phone */
+    #side .sidesheet { position: absolute; z-index: 41; background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 10px; padding: 4px; display: flex; flex-direction: column; min-width: 160px;
+      box-shadow: 0 10px 26px rgba(0,0,0,.5); }
+    #side .sidesheet button { background: none; border: none; color: var(--fg); font: inherit; font-size: 14px;
+      text-align: left; padding: 9px 12px; border-radius: 7px; }
+    #side .sidesheet button:active { background: var(--panel); }
 
     /* settings popover (gear) — font size + room for more; the split popover shares its styling */
     #setMenu, #splitMenu { position: fixed; z-index: 30; background: var(--panel2); border: 1px solid var(--line);
@@ -142,7 +184,7 @@
 
     /* terminal — one .pane box per cmux pane, positioned from the layout fractions the bridge sends.
        Absolute % boxes reproduce ANY split tree (including nested ones) without modelling the tree. */
-    #wrap { flex: 1 1 auto; min-height: 0; width: 100%; max-width: 100vw; position: relative; overflow: hidden; }
+    #wrap { flex: 1 1 auto; min-height: 0; width: 100%; position: relative; overflow: hidden; }
     #panes { position: absolute; inset: 0; }
     .pane { position: absolute; display: flex; flex-direction: column; overflow: hidden;
       background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
@@ -433,9 +475,9 @@
 </head>
 <body>
   <header>
-    <button class="wschip" id="wsChip" type="button" aria-haspopup="menu" aria-expanded="false">
+    <button class="wschip" id="wsChip" type="button" aria-expanded="false" aria-controls="side" aria-label="Machines and workspaces">
       <span class="wlabels"><span class="whost" id="hostLabel">—</span><span class="wname" id="wsLabel">—</span></span>
-      <span class="wcaret">▾</span>
+      <span class="wbadge" id="sideBadge" hidden>0</span><span class="wcaret" aria-hidden="true">☰</span>
     </button>
     <button class="icon" id="filesBtn" aria-pressed="false" aria-label="Browse files" title="Browse files">📁</button>
     <!-- Radar (p5). Lives in the toolbar beside Files, NOT in the tab strip: the strip is
@@ -453,6 +495,12 @@
   <!-- The tab strip belongs to the ONE-PANE view only. In split view every pane carries its own
        header — title, its tabs, and its own ⊞ menu — so a second global strip is duplicate chrome.
        On a phone the mirror is always one pane at a time, and then the strip IS the switcher. -->
+  <div id="main">
+    <!-- p17 attention sidebar: every machine, its workspaces, the tabs that are waiting. Three modes on
+         data-mode (full | rail | hidden); on a phone (body.solo) `full` is a drawer over the content. -->
+    <aside id="side" data-mode="hidden" aria-label="Machines and workspaces"></aside>
+    <div id="sidescrim" hidden></div>
+    <div id="content">
   <div id="tabs"><!-- tab chips (tabs of the current workspace) --></div>
 
   <div id="wrap">
@@ -505,6 +553,8 @@
       <div id="fvbody"></div>
     </div>
   </div>
+  </div><!-- #content -->
+  </div><!-- #main -->
 
   <footer>
     <div class="modeseg" id="modeSeg" role="tablist" aria-label="Input mode">
@@ -554,7 +604,6 @@
     </div>
   </footer>
 
-  <div id="wsMenu" hidden role="menu"></div>
 
   <!-- One menu, opened FROM a pane's ⊞ button and acting on that pane (cmux puts its split controls
        on the pane, so the mirror does too). -->
