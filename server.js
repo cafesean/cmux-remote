@@ -259,6 +259,22 @@ async function handleApi(req, res, u) {
       return sendJson(res, 200, { machines, machine: m.id, workspaces: (d && d.workspaces) || [], error: (d && d.error) || undefined });
     } catch (_) { return sendJson(res, 200, { machines, machine: m.id, workspaces: [], error: 'bridge_unreachable' }); }
   }
+  // p17: every machine's tree in one round trip, for the attention sidebar. The fan-out is parallel
+  // and each bridge has its own timeout, so a dead machine costs the others nothing — it comes back
+  // as {ok:false, error} in its own slot instead of failing the call. Labels and ids only.
+  if (req.method === 'GET' && p === '/api/cmux/fleet') {
+    const results = await Promise.allSettled(MACHINES.map(async (m) => {
+      const r = await bridge(m, '/cmux/tree', { timeout: 8000 });
+      const d = await r.json().catch(() => ({ error: 'bad_upstream' }));
+      if (!r.ok || (d && d.error)) {
+        return { id: m.id, label: m.label, ok: false, error: (d && d.error) || ('http_' + r.status), workspaces: [] };
+      }
+      return { id: m.id, label: m.label, ok: true, workspaces: (d && d.workspaces) || [] };
+    }));
+    const machines = results.map((x, i) => (x.status === 'fulfilled' ? x.value
+      : { id: MACHINES[i].id, label: MACHINES[i].label, ok: false, error: 'bridge_unreachable', workspaces: [] }));
+    return sendJson(res, 200, { at: Date.now(), machines });
+  }
   // Full workspace > tab tree (replaces the old workspace-as-tab /tabs).
   if (req.method === 'GET' && p === '/api/cmux/tree') {
     const m = findMachine(u.searchParams.get('machine'));
