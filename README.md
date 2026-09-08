@@ -390,6 +390,7 @@ are marked no-store; the `*stream*` endpoints are long-lived SSE.
 |---|---|
 | `GET /api/cmux/machines` | list registered machines (id + label only) |
 | `GET /api/cmux/bootstrap?machine=` | machines + the (default) machine's tree in one round trip — what the UI boots from |
+| `GET /api/cmux/fleet` | every registered machine's tree in one call: `{at, machines:[{id,label,ok,workspaces}\|{id,label,ok:false,error}]}` — the attention sidebar polls this instead of `/tree`. Parallel fan-out, 8s cap per bridge; a dead machine is one `ok:false` slot, never a failed call |
 | `GET /api/cmux/tree?machine=` | full workspace → tab tree with per-tab status |
 | `GET /api/cmux/grid?machine=&surface=&h=` | colored render-grid for one tab (styles + spans + cursor + `h` hash); pass the last `h` back — unchanged grid returns `{same:1}` |
 | `GET /api/cmux/grid-stream?machine=&surface=&h=` | SSE push of grid frames — one frame per hash change; `h` suppresses the initial frame if still current |
