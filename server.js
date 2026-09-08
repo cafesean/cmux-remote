@@ -678,6 +678,10 @@ const httpServer = http.createServer((req, res) => {
   // finds no /api/radar/inbox and says so. There is no fallback route here: without this line the
   // module 404s and the feature ships dark.
   if (u.pathname === '/inbox.js') return serveStatic(req, res, 'inbox.js');
+  // p17 sidebar. The third time this allow-list has been the thing that shipped a feature dark, so
+  // test/p17-static-routes.test.js now reads index.html and fails if any <script src> has no route
+  // here — the note above is a reminder, that test is the control.
+  if (u.pathname === '/sidebar.js') return serveStatic(req, res, 'sidebar.js');
   if (u.pathname === '/sw.js') return serveStatic(req, res, 'sw.js');
   if (u.pathname === '/manifest.webmanifest') return serveStatic(req, res, 'manifest.webmanifest');
   if (u.pathname === '/icon-180.png') return serveStatic(req, res, 'icon-180.png');
