@@ -2866,20 +2866,25 @@
   // code against markup that has no #side, no #sidescrim and no #sideBadge. The panel cannot mount,
   // and the #wsMenu dropdown it replaced is gone from this file — that launch would have no
   // workspace or machine switcher at all. The service worker has already refetched `/` in the
-  // background by now, so one reload lands on the new shell; shouldReloadForStaleShell owns the
-  // once-only guard (and refuses to reload at all when sessionStorage cannot hold it).
-  const shellStore = {
-    get: (k) => { try { return sessionStorage.getItem(k); } catch (_) { return null; } },
-    set: (k, v) => { try { sessionStorage.setItem(k, v); } catch (_) {} },
-    remove: (k) => { try { sessionStorage.removeItem(k); } catch (_) {} },
-  };
-  try {
-    if (window.cmuxSidebar && typeof window.cmuxSidebar.shouldReloadForStaleShell === 'function'
-      && window.cmuxSidebar.shouldReloadForStaleShell(!!$('side'), shellStore)) {
-      if (window.console) console.warn('stale shell (no #side) — reloading once onto the revalidated markup');
-      location.reload();
-    }
-  } catch (e) { if (window.console) console.error('stale-shell check failed', e); }
+  // background by now, so ONE reload lands on the new shell.
+  //
+  // The check is INLINE, and runs before anything reads window.cmuxSidebar, because that stale shell
+  // has no <script src="/sidebar.js"> either — a guard living in that module could never run on the
+  // one launch it exists for. sessionStorage holds the once-only flag: a shell that comes back stale
+  // twice is left alone rather than reloaded forever, and a shell that HAS #side clears the flag so
+  // the next deploy is armed again. Storage that throws (Safari private mode, a locked-down webview)
+  // means no loop guard, so it means no reload — an unguarded reload loop is worse than the one dead
+  // launch it would fix.
+  if (!$('side')) {
+    try {
+      if (!sessionStorage.getItem('cmux_shell_reload')) {
+        sessionStorage.setItem('cmux_shell_reload', '1');
+        location.reload();
+      }
+    } catch (_) {}
+  } else {
+    try { sessionStorage.removeItem('cmux_shell_reload'); } catch (_) {}
+  }
   try {
     if (window.cmuxSidebar && typeof window.cmuxSidebar.createSidebar === 'function') {
       sidebar = window.cmuxSidebar.createSidebar({

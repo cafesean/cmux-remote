@@ -21,7 +21,7 @@
   'use strict';
   const RUNNING = /^running/i, NEEDS = /needs input/i;
   const RANK = { waiting: 3, done: 2, running: 1, idle: 0 };
-  const KEYS = { seen: 'cmux_seen_running', unseen: 'cmux_unseen', side: 'cmux_side', sidePhone: 'cmux_side_phone', collapsed: 'cmux_side_collapsed', shellReload: 'cmux_shell_reload' };
+  const KEYS = { seen: 'cmux_seen_running', unseen: 'cmux_unseen', side: 'cmux_side', sidePhone: 'cmux_side_phone', collapsed: 'cmux_side_collapsed' };
   const CAP = 200, STALE_MS = 15000;
   const key = (machine, surface) => machine + '|' + surface;
   const worst = (a, b) => (RANK[a] >= RANK[b] ? a : b);
@@ -134,29 +134,10 @@
     return by('waiting') || by('done') || by('running') || term.find((t) => t.inPane || t.selected) || term[0] || null;
   }
 
-  // Is this launch running NEW code against the OLD cached markup? The shell (`/`) is cache-first in
-  // sw.js — instant boot is a product promise — while app.js is network-first, so the first launch
-  // after a deploy pairs an index.html with no `#side` against an app.js that needs one. That launch
-  // has no workspace or machine switcher at all, because the dropdown this panel replaced is gone.
-  //
-  // A missing `#side` is the tell. By the time app.js reaches its mount the worker's background
-  // revalidate has already fetched the new `/`, so ONE reload boots on it. The flag is what stops a
-  // loop when it has NOT — a shell that comes back stale twice is left alone rather than reloaded
-  // forever, and a shell that HAS `#side` clears the flag so the next deploy is armed again.
-  //
-  // Storage that throws (Safari private mode, a locked-down webview) means no loop guard, so it
-  // means no reload: an unguarded reload loop is worse than the one dead launch it would fix.
-  function shouldReloadForStaleShell(hasSide, store) {
-    const s = store || {};
-    if (hasSide) { try { if (s.remove) s.remove(KEYS.shellReload); } catch (_) {} return false; }
-    try {
-      if (!s.get || !s.set) return false;
-      if (s.get(KEYS.shellReload)) return false;
-      s.set(KEYS.shellReload, '1');
-      if (!s.get(KEYS.shellReload)) return false;   // a store that silently drops writes is no guard
-    } catch (_) { return false; }
-    return true;
-  }
+  // The stale-shell reload guard is NOT here. A launch that pairs the old cached `/` with the new
+  // app.js has no <script src="/sidebar.js"> either, so this module does not load on the one launch
+  // that guard exists for — it lives inline in app.js (search `cmux_shell_reload`), which is
+  // network-first and therefore the file that IS new on that boot.
 
   const GLYPH = { waiting: '●', done: '◑', running: '◐', idle: '○', unreachable: '✗' };
 
@@ -326,5 +307,5 @@
     return { render, mode: () => mode, setMode, toggle, destroy() { closeSheet(); mount.replaceChildren(); } };
   }
 
-  return { createSidebarModel, createSidebar, pickLandingTab, shouldReloadForStaleShell, KEYS };
+  return { createSidebarModel, createSidebar, pickLandingTab, KEYS };
 });

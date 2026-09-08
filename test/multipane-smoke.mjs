@@ -551,6 +551,24 @@ try {
     closeClicked && seen.closeWs.length === closeBefore,
     'clicked=' + closeClicked + ' n=' + (seen.closeWs.length - closeBefore));
 
+  // ...and a CONFIRMED one actually closes. The dismissed check above cannot tell "asked, and the
+  // dismissal stopped it" from "the button does nothing at all": with `cl.onclick` unwired the span
+  // is still there and still clickable, no confirm is ever raised, and no close-workspace is sent —
+  // every clause of it still passes. Accepting the confirm is the positive signal that the wiring
+  // reaches doCloseWorkspace, and the recorded body is what says which row it was for.
+  const closedBefore = seen.closeWs.length;
+  page.once('dialog', (d) => d.accept());
+  const confirmClicked = await clickRowAction(box('default'), '.sideact.close');
+  await page.waitForTimeout(900);
+  const cw = seen.closeWs[seen.closeWs.length - 1] || {};
+  check('× with the confirm accepted closes THAT workspace, once',
+    confirmClicked && seen.closeWs.length === closedBefore + 1 && cw.workspace === WS && cw.machine === 'default',
+    JSON.stringify({ clicked: confirmClicked, n: seen.closeWs.length - closedBefore, sent: cw }));
+  // The stub answers with the tree UNCHANGED, so the client tears the panes down and re-selects the
+  // same workspace. Wait for that rebuild, or the machine checks below race it.
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+
   // the same button under the OTHER machine has to switch machine before it fires
   const crossBefore = seen.newWs.length;
   await box('second').locator('.siderow.new').click();
@@ -633,6 +651,75 @@ try {
   await page.locator('#wsChip').click();
   await page.waitForTimeout(200);
   check('and brings it back to the last open mode', await page.locator('#side').getAttribute('data-mode') === 'full');
+
+  // --- a stale shell recovers itself: OLD markup + NEW app.js reloads exactly once ---
+  // The first launch after the p17 deploy is the one launch with no workspace or machine switcher at
+  // all: sw.js serves `/` cache-first (instant boot is a product promise) while app.js is
+  // network-first, so the cached pre-p17 index.html — no #side, no #sidescrim, and no
+  // <script src="/sidebar.js"> either — is paired with the app.js that needs them.
+  //
+  // That last omission is why the guard cannot live in sidebar.js: the module never loads on the
+  // launch it exists for. Here the shell cache is poisoned with exactly that markup, which is what a
+  // stale launch IS. page.route cannot stand in for it — a service-worker cache hit never reaches the
+  // network layer Playwright intercepts.
+  //
+  // Boots are counted from inside the page rather than from framenavigated, which also fires for the
+  // History API. The init script runs once per DOCUMENT, before app.js, so the log is one entry per
+  // real boot and each entry is the once-only flag as that boot found it.
+  const staleShell = fs.readFileSync(path.join(REPO, 'public', 'index.html'), 'utf8')
+    .split('\n').filter((l) => !/id="side"|id="sidescrim"|\/sidebar\.js/.test(l)).join('\n');
+  await page.addInitScript(() => {
+    try {
+      if (!sessionStorage.getItem('smoke_boot_watch')) return;
+      const log = JSON.parse(sessionStorage.getItem('smoke_boot_log') || '[]');
+      log.push(sessionStorage.getItem('cmux_shell_reload'));
+      sessionStorage.setItem('smoke_boot_log', JSON.stringify(log));
+    } catch (_) { /* the page under test owns this store; never fail the boot over the log */ }
+  });
+  const poison = (html) => page.evaluate(async (h) => {
+    let n = 0;
+    for (const k of await caches.keys()) {
+      const c = await caches.open(k);
+      if (await c.match('/')) { await c.put('/', new Response(h, { headers: { 'content-type': 'text/html' } })); n++; }
+    }
+    sessionStorage.setItem('smoke_boot_watch', '1');
+    sessionStorage.setItem('smoke_boot_log', '[]');
+    return n;
+  }, html);
+  const bootState = () => page.evaluate(() => ({
+    boots: JSON.parse(sessionStorage.getItem('smoke_boot_log') || '[]'),
+    side: !!document.getElementById('side'),
+    flag: sessionStorage.getItem('cmux_shell_reload'),
+  }));
+  const poisoned = await poison(staleShell);
+  check('the shell cache is what a stale launch reads (fixture sanity)', poisoned === 1,
+    'caches holding / = ' + poisoned);
+  await page.evaluate(() => sessionStorage.removeItem('cmux_shell_reload'));
+  await page.goto(`${base}/`, { waitUntil: 'commit' }).catch(() => {});
+  await page.waitForSelector('#side', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(2000);          // long enough that a SECOND reload would show in the log
+  const recovered = await bootState();
+  check('a stale shell reloads itself ONCE, and the reload lands on the revalidated markup',
+    recovered.boots.length === 2 && recovered.boots[0] === null && recovered.boots[1] === '1'
+    && recovered.side === true, JSON.stringify(recovered));
+  check('...and the good shell clears the flag, so the next deploy is armed again',
+    recovered.flag === null, JSON.stringify(recovered.flag));
+
+  // the loop guard: a shell that comes back stale a second time is left alone, not reloaded forever
+  await poison(staleShell);
+  await page.evaluate(() => sessionStorage.setItem('cmux_shell_reload', '1'));
+  await page.goto(`${base}/`, { waitUntil: 'commit' }).catch(() => {});
+  await page.waitForTimeout(2000);
+  const looped = await bootState();
+  check('a shell that is STILL stale on the second boot does not reload again',
+    looped.boots.length === 1 && looped.side === false && looped.flag === '1', JSON.stringify(looped));
+  await page.evaluate(() => { sessionStorage.removeItem('smoke_boot_watch'); sessionStorage.removeItem('cmux_shell_reload'); });
+  await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });   // the revalidate repaired the cache
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('the panel is back after all that, in the mode it was left in',
+    await page.locator('#side').getAttribute('data-mode') === 'full',
+    'mode=' + await page.locator('#side').getAttribute('data-mode'));
 
   // --- narrow viewport collapses to one pane (the phone path) ---
   await page.setViewportSize({ width: 390, height: 844 });
