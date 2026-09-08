@@ -108,6 +108,22 @@
   // p9 inbox, same contract and same reason: renderTabs/syncFilesBtn read it, and a null here means
   // the feature is simply absent.
   let inboxUI = null;
+  // p17 attention sidebar. The MODEL exists even if the view fails to mount — it is what turns the
+  // fleet poll into waiting/done/running per tab, and the header badge reads from it too.
+  const sideStore = {
+    get: (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} },
+    remove: (k) => { try { localStorage.removeItem(k); } catch (_) {} },
+  };
+  const sideModel = (window.cmuxSidebar && window.cmuxSidebar.createSidebarModel)
+    ? window.cmuxSidebar.createSidebarModel({ store: sideStore })
+    : { beat: () => null, beatFailed: () => null, markSeen() {}, snapshot: () => null, nextTarget: () => null, statesFor: () => ({}) };
+  const pickLandingTab = (tabs, states) => (window.cmuxSidebar && window.cmuxSidebar.pickLandingTab)
+    ? window.cmuxSidebar.pickLandingTab(tabs, states)
+    : ((tabs || []).filter((t) => t.type !== 'browser').find((t) => t.inPane || t.selected) || (tabs || [])[0] || null);
+  let sidebar = null;        // the view, mounted later; null = feature absent, badge still works
+  let lastFleet = [];        // last /fleet machines array — switchMachine seeds the tree from it
+  function renderSideBadge(snap) { if (sidebar) sidebar.render(snap); }   // extended when the view mounts
 
   function gate(msg, showToken) {
     const g = $('gate'); g.replaceChildren(); g.style.flexDirection = 'column';
@@ -533,20 +549,38 @@
       state.tab = null; teardownPanes(); elEmpty.style.display = 'flex'; setStatus('');
     }
   }
-  let treeBusy = false;
-  async function loadTree() {
+  let fleetBusy = false;
+  // One beat, every machine (p17). The selected machine's slice goes through applyTree exactly as the
+  // old per-machine /tree poll did; the whole fleet feeds the sidebar model.
+  async function loadFleet() {
     // busy-guard: over a slow tunnel a 5s interval can outpace the fetch and stack requests.
-    // hidden-guard: a backgrounded phone tab shouldn't keep pulling the tree through the tunnel.
-    if (!state.machine || treeBusy || document.hidden) return;
-    treeBusy = true;
+    // hidden-guard: a backgrounded phone tab shouldn't keep pulling the fleet through the tunnel.
+    if (!state.machine || fleetBusy || document.hidden) return;
+    fleetBusy = true;
     try {
       let data;
-      try { data = await (await jget('/api/cmux/tree?machine=' + encodeURIComponent(state.machine))).json(); }
-      catch (_) { setStatus('tree failed', true); return; }
-      if (data && data.error) { setStatus(machineErr(data.error), true); return; }
-      applyTree((data && data.workspaces) || []);
-    } finally { treeBusy = false; }
+      try { data = await (await jget('/api/cmux/fleet')).json(); }
+      catch (_) { setStatus('tree failed', true); renderSideBadge(sideModel.beatFailed()); return; }
+      applyFleet(data);
+    } finally { fleetBusy = false; }
   }
+  function applyFleet(data) {
+    const machines = (data && Array.isArray(data.machines)) ? data.machines : [];
+    if (!machines.length) { setStatus('tree failed', true); renderSideBadge(sideModel.beatFailed()); return; }
+    lastFleet = machines;
+    const mine = machines.find((m) => m.id === state.machine);
+    if (mine) {
+      if (mine.ok) applyTree(mine.workspaces || []);
+      else setStatus(machineErr(mine.error), true);
+    }
+    const snap = sideModel.beat({ machines }, {
+      machine: state.machine,
+      surfaceId: state.tab && state.tab.id,
+      visible: document.visibilityState === 'visible' && state.tabType === 'terminal',
+    });
+    renderSideBadge(snap);
+  }
+  const loadTree = loadFleet;   // every existing caller keeps its name
 
   function currentWs() { return state.workspaces.find((w) => w.ref === state.wsRef) || null; }
 
@@ -627,11 +661,13 @@
     rememberMachine(id);
     teardownPanes(); stopLayoutStream();
     const cur = state.machines.find((m) => m.id === id); elHost.textContent = (cur && cur.label) || '';
-    // Drop the previous machine's tree NOW. On a failed fetch loadTree keeps whatever is on screen —
-    // right for a blip on the same Mac, wrong here: it listed the other Mac's workspaces under this label.
-    applyTree([]);
+    // Seed from the last fleet when it has this machine, so panes paint without waiting a beat; an
+    // unreachable or unknown slice clears the previous machine's tree instead (never list the other
+    // Mac's workspaces under this label).
+    const seed = lastFleet.find((m) => m.id === id);
+    applyTree(seed && seed.ok ? (seed.workspaces || []) : []);
     setStatus('');
-    loadTree();
+    loadFleet();
   }
   function selectWorkspace(ref) {
     if (ref === state.wsRef) return;
@@ -642,8 +678,7 @@
     syncLayout(true);
     const ws = currentWs();
     const tabs = (ws && ws.tabs) || [];
-    const term = tabs.filter((t) => t.type !== 'browser');
-    const first = term.find((t) => /run|need/i.test(t.status || '')) || term.find((t) => t.inPane || t.selected) || term[0];
+    const first = pickLandingTab(tabs, sideModel.statesFor(state.machine));
     if (first) selectTab(first.id); else { elEmpty.style.display = 'flex'; }
   }
 
@@ -2912,6 +2947,40 @@
   // "peer" for a machine we know is simply switching to it in place — no second origin, no second
   // token. A machine this server does NOT front can only be reached at its own URL, and the v1
   // state contract carries no such field, so that case reports why instead of guessing a hostname.
+  // ONE jump for the sidebar, radar and inbox. Switches machine when needed (seeded from the last
+  // fleet), selects the workspace, lands on the named tab or the workspace's landing tab, and clears
+  // that tab's done mark. Returns false only when the target cannot exist on this server.
+  function jumpTo(target) {
+    if (!target || !target.machine) return false;
+    if (!state.machines.some((m) => m.id === target.machine)) return false;
+    const land = () => {
+      const ws = state.workspaces.find((w) => w.ref === target.workspaceRef)
+        || (target.surfaceId && state.workspaces.find((w) => (w.tabs || []).some((t) => t.id === target.surfaceId)))
+        || null;
+      if (!ws) return false;
+      if (state.wsRef !== ws.ref) {
+        if (state.tabType === 'browser') { exitBrowserMode(); state.tabType = 'terminal'; }
+        state.wsRef = ws.ref; state.tab = null; state.focusPane = null; state.layout = null;
+        teardownPanes(); stopLayoutStream(); setStatus('');
+        renderHeader(); renderTabs(); syncLayout(true);
+      }
+      const t = target.surfaceId ? (ws.tabs || []).find((x) => x.id === target.surfaceId)
+        : pickLandingTab(ws.tabs, sideModel.statesFor(state.machine));
+      if (t) { selectTab(t.id); sideModel.markSeen(state.machine, t.id); renderSideBadge(sideModel.snapshot()); }
+      else elEmpty.style.display = 'flex';
+      return true;
+    };
+    if (target.machine !== state.machine) {
+      switchMachine(target.machine);
+      if (land()) return true;
+      // the seed did not have it — retry briefly until the fleet beat lands rather than racing it
+      let tries = 0;
+      const retry = () => { if (land()) return; if (++tries > 12) { setStatus('tab not found on ' + target.machine, true, 4000); return; } setTimeout(retry, 250); };
+      setTimeout(retry, 250);
+      return true;
+    }
+    return land();
+  }
   function radarJump(req) {
     try {
       if (!req || !req.machine) return { ok: false, reason: 'no machine on that item' };
@@ -2920,32 +2989,16 @@
         if (req.peerUrl) { window.open(req.peerUrl, '_blank', 'noopener'); return { ok: true }; }
         return { ok: false, reason: req.machine + ' is not connected to this server' };
       }
-      const land = () => {
-        const ws = state.workspaces.find((w) => (w.tabs || []).some((t) => t.id === req.tabUuid || (req.tabRef && t.ref === req.tabRef)));
-        if (!ws) return false;
-        const t = (ws.tabs || []).find((x) => x.id === req.tabUuid) || (ws.tabs || []).find((x) => req.tabRef && x.ref === req.tabRef);
-        if (!t) return false;
-        state.wsRef = ws.ref;
-        renderHeader();
-        exitRadarMode();
-        selectTab(t.id);
-        return true;
-      };
-      if (req.machine !== state.machine) {
-        // switchMachine kicks off its own loadTree; retry briefly until that tree lands rather than
-        // racing it with a second fetch the busy-guard would drop on the floor.
-        switchMachine(req.machine);
-        let tries = 0;
-        const retry = () => {
-          if (land()) return;
-          if (++tries > 12) { setStatus('tab not found on ' + req.machine, true, 4000); return; }
-          setTimeout(retry, 250);
-        };
-        setTimeout(retry, 250);
-        return { ok: true };
+      // a legacy `surface:N` ref resolves to its uuid on the current machine only
+      let sid = req.tabUuid || null;
+      if (!sid && req.tabRef && req.machine === state.machine) {
+        for (const w of state.workspaces) { const t = (w.tabs || []).find((x) => x.ref === req.tabRef); if (t) { sid = t.id; break; } }
       }
-      if (land()) return { ok: true };
-      return { ok: false, reason: 'that tab is no longer in the tree' };
+      if (!sid) return { ok: false, reason: 'that tab is no longer in the tree' };
+      if (req.machine === state.machine && !state.workspaces.some((w) => (w.tabs || []).some((t) => t.id === sid))) {
+        return { ok: false, reason: 'that tab is no longer in the tree' };
+      }
+      return jumpTo({ machine: req.machine, surfaceId: sid }) ? { ok: true } : { ok: false, reason: 'that tab is no longer in the tree' };
     } catch (e) { return { ok: false, reason: (e && e.message) || 'jump failed' }; }
   }
 
@@ -3435,7 +3488,8 @@
     syncLayout(true);                 // geometry is a second call — the tree paints first, then splits
     // A remembered machine that is no longer registered comes back as machine:null with an empty
     // tree, so the fallback machine has not been fetched yet — fetch it now, not in five seconds.
-    if (want && !boot.machine) loadTree();
-    state.treeTimer = setInterval(loadTree, 5000);
+    // the fleet beat starts now: the sidebar needs every machine, bootstrap only carried one
+    loadFleet();
+    state.treeTimer = setInterval(loadFleet, 5000);
   })();
 })();
