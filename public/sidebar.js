@@ -21,7 +21,7 @@
   'use strict';
   const RUNNING = /^running/i, NEEDS = /needs input/i;
   const RANK = { waiting: 3, done: 2, running: 1, idle: 0 };
-  const KEYS = { seen: 'cmux_seen_running', unseen: 'cmux_unseen', side: 'cmux_side', sidePhone: 'cmux_side_phone', collapsed: 'cmux_side_collapsed' };
+  const KEYS = { seen: 'cmux_seen_running', unseen: 'cmux_unseen', side: 'cmux_side', sidePhone: 'cmux_side_phone', collapsed: 'cmux_side_collapsed', shellReload: 'cmux_shell_reload' };
   const CAP = 200, STALE_MS = 15000;
   const key = (machine, surface) => machine + '|' + surface;
   const worst = (a, b) => (RANK[a] >= RANK[b] ? a : b);
@@ -134,6 +134,30 @@
     return by('waiting') || by('done') || by('running') || term.find((t) => t.inPane || t.selected) || term[0] || null;
   }
 
+  // Is this launch running NEW code against the OLD cached markup? The shell (`/`) is cache-first in
+  // sw.js — instant boot is a product promise — while app.js is network-first, so the first launch
+  // after a deploy pairs an index.html with no `#side` against an app.js that needs one. That launch
+  // has no workspace or machine switcher at all, because the dropdown this panel replaced is gone.
+  //
+  // A missing `#side` is the tell. By the time app.js reaches its mount the worker's background
+  // revalidate has already fetched the new `/`, so ONE reload boots on it. The flag is what stops a
+  // loop when it has NOT — a shell that comes back stale twice is left alone rather than reloaded
+  // forever, and a shell that HAS `#side` clears the flag so the next deploy is armed again.
+  //
+  // Storage that throws (Safari private mode, a locked-down webview) means no loop guard, so it
+  // means no reload: an unguarded reload loop is worse than the one dead launch it would fix.
+  function shouldReloadForStaleShell(hasSide, store) {
+    const s = store || {};
+    if (hasSide) { try { if (s.remove) s.remove(KEYS.shellReload); } catch (_) {} return false; }
+    try {
+      if (!s.get || !s.set) return false;
+      if (s.get(KEYS.shellReload)) return false;
+      s.set(KEYS.shellReload, '1');
+      if (!s.get(KEYS.shellReload)) return false;   // a store that silently drops writes is no guard
+    } catch (_) { return false; }
+    return true;
+  }
+
   const GLYPH = { waiting: '●', done: '◑', running: '◐', idle: '○', unreachable: '✗' };
 
   // VIEW. Paints a snapshot into `mount` (<aside id="side">). Owns the mode (full | rail | hidden),
@@ -158,11 +182,18 @@
       try { store.set(modeKey(), mode); } catch (_) {}
       const chip = doc.getElementById('wsChip'); if (chip) chip.setAttribute('aria-expanded', mode === 'hidden' ? 'false' : 'true');
     };
-    function setMode(m) { if (!['full', 'rail', 'hidden'].includes(m)) return; mode = m; if (m !== 'hidden') lastOpen = m; apply(); render(snap); }
+    function setMode(m) { if (!['full', 'rail', 'hidden'].includes(m)) return; closeSheet(); mode = m; if (m !== 'hidden') lastOpen = m; apply(); render(snap); }
     function toggle() { setMode(mode === 'hidden' ? lastOpen : 'hidden'); }
-    // a navigating tap closes the drawer on a phone; everything else leaves it open
-    const afterNav = () => { if (isPhone() && mode === 'full') setMode('hidden'); };
-    const closeSheet = () => { if (sheet) { sheet.remove(); sheet = null; } };
+    // a navigating tap always closes the sheet, and the drawer too on a phone
+    const afterNav = () => { closeSheet(); if (isPhone() && mode === 'full') setMode('hidden'); };
+    // The sheet now survives a repaint (see render), so dismissing it is explicit: its own two
+    // buttons, setMode, the scrim, a navigating tap — and this one document-level listener, which
+    // catches a tap anywhere else. It exists only while the sheet does.
+    let sheetAway = null;
+    const closeSheet = () => {
+      if (sheetAway) { doc.removeEventListener('pointerdown', sheetAway, true); sheetAway = null; }
+      if (sheet) { sheet.remove(); sheet = null; }
+    };
 
     function openSheet(anchor, machineId, ws) {
       closeSheet();
@@ -183,6 +214,11 @@
       const vh = (doc.defaultView && doc.defaultView.innerHeight) || 0;
       const h = sheet.offsetHeight || 0;
       if (vh && rc.bottom + 4 + h > vh - 8) sheet.style.top = Math.max(8, rc.top - h - 4) + 'px';
+      // A tap anywhere but the sheet dismisses it. Capture phase, so it lands before the row handler
+      // underneath. The pointerdown that BEGAN this long-press fired 500 ms ago, so this listener
+      // cannot close the sheet its own gesture just opened.
+      sheetAway = (e) => { if (!sheet || !sheet.contains(e.target)) closeSheet(); };
+      doc.addEventListener('pointerdown', sheetAway, true);
     }
     function longPress(node, fn) {
       let timer = null;
@@ -193,13 +229,18 @@
 
     function render(s) {
       if (s) snap = s;
-      closeSheet();
       // A repaint happens every 5-second beat and rebuilds the list, which resets the scroll to the
       // top. On a fleet taller than the viewport that makes the panel unscrollable in practice — you
       // scroll down and the next beat puts you back. Carry the offset across the rebuild.
       const prevList = mount.querySelector('.sidelist');
       const prevTop = prevList ? prevList.scrollTop : 0;
       mount.replaceChildren();
+      // A repaint must NOT close the sheet. It is the phone's only rename/close menu, and the panel
+      // repaints twice per beat — so a long-pressed sheet used to live about 2.5 seconds, long enough
+      // for a test and short enough to lose a real thumb on the way to the button. The element is
+      // position: fixed and holds its own viewport coordinates, so it does not depend on the row it
+      // was opened from: keep it and re-append it to the rebuilt panel.
+      if (sheet) mount.appendChild(sheet);
       mount.classList.toggle('stale', !!(snap && snap.stale));
       if (!snap) return;
       const cur = o.current ? o.current() : {};
@@ -285,5 +326,5 @@
     return { render, mode: () => mode, setMode, toggle, destroy() { closeSheet(); mount.replaceChildren(); } };
   }
 
-  return { createSidebarModel, createSidebar, pickLandingTab, KEYS };
+  return { createSidebarModel, createSidebar, pickLandingTab, shouldReloadForStaleShell, KEYS };
 });

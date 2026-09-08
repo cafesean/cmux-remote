@@ -83,7 +83,14 @@ const gridFor = (sid) => {
     spans, cursor: null }, h: 'grid-' + sid };
 };
 
-const seen = { resize: [], focusSurface: [], focusPane: [], key: [], drop: [], split: [], closePane: [], upload: [] };
+const seen = { resize: [], focusSurface: [], focusPane: [], key: [], drop: [], split: [], closePane: [], upload: [],
+  newWs: [], renameWs: [], closeWs: [] };
+// server.js routes a workspace action to a machine and relays only the action's own fields — the
+// `machine` the browser sent is consumed by the router and never reaches the bridge. So the two
+// reachable machines are given DIFFERENT bridge secrets (below), and this is how the one stub tells
+// which of them a recorded request came from.
+const SECOND_SECRET = 'stub-second';
+const machineOf = (req) => (req.headers['x-bridge-secret'] === SECOND_SECRET ? 'second' : 'default');
 const layoutClients = new Set();   // open layout-stream responses, so the stub can push like cmux does
 const bridge = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -139,6 +146,22 @@ const bridge = http.createServer((req, res) => {
       if (!body.length) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: 'empty' })); }
       return json({ ok: true, path: '/Users/stub/Downloads/cmux-remote/2026-07-31/' + name, name, bytes: body.length });
     }
+    // The three workspace actions the panel took over from the deleted dropdown (spec §4). Every
+    // answer hands back the tree UNCHANGED, so the fixture the later checks read is never disturbed:
+    // `workspace`/`id` name the workspace and tab that already exist, which is what doNewWorkspace
+    // reads to land the client somewhere.
+    if (u.pathname === '/cmux/new-workspace') {
+      seen.newWs.push({ ...b, machine: machineOf(req) });
+      return json({ ok: true, workspaces: tree().workspaces, workspace: 'workspace:1', id: SF.a });
+    }
+    if (u.pathname === '/cmux/rename-workspace') {
+      seen.renameWs.push({ ...b, machine: machineOf(req) });
+      return json({ ok: true, workspaces: tree().workspaces });
+    }
+    if (u.pathname === '/cmux/close-workspace') {
+      seen.closeWs.push({ ...b, machine: machineOf(req) });
+      return json({ ok: true, workspaces: tree().workspaces });
+    }
     if (u.pathname === '/cmux/focus-surface') { seen.focusSurface.push(b); return json({ ok: true }); }
     if (u.pathname === '/cmux/focus-pane') { seen.focusPane.push(b); return json({ ok: true }); }
     if (u.pathname === '/cmux/key') { seen.key.push(b); return json({ ok: true }); }
@@ -158,7 +181,7 @@ const server = spawn(process.execPath, ['server.js'], {
     // a reload) testable. `unplugged` has nothing listening on port 1, so every call to it is refused
     // at once; it is the unreachable row, and it is not switchable from the panel by design.
     CMUX_MACHINES: JSON.stringify([
-      { id: 'second', label: 'Second Mac', baseUrl: `http://127.0.0.1:${BRIDGE_PORT}`, secret: 'stub' },
+      { id: 'second', label: 'Second Mac', baseUrl: `http://127.0.0.1:${BRIDGE_PORT}`, secret: SECOND_SECRET },
       { id: 'unplugged', label: 'Unplugged Mac', baseUrl: 'http://127.0.0.1:1', secret: 'x' },
     ]) },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -488,6 +511,61 @@ try {
     (await machineLabel()) === 'stub-mac' && await page.locator('.pane').count() >= 1,
     JSON.stringify(await machineLabel()) + ' panes=' + await page.locator('.pane').count());
 
+  // --- the panel's own workspace actions: + New, ✎ rename, × close (spec §4) ---
+  // These three moved out of the dropdown this branch deletes, so the panel is now the ONLY thing
+  // that fires them and each carries a machine-switch side effect. The machine in every assertion
+  // below is the one the server picked to relay to, recovered from the bridge secret it used.
+  //
+  // ✎ and × only exist on a hovered row on a desktop, and a 5-second beat can rebuild the row
+  // between the hover and the click — so the hover is retried rather than assumed to stick.
+  const clickRowAction = async (mbox, cls) => {
+    const row = mbox.locator('.siderow.ws').first();
+    for (let i = 0; i < 5; i++) {
+      await row.hover();
+      try { await row.locator(cls).click({ timeout: 1500 }); return true; } catch (_) { /* repainted under us */ }
+    }
+    return false;
+  };
+  const newBefore = seen.newWs.length;
+  await box('default').locator('.siderow.new').click();
+  await page.waitForTimeout(700);
+  check('+ New workspace sends exactly one new-workspace', seen.newWs.length === newBefore + 1,
+    'n=' + (seen.newWs.length - newBefore));
+  check('...to the machine whose row was tapped',
+    (seen.newWs[seen.newWs.length - 1] || {}).machine === 'default', JSON.stringify(seen.newWs.slice(-1)));
+
+  const renameBefore = seen.renameWs.length;
+  page.once('dialog', (d) => d.accept('Renamed'));
+  const renameClicked = await clickRowAction(box('default'), '.sideact.edit');
+  await page.waitForTimeout(700);
+  const rn = seen.renameWs[seen.renameWs.length - 1] || {};
+  check('✎ on a workspace row renames it with the title that was typed',
+    renameClicked && seen.renameWs.length === renameBefore + 1 && rn.title === 'Renamed' && rn.workspace === WS
+    && rn.machine === 'default', JSON.stringify({ clicked: renameClicked, sent: rn }));
+
+  const closeBefore = seen.closeWs.length;
+  page.once('dialog', (d) => d.dismiss());
+  const closeClicked = await clickRowAction(box('default'), '.sideact.close');
+  await page.waitForTimeout(700);
+  check('× asks first, and a dismissed confirm closes nothing',
+    closeClicked && seen.closeWs.length === closeBefore,
+    'clicked=' + closeClicked + ' n=' + (seen.closeWs.length - closeBefore));
+
+  // the same button under the OTHER machine has to switch machine before it fires
+  const crossBefore = seen.newWs.length;
+  await box('second').locator('.siderow.new').click();
+  await page.waitForTimeout(1000);
+  check('+ New workspace under another machine switches machine first',
+    (await machineLabel()) === 'Second Mac', JSON.stringify(await machineLabel()));
+  check('...and the new-workspace lands on THAT machine',
+    seen.newWs.length === crossBefore + 1 && (seen.newWs[seen.newWs.length - 1] || {}).machine === 'second',
+    JSON.stringify(seen.newWs.slice(-1)));
+  await box('default').locator('.siderow.ws').first().click();   // back to stub-mac for the checks below
+  await page.waitForSelector('.pane', { timeout: 8000 });
+  await page.waitForTimeout(1200);
+  check('and the panel comes back to the first machine after that',
+    (await machineLabel()) === 'stub-mac', JSON.stringify(await machineLabel()));
+
   // --- a tab that finishes OFF SCREEN badges `done`, and opening it clears it (spec §2.3, §6) ---
   // Land on left-agent first: a surface mirrored in a pane is ON screen, and an on-screen tab never
   // badges done — so left-second has to be the one nobody is looking at.
@@ -634,6 +712,26 @@ try {
     && sheetGeom.insidePanelWouldOverflow, JSON.stringify(sheetGeom));
   check('the sheet offers rename and close', await page.locator('#side .sidesheet button').count() === 2,
     'n=' + await page.locator('#side .sidesheet button').count());
+
+  // --- ...and it OUTLIVES a repaint, because it is the phone's only rename/close menu ---
+  // The panel rebuilds twice per 5-second beat, which used to give a long-pressed sheet about 2.5 s
+  // to live. Flip a status and wait for the glyph to change: that proves a repaint actually happened
+  // rather than sleeping through one and asserting on nothing.
+  await setStatus_(SF.a, 'Needs input');
+  await glyph('default', SF.a, 'waiting').catch(() => {});
+  check('the sheet survives a fleet repaint',
+    await page.locator('#side .sidesheet').count() === 1 && await page.locator('#side .sidesheet').isVisible(),
+    'sheets=' + await page.locator('#side .sidesheet').count());
+  // it is dismissed by a tap anywhere else instead — here the panel's own footer, which does nothing.
+  // The before-count is part of the assertion: with the sheet already gone this would pass on nothing.
+  const sheetsBeforeTap = await page.locator('#side .sidesheet').count();
+  await page.evaluate(() => document.querySelector('#side .sidefoot')
+    .dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
+  await page.waitForTimeout(250);
+  check('a tap outside the sheet dismisses it',
+    sheetsBeforeTap === 1 && await page.locator('#side .sidesheet').count() === 0,
+    'before=' + sheetsBeforeTap + ' after=' + await page.locator('#side .sidesheet').count());
+  await setStatus_(SF.a, 'Running');
 } catch (e) {
   check('smoke run completed', false, e && e.message);
 } finally {

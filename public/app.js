@@ -2860,6 +2860,26 @@
   if (inboxUI && elInboxBtn) elInboxBtn.onclick = (e) => { e.stopPropagation(); toggleInbox(); };
   // p17 sidebar view. Absent sidebar.js (404, stale cache, threw) leaves the chip as a plain label:
   // the badge and the fleet model still work without it.
+  //
+  // A missing #side is a different failure and needs a different answer. The shell (`/`) is
+  // cache-first and this file is network-first, so the first launch after the p17 deploy runs this
+  // code against markup that has no #side, no #sidescrim and no #sideBadge. The panel cannot mount,
+  // and the #wsMenu dropdown it replaced is gone from this file — that launch would have no
+  // workspace or machine switcher at all. The service worker has already refetched `/` in the
+  // background by now, so one reload lands on the new shell; shouldReloadForStaleShell owns the
+  // once-only guard (and refuses to reload at all when sessionStorage cannot hold it).
+  const shellStore = {
+    get: (k) => { try { return sessionStorage.getItem(k); } catch (_) { return null; } },
+    set: (k, v) => { try { sessionStorage.setItem(k, v); } catch (_) {} },
+    remove: (k) => { try { sessionStorage.removeItem(k); } catch (_) {} },
+  };
+  try {
+    if (window.cmuxSidebar && typeof window.cmuxSidebar.shouldReloadForStaleShell === 'function'
+      && window.cmuxSidebar.shouldReloadForStaleShell(!!$('side'), shellStore)) {
+      if (window.console) console.warn('stale shell (no #side) — reloading once onto the revalidated markup');
+      location.reload();
+    }
+  } catch (e) { if (window.console) console.error('stale-shell check failed', e); }
   try {
     if (window.cmuxSidebar && typeof window.cmuxSidebar.createSidebar === 'function') {
       sidebar = window.cmuxSidebar.createSidebar({
