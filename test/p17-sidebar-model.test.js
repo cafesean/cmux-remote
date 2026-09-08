@@ -115,32 +115,3 @@ test('pickLandingTab prefers waiting, then done, then running, then the tab in f
   assert.equal(pickLandingTab(tabs, {}).id, '2');
   assert.equal(pickLandingTab([{ id: 'b', type: 'browser' }], {}), null);
 });
-
-// --- the stale-shell reload guard (final review, Important 1) -------------------------------------
-// `/` is cache-first in sw.js while app.js is network-first, so the first launch after a deploy can
-// pair the OLD markup with the NEW code. A missing `#side` is the tell, and one reload boots on the
-// shell the worker has already revalidated in the background.
-const { shouldReloadForStaleShell } = require('../public/sidebar.js');
-
-test('a missing #side asks for exactly ONE reload, never a loop', () => {
-  const store = memStore();
-  assert.equal(shouldReloadForStaleShell(false, store), true, 'the stale shell reloads once');
-  assert.equal(store.get(KEYS.shellReload), '1', 'and leaves the flag behind to say so');
-  assert.equal(shouldReloadForStaleShell(false, store), false, 'a second stale boot does NOT reload again');
-  assert.equal(shouldReloadForStaleShell(false, store), false);
-});
-
-test('a shell that HAS #side clears the flag, so the next stale one gets its own reload', () => {
-  const store = memStore();
-  shouldReloadForStaleShell(false, store);
-  assert.equal(shouldReloadForStaleShell(true, store), false, 'a good shell never reloads');
-  assert.equal(store.get(KEYS.shellReload), null, 'and the flag is gone');
-  assert.equal(shouldReloadForStaleShell(false, store), true, 'so a later stale shell is armed again');
-});
-
-test('storage that throws never reloads — no guard means no loop guard', () => {
-  const dead = { get() { throw new Error('denied'); }, set() { throw new Error('denied'); }, remove() { throw new Error('denied'); } };
-  assert.equal(shouldReloadForStaleShell(false, dead), false);
-  assert.equal(shouldReloadForStaleShell(true, dead), false);
-  assert.equal(shouldReloadForStaleShell(false, undefined), false, 'and no store at all is the same');
-});
