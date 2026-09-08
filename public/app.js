@@ -46,7 +46,7 @@
   const elWrap = $('wrap');
   const elText = $('text'), elSend = $('send'), elRefresh = $('refresh'), elFilesBtn = $('filesBtn');
   const elRadarBtn = $('radarBtn'), elInboxBtn = $('inboxBtn');
-  const elWsChip = $('wsChip'), elWsLabel = $('wsLabel'), elHost = $('hostLabel'), elWsMenu = $('wsMenu');
+  const elWsChip = $('wsChip'), elWsLabel = $('wsLabel'), elHost = $('hostLabel');
   const elKeys = $('keys'), elKbToggle = $('kbToggle'), elHint = $('hint');
   const elModeCompose = $('modeCompose'), elModeLive = $('modeLive');
   const elFooter = document.querySelector('footer'), elModeSeg = $('modeSeg'), elGitBtn = $('gitBtn');
@@ -108,6 +108,36 @@
   // p9 inbox, same contract and same reason: renderTabs/syncFilesBtn read it, and a null here means
   // the feature is simply absent.
   let inboxUI = null;
+  // p17 attention sidebar. The MODEL exists even if the view fails to mount — it is what turns the
+  // fleet poll into waiting/done/running per tab, and the header badge reads from it too.
+  const sideStore = {
+    get: (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} },
+    remove: (k) => { try { localStorage.removeItem(k); } catch (_) {} },
+  };
+  const sideModel = (window.cmuxSidebar && window.cmuxSidebar.createSidebarModel)
+    ? window.cmuxSidebar.createSidebarModel({ store: sideStore })
+    : { beat: () => null, beatFailed: () => null, markSeen() {}, snapshot: () => null, nextTarget: () => null, statesFor: () => ({}) };
+  // Without sidebar.js there are no per-tab states to prefer, so the fallback is the PRE-p17 rule
+  // applyTree still uses: the running or waiting tab first, then whatever cmux has in front. Dropping
+  // that clause made the degraded path open the front tab even when another one was asking for you.
+  const pickLandingTab = (tabs, states) => {
+    if (window.cmuxSidebar && window.cmuxSidebar.pickLandingTab) return window.cmuxSidebar.pickLandingTab(tabs, states);
+    const term = (tabs || []).filter((t) => t.type !== 'browser');
+    return term.find((t) => /run|need/i.test(t.status || '')) || term.find((t) => t.inPane || t.selected) || term[0] || null;
+  };
+  let sidebar = null;        // the view, mounted later; null = feature absent, badge still works
+  let lastFleet = [];        // last /fleet machines array — switchMachine seeds the tree from it
+  const elSideBadge = $('sideBadge');
+  function renderSideBadge(snap) {
+    if (sidebar) sidebar.render(snap);
+    if (!elSideBadge) return;
+    const t = (snap && snap.totals) || { waiting: 0, done: 0 };
+    const n = t.waiting + t.done;
+    elSideBadge.hidden = !n;
+    elSideBadge.textContent = String(n);
+    elSideBadge.className = 'wbadge ' + (t.waiting ? 'waiting' : 'done');
+  }
 
   function gate(msg, showToken) {
     const g = $('gate'); g.replaceChildren(); g.style.flexDirection = 'column';
@@ -533,83 +563,87 @@
       state.tab = null; teardownPanes(); elEmpty.style.display = 'flex'; setStatus('');
     }
   }
-  let treeBusy = false;
-  async function loadTree() {
+  let fleetBusy = false;
+  // One beat, every machine (p17). The selected machine's slice goes through applyTree exactly as the
+  // old per-machine /tree poll did; the whole fleet feeds the sidebar model.
+  async function loadFleet() {
     // busy-guard: over a slow tunnel a 5s interval can outpace the fetch and stack requests.
-    // hidden-guard: a backgrounded phone tab shouldn't keep pulling the tree through the tunnel.
-    if (!state.machine || treeBusy || document.hidden) return;
-    treeBusy = true;
+    // hidden-guard: a backgrounded phone tab shouldn't keep pulling the fleet through the tunnel.
+    if (!state.machine || fleetBusy || document.hidden) return;
+    fleetBusy = true;
     try {
       let data;
-      try { data = await (await jget('/api/cmux/tree?machine=' + encodeURIComponent(state.machine))).json(); }
-      catch (_) { setStatus('tree failed', true); return; }
-      if (data && data.error) { setStatus(data.error, true); return; }
-      applyTree((data && data.workspaces) || []);
-    } finally { treeBusy = false; }
+      try { data = await (await jget('/api/cmux/fleet')).json(); }
+      catch (_) { setStatus('tree failed', true); renderSideBadge(sideModel.beatFailed()); return; }
+      applyFleet(data);
+    } finally { fleetBusy = false; }
   }
+  function applyFleet(data) {
+    const machines = (data && Array.isArray(data.machines)) ? data.machines : [];
+    if (!machines.length) { setStatus('tree failed', true); renderSideBadge(sideModel.beatFailed()); return; }
+    lastFleet = machines;
+    const mine = machines.find((m) => m.id === state.machine);
+    if (mine) {
+      if (mine.ok) applyTree(mine.workspaces || []);
+      else setStatus(machineErr(mine.error), true);
+    }
+    const snap = sideModel.beat({ machines }, {
+      machine: state.machine,
+      surfaceId: state.tab && state.tab.id,
+      // Every surface currently mirrored in a pane, not just the focused one: in a split view you are
+      // looking at both, so neither may badge `done` when it goes idle.
+      visibleSurfaces: [...state.views.values()].map((v) => v.surfaceId).filter(Boolean),
+      visible: document.visibilityState === 'visible' && state.tabType === 'terminal',
+    });
+    renderSideBadge(snap);
+  }
+  const loadTree = loadFleet;   // every existing caller keeps its name
 
   function currentWs() { return state.workspaces.find((w) => w.ref === state.wsRef) || null; }
 
   function renderHeader() {
     const ws = currentWs();
     elWsLabel.textContent = ws ? (ws.title || ws.ref) : '—';
+    if (sidebar) sidebar.render(null);   // the panel's selected row follows the header
   }
 
-  // ---- workspace list popover (workspaces only + New workspace [+ machines when >1]) ----
-  function openWsMenu() {
-    elWsMenu.replaceChildren();
-    state.workspaces.forEach((w) => {
-      const b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'menuitem');
-      const running = (w.tabs || []).some((t) => /run|need/i.test(t.status || ''));
-      if (running) b.classList.add('run');
-      if (w.ref === state.wsRef) b.classList.add('sel');
-      const dot = document.createElement('span'); dot.className = 'wsdot';
-      const nm = document.createElement('span'); nm.className = 'wsname'; nm.textContent = w.title || w.ref;
-      // Rename lives HERE because the header label is the dropdown's trigger — tapping it has to open
-      // the list, so it can never also be an edit target. cmux names an unnamed workspace after
-      // whatever tab is in front of it, which is why three of them can read "Claude Code".
-      const pen = document.createElement('span'); pen.className = 'wsedit'; pen.textContent = '✎';
-      pen.setAttribute('role', 'button'); pen.setAttribute('aria-label', 'Rename workspace');
-      pen.title = 'Rename workspace';
-      pen.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closeWsMenu(); doRenameWorkspace(w); };
-      const x = document.createElement('span'); x.className = 'wsclose'; x.textContent = '×';
-      x.setAttribute('role', 'button'); x.setAttribute('aria-label', 'Close workspace');
-      x.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closeWsMenu(); doCloseWorkspace(w); };
-      b.append(dot, nm, pen, x);
-      b.onclick = () => { closeWsMenu(); selectWorkspace(w.ref); };
-      elWsMenu.appendChild(b);
-    });
-    const sep = document.createElement('div'); sep.className = 'sep'; elWsMenu.appendChild(sep);
-    const nw = document.createElement('button'); nw.type = 'button'; nw.className = 'new'; nw.textContent = '+ New workspace';
-    nw.onclick = () => { closeWsMenu(); doNewWorkspace(); };
-    elWsMenu.appendChild(nw);
-    if (state.machines.length > 1) {
-      const sep2 = document.createElement('div'); sep2.className = 'sep'; elWsMenu.appendChild(sep2);
-      state.machines.forEach((m) => {
-        const mb = document.createElement('button'); mb.type = 'button';
-        if (m.id === state.machine) mb.classList.add('sel');
-        mb.textContent = '🖥 ' + m.label;
-        mb.onclick = () => { closeWsMenu(); switchMachine(m.id); };
-        elWsMenu.appendChild(mb);
-      });
-    }
-    elWsMenu.hidden = false;
-    const rc = elWsChip.getBoundingClientRect();
-    elWsMenu.style.left = Math.round(rc.left) + 'px';
-    elWsMenu.style.top = Math.round(rc.bottom + 6) + 'px';
-    elWsChip.setAttribute('aria-expanded', 'true');
-  }
-  function closeWsMenu() { elWsMenu.hidden = true; elWsChip.setAttribute('aria-expanded', 'false'); }
-  function toggleWsMenu() { if (elWsMenu.hidden) openWsMenu(); else closeWsMenu(); }
+  // The workspace dropdown is gone (p17): the sidebar owns machines and workspaces. Callers that
+  // used to dismiss the popover now dismiss the phone drawer, which is the same gesture — a tap
+  // somewhere else. The persistent desktop panel is never touched by this.
+  function closeWsMenu() { if (sidebar && !canSplit() && sidebar.mode() === 'full') sidebar.setMode('hidden'); }
 
+  // The chosen machine outlives the page. iOS kills a backgrounded standalone app, so every open is
+  // a cold boot — without this a two-Mac setup landed on the first registered machine on every launch.
+  const MACHINE_LS_KEY = 'cmux_machine';
+  const savedMachine = () => { try { return localStorage.getItem(MACHINE_LS_KEY) || ''; } catch (_) { return ''; } };
+  const rememberMachine = (id) => { try { id ? localStorage.setItem(MACHINE_LS_KEY, id) : localStorage.removeItem(MACHINE_LS_KEY); } catch (_) {} };
+  // What a bridge error means to the person holding the phone, with the machine named. The codes are
+  // server.js's; a second Mac fails HERE first, and "bridge_unreachable" alone does not say which of
+  // the two settings is wrong.
+  function machineErr(code, id) {
+    const m = state.machines.find((x) => x.id === (id || state.machine));
+    const who = (m && m.label) || id || state.machine || 'machine';
+    if (code === 'bridge_unreachable') return who + ': bridge unreachable — check its baseUrl, and that its BRIDGE_HOST is not 127.0.0.1';
+    if (code === 'forbidden') return who + ': bridge refused the secret — it must equal that Mac\'s BRIDGE_SECRET';
+    if (code === 'no_machine') return who + ' is not registered on this server';
+    return who + ': ' + code;
+  }
   function switchMachine(id) {
     if (id === state.machine) return;
     if (state.tabType === 'browser') { exitBrowserMode(); state.tabType = 'terminal'; }
+    // a directory listing from the other Mac must not sit under this label
+    if (state.tabType === 'files' || state.tabType === 'viewer') exitFilesMode();
     state.machine = id; state.wsRef = null; state.tab = null; state.focusPane = null; state.layout = null;
+    rememberMachine(id);
     teardownPanes(); stopLayoutStream();
     const cur = state.machines.find((m) => m.id === id); elHost.textContent = (cur && cur.label) || '';
-    elEmpty.style.display = 'flex'; setStatus('');
-    loadTree();
+    // Seed from the last fleet when it has this machine, so panes paint without waiting a beat; an
+    // unreachable or unknown slice clears the previous machine's tree instead (never list the other
+    // Mac's workspaces under this label).
+    const seed = lastFleet.find((m) => m.id === id);
+    applyTree(seed && seed.ok ? (seed.workspaces || []) : []);
+    setStatus('');
+    loadFleet();
   }
   function selectWorkspace(ref) {
     if (ref === state.wsRef) return;
@@ -620,8 +654,7 @@
     syncLayout(true);
     const ws = currentWs();
     const tabs = (ws && ws.tabs) || [];
-    const term = tabs.filter((t) => t.type !== 'browser');
-    const first = term.find((t) => /run|need/i.test(t.status || '')) || term.find((t) => t.inPane || t.selected) || term[0];
+    const first = pickLandingTab(tabs, sideModel.statesFor(state.machine));
     if (first) selectTab(first.id); else { elEmpty.style.display = 'flex'; }
   }
 
@@ -1402,14 +1435,22 @@
     }
     return out;
   }
+  // Every file in the batch gets its own try. One refusal must not abort the loop: before this, a
+  // folder in a Finder selection (it arrives as a 0-byte File, which the bridge refuses as `empty`)
+  // or one photo over the size cap killed the whole batch AND threw away the paths already uploaded
+  // — so a bulk attach "gave an error and did not work" while every single file worked. Now the
+  // good files land in the composer and the status names each file that did not, and why.
   async function uploadFiles(files, paneId) {
     const list = [...files].filter(Boolean);
     if (!list.length || !state.machine) return;
     if (paneId && paneId !== state.focusPane) focusPane(paneId);
-    const done = [];
+    const done = [], failed = [];
     for (let i = 0; i < list.length; i++) {
       const f = list[i];
       const name = pastedName(f);
+      // a dropped folder, or a genuinely empty file: the bridge would refuse it anyway (`empty`), so
+      // skip it here with a reason instead of spending a round trip to learn that
+      if (!f.size) { failed.push(name + ' (empty — a folder?)'); continue; }
       setStatus('uploading ' + (list.length > 1 ? (i + 1) + '/' + list.length + ' ' : '') + name + '…');
       try {
         const r = await fetch('/api/cmux/upload?machine=' + encodeURIComponent(state.machine), {
@@ -1421,14 +1462,18 @@
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok || !d.ok) {
-          setStatus(d.error === 'too_large' ? 'file too large' : (d.error || 'upload failed'), true);
-          return;
+          failed.push(name + ' (' + (d.error === 'too_large' ? 'too large' : (d.error || 'upload failed')) + ')');
+          continue;
         }
         done.push(d.path);
-      } catch (_) { setStatus('upload failed', true); return; }
+      } catch (_) { failed.push(name + ' (upload failed)'); }
     }
     insertPaths(done);
-    setStatus(done.length > 1 ? done.length + ' files on the Mac' : 'on the Mac: ' + done[0].split('/').pop());
+    const landed = done.length > 1 ? done.length + ' files on the Mac'
+      : done.length === 1 ? 'on the Mac: ' + done[0].split('/').pop() : '';
+    if (!failed.length) return setStatus(landed);
+    // what landed first, then what did not — a failure must never hide the files that made it
+    setStatus((landed ? landed + ' · ' : '') + 'skipped ' + failed.join(', '), true);
   }
   function paneUnder(x, y) {
     for (const [id, v] of state.views) {
@@ -1467,7 +1512,13 @@
     });
     if (elAttachBtn && elAttachInput) {
       elAttachBtn.onclick = () => elAttachInput.click();
-      elAttachInput.onchange = () => { uploadFiles(elAttachInput.files, state.focusPane); elAttachInput.value = ''; };
+      // Copy the FileList before resetting the input, and reset only once the batch is done: the
+      // reset is what lets the same file be picked again, but a File whose input was cleared mid-batch
+      // is exactly the kind of handle a mobile browser is entitled to invalidate.
+      elAttachInput.onchange = async () => {
+        const picked = [...elAttachInput.files];
+        try { await uploadFiles(picked, state.focusPane); } finally { elAttachInput.value = ''; }
+      };
     }
     // iOS has no ⌘V and its paste menu does not fire a paste event at a plain page, so the clipboard
     // has to be READ on a tap instead. Needs a user gesture and permission, and does not exist on
@@ -2459,7 +2510,6 @@
   wireFileDrop();
   if (elModeCompose) elModeCompose.onclick = null;   // modes are gone (§5.3); markup kept one cache epoch
   if (elModeLive) elModeLive.onclick = null;
-  elWsChip.onclick = (e) => { e.stopPropagation(); toggleWsMenu(); };
   if (elSettingsBtn) elSettingsBtn.onclick = (e) => { e.stopPropagation(); toggleSettings(); };
   if (elFontUp) elFontUp.onclick = () => nudgeZoom(1.15);
   if (elFontDown) elFontDown.onclick = () => nudgeZoom(1 / 1.15);
@@ -2487,7 +2537,6 @@
     renderPanes(); renderTabs();
   };
   document.addEventListener('click', (e) => {
-    if (!elWsMenu.hidden && !elWsMenu.contains(e.target) && !elWsChip.contains(e.target)) closeWsMenu();
     if (!elSetMenu.hidden && !elSetMenu.contains(e.target) && !elSettingsBtn.contains(e.target)) closeSettings();
     if (elSplitMenu && !elSplitMenu.hidden && !elSplitMenu.contains(e.target)
         && !(state.menuBtn && state.menuBtn.contains(e.target))) closeSplitMenu();
@@ -2809,6 +2858,50 @@
   } catch (e) { inboxUI = null; if (window.console) console.error('inbox failed to mount', e); }
   if (!inboxUI && elInboxBtn && elInboxBtn.parentNode) elInboxBtn.remove();
   if (inboxUI && elInboxBtn) elInboxBtn.onclick = (e) => { e.stopPropagation(); toggleInbox(); };
+  // p17 sidebar view. Absent sidebar.js (404, stale cache, threw) leaves the chip as a plain label:
+  // the badge and the fleet model still work without it.
+  //
+  // A missing #side is a different failure and needs a different answer. The shell (`/`) is
+  // cache-first and this file is network-first, so the first launch after the p17 deploy runs this
+  // code against markup that has no #side, no #sidescrim and no #sideBadge. The panel cannot mount,
+  // and the #wsMenu dropdown it replaced is gone from this file — that launch would have no
+  // workspace or machine switcher at all. The service worker has already refetched `/` in the
+  // background by now, so ONE reload lands on the new shell.
+  //
+  // The check is INLINE, and runs before anything reads window.cmuxSidebar, because that stale shell
+  // has no <script src="/sidebar.js"> either — a guard living in that module could never run on the
+  // one launch it exists for. sessionStorage holds the once-only flag: a shell that comes back stale
+  // twice is left alone rather than reloaded forever, and a shell that HAS #side clears the flag so
+  // the next deploy is armed again. Storage that throws (Safari private mode, a locked-down webview)
+  // means no loop guard, so it means no reload — an unguarded reload loop is worse than the one dead
+  // launch it would fix.
+  if (!$('side')) {
+    try {
+      if (!sessionStorage.getItem('cmux_shell_reload')) {
+        sessionStorage.setItem('cmux_shell_reload', '1');
+        location.reload();
+      }
+    } catch (_) {}
+  } else {
+    try { sessionStorage.removeItem('cmux_shell_reload'); } catch (_) {}
+  }
+  try {
+    if (window.cmuxSidebar && typeof window.cmuxSidebar.createSidebar === 'function') {
+      sidebar = window.cmuxSidebar.createSidebar({
+        model: sideModel, doc: document, mount: $('side'), scrim: $('sidescrim'), store: sideStore,
+        isPhone: () => !canSplit(),
+        current: () => ({ machine: state.machine, wsRef: state.wsRef, surfaceId: state.tab && state.tab.id }),
+        errorText: (code, id) => machineErr(code, id),
+        onJump: (target) => { if (!jumpTo(target)) setStatus('cannot reach that tab', true, 3000); },
+        onRename: (mid, w) => { if (mid !== state.machine) switchMachine(mid); doRenameWorkspace({ id: w.id, ref: w.ref, title: w.title }); },
+        onClose: (mid, w) => { if (mid !== state.machine) switchMachine(mid); doCloseWorkspace({ id: w.id, ref: w.ref, title: w.title }); },
+        onNew: (mid) => { if (mid !== state.machine) switchMachine(mid); doNewWorkspace(); },
+        onRetry: () => loadFleet(),
+      });
+    }
+  } catch (e) { sidebar = null; if (window.console) console.error('sidebar failed to mount', e); }
+  if (elWsChip) elWsChip.onclick = (e) => { e.stopPropagation(); if (sidebar) sidebar.toggle(); };
+  window.addEventListener('resize', () => { if (sidebar) sidebar.render(null); });   // phone ↔ desktop flips the drawer rule
 
   function toggleInbox() {
     if (!inboxUI) return;
@@ -2872,6 +2965,40 @@
   // "peer" for a machine we know is simply switching to it in place — no second origin, no second
   // token. A machine this server does NOT front can only be reached at its own URL, and the v1
   // state contract carries no such field, so that case reports why instead of guessing a hostname.
+  // ONE jump for the sidebar, radar and inbox. Switches machine when needed (seeded from the last
+  // fleet), selects the workspace, lands on the named tab or the workspace's landing tab, and clears
+  // that tab's done mark. Returns false only when the target cannot exist on this server.
+  function jumpTo(target) {
+    if (!target || !target.machine) return false;
+    if (!state.machines.some((m) => m.id === target.machine)) return false;
+    const land = () => {
+      const ws = state.workspaces.find((w) => w.ref === target.workspaceRef)
+        || (target.surfaceId && state.workspaces.find((w) => (w.tabs || []).some((t) => t.id === target.surfaceId)))
+        || null;
+      if (!ws) return false;
+      if (state.wsRef !== ws.ref) {
+        if (state.tabType === 'browser') { exitBrowserMode(); state.tabType = 'terminal'; }
+        state.wsRef = ws.ref; state.tab = null; state.focusPane = null; state.layout = null;
+        teardownPanes(); stopLayoutStream(); setStatus('');
+        renderHeader(); renderTabs(); syncLayout(true);
+      }
+      const t = target.surfaceId ? (ws.tabs || []).find((x) => x.id === target.surfaceId)
+        : pickLandingTab(ws.tabs, sideModel.statesFor(state.machine));
+      if (t) { selectTab(t.id); sideModel.markSeen(state.machine, t.id); renderSideBadge(sideModel.snapshot()); }
+      else elEmpty.style.display = 'flex';
+      return true;
+    };
+    if (target.machine !== state.machine) {
+      switchMachine(target.machine);
+      if (land()) return true;
+      // the seed did not have it — retry briefly until the fleet beat lands rather than racing it
+      let tries = 0;
+      const retry = () => { if (land()) return; if (++tries > 12) { setStatus('tab not found on ' + target.machine, true, 4000); return; } setTimeout(retry, 250); };
+      setTimeout(retry, 250);
+      return true;
+    }
+    return land();
+  }
   function radarJump(req) {
     try {
       if (!req || !req.machine) return { ok: false, reason: 'no machine on that item' };
@@ -2880,32 +3007,16 @@
         if (req.peerUrl) { window.open(req.peerUrl, '_blank', 'noopener'); return { ok: true }; }
         return { ok: false, reason: req.machine + ' is not connected to this server' };
       }
-      const land = () => {
-        const ws = state.workspaces.find((w) => (w.tabs || []).some((t) => t.id === req.tabUuid || (req.tabRef && t.ref === req.tabRef)));
-        if (!ws) return false;
-        const t = (ws.tabs || []).find((x) => x.id === req.tabUuid) || (ws.tabs || []).find((x) => req.tabRef && x.ref === req.tabRef);
-        if (!t) return false;
-        state.wsRef = ws.ref;
-        renderHeader();
-        exitRadarMode();
-        selectTab(t.id);
-        return true;
-      };
-      if (req.machine !== state.machine) {
-        // switchMachine kicks off its own loadTree; retry briefly until that tree lands rather than
-        // racing it with a second fetch the busy-guard would drop on the floor.
-        switchMachine(req.machine);
-        let tries = 0;
-        const retry = () => {
-          if (land()) return;
-          if (++tries > 12) { setStatus('tab not found on ' + req.machine, true, 4000); return; }
-          setTimeout(retry, 250);
-        };
-        setTimeout(retry, 250);
-        return { ok: true };
+      // a legacy `surface:N` ref resolves to its uuid on the current machine only
+      let sid = req.tabUuid || null;
+      if (!sid && req.tabRef && req.machine === state.machine) {
+        for (const w of state.workspaces) { const t = (w.tabs || []).find((x) => x.ref === req.tabRef); if (t) { sid = t.id; break; } }
       }
-      if (land()) return { ok: true };
-      return { ok: false, reason: 'that tab is no longer in the tree' };
+      if (!sid) return { ok: false, reason: 'that tab is no longer in the tree' };
+      if (req.machine === state.machine && !state.workspaces.some((w) => (w.tabs || []).some((t) => t.id === sid))) {
+        return { ok: false, reason: 'that tab is no longer in the tree' };
+      }
+      return jumpTo({ machine: req.machine, surfaceId: sid }) ? { ok: true } : { ok: false, reason: 'that tab is no longer in the tree' };
     } catch (e) { return { ok: false, reason: (e && e.message) || 'jump failed' }; }
   }
 
@@ -2953,9 +3064,11 @@
   // Where the user was last browsing. Persisted, not just held in memory: iOS kills the
   // standalone app whenever it is backgrounded, so every open is a cold boot and an in-memory
   // value would be lost exactly when it matters most.
+  // Per machine: a path remembered on one Mac means nothing on another.
   const FS_LAST_KEY = 'p4files:lastPath';
-  const lastPath = () => { try { return localStorage.getItem(FS_LAST_KEY) || ''; } catch (_) { return ''; } };
-  const setLastPath = (p) => { try { p ? localStorage.setItem(FS_LAST_KEY, p) : localStorage.removeItem(FS_LAST_KEY); } catch (_) {} };
+  const fsLastKey = () => FS_LAST_KEY + ':' + (state.machine || '');
+  const lastPath = () => { try { return localStorage.getItem(fsLastKey()) || ''; } catch (_) { return ''; } };
+  const setLastPath = (p) => { try { p ? localStorage.setItem(fsLastKey(), p) : localStorage.removeItem(fsLastKey()); } catch (_) {} };
 
   const FS_DOT_KEY = 'p4files:showHidden';
   const showHidden = () => { try { return localStorage.getItem(FS_DOT_KEY) !== '0'; } catch (_) { return true; } };
@@ -2963,7 +3076,8 @@
 
   // Both caches are keyed by path AND dotfile mode — the two modes hold different entry lists and
   // different totals, so sharing one key would paint the other mode's rows on toggle.
-  const ckey = (p) => p + (showHidden() ? '' : ' nodot');
+  // — and by machine, so /Users/you on one Mac never paints the other Mac's rows.
+  const ckey = (p) => (state.machine || '') + '|' + p + (showHidden() ? '' : '\0nodot');
 
   function lsGet(p) { try { return JSON.parse(localStorage.getItem(FS_LS_KEY + ckey(p)) || 'null'); } catch (_) { return null; } }
   function lsSet(p, v) {
@@ -3360,7 +3474,9 @@
     // full-size view which renderPanes discards as soon as the real panes exist.
     try {
       const lt = localStorage.getItem('cmux_last_tab');
-      const raw = lt && localStorage.getItem(GRID_LS_PREFIX + lt);
+      // the key is machine|surface — never paint another machine's grid under the one we will boot into
+      const mine = !savedMachine() || (lt && lt.startsWith(savedMachine() + '|'));
+      const raw = mine && lt && localStorage.getItem(GRID_LS_PREFIX + lt);
       if (raw) {
         const d = JSON.parse(raw);
         if (d && d.grid) {
@@ -3374,7 +3490,8 @@
     } catch (_) {}
     // One round trip: machines + default machine's tree together.
     let boot = null, r = null;
-    try { r = await jget('/api/cmux/bootstrap'); } catch (_) { gate('Could not reach the server.'); return; }
+    const want = savedMachine();
+    try { r = await jget('/api/cmux/bootstrap' + (want ? '?machine=' + encodeURIComponent(want) : '')); } catch (_) { gate('Could not reach the server.'); return; }
     if (r.status === 401) { gate(TOKEN ? 'Access token was rejected. Enter the current token.' : 'An access token is required.', true); return; }
     if (r.ok) boot = await r.json().catch(() => null);
     if (!boot) { gate('Could not reach the server.'); return; }
@@ -3383,9 +3500,14 @@
     const cur = state.machines.find((m) => m.id === state.machine);
     elHost.textContent = (cur && cur.label) || '';
     if (!state.machine) { gate('No machines configured. Set CMUX_MACHINE_URL on the server.'); return; }
-    if (boot.error) setStatus(boot.error, true);
+    rememberMachine(state.machine);
+    if (boot.error) setStatus(machineErr(boot.error), true);
     applyTree(boot.workspaces || []);
     syncLayout(true);                 // geometry is a second call — the tree paints first, then splits
-    state.treeTimer = setInterval(loadTree, 5000);
+    // A remembered machine that is no longer registered comes back as machine:null with an empty
+    // tree, so the fallback machine has not been fetched yet — fetch it now, not in five seconds.
+    // the fleet beat starts now: the sidebar needs every machine, bootstrap only carried one
+    loadFleet();
+    state.treeTimer = setInterval(loadFleet, 5000);
   })();
 })();
