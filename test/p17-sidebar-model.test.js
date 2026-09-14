@@ -115,3 +115,22 @@ test('pickLandingTab prefers waiting, then done, then running, then the tab in f
   assert.equal(pickLandingTab(tabs, {}).id, '2');
   assert.equal(pickLandingTab([{ id: 'b', type: 'browser' }], {}), null);
 });
+
+test('titles lose the Claude Code spinner cmux copies in; a bare glyph keeps the raw title', () => {
+  const { cleanTitle } = require('../public/sidebar.js');
+  assert.equal(cleanTitle('◑ m-crm-permissions'), 'm-crm-permissions');
+  assert.equal(cleanTitle('✳ Shared VM setup'), 'Shared VM setup');
+  assert.equal(cleanTitle('⠂ working'), 'working');
+  assert.equal(cleanTitle('m-sms-deploy-dev'), 'm-sms-deploy-dev');
+  assert.equal(cleanTitle('✳'), '✳');
+  const m = createSidebarModel({ store: memStore() });
+  const s = m.beat(fleet(mac('a', [tab('1', 'Needs input', { title: '◐ fix it' })])), off, 1000);
+  assert.equal(s.machines[0].workspaces[0].tabs[0].title, 'fix it');
+});
+
+test('a sole tab named like its workspace is redundant; a second tab or a new name is not', () => {
+  const { soleTabRepeatsWorkspace } = require('../public/sidebar.js');
+  assert.equal(soleTabRepeatsWorkspace({ title: 'Shared VM', tabs: [{ title: 'shared vm' }] }), true);
+  assert.equal(soleTabRepeatsWorkspace({ title: 'm-sms', tabs: [{ title: 'Configuration testing' }] }), false);
+  assert.equal(soleTabRepeatsWorkspace({ title: 'm-crm', tabs: [{ title: 'm-crm' }, { title: 'm-brief-2' }] }), false);
+});
