@@ -926,7 +926,10 @@ function cmuxNewSurface(req, res) {
 function cmuxNewWorkspace(req, res) {
   cmuxReadBody(req, (b) => {
     if (!b) return send(res, 400, { error: 'bad_json' });
-    const args = ['new-workspace', '--focus', 'false'];
+    // A detached caller can create an unfocused workspace before Ghostty has initialized its
+    // terminal surface. The mirror selects the returned workspace anyway, so focus it here and
+    // make the surface readable before replying.
+    const args = ['new-workspace', '--focus', 'true'];
     const cwd = typeof b.cwd === 'string' ? b.cwd.trim() : '';
     const command = typeof b.command === 'string' ? b.command.trim() : '';
     if (cwd) args.push('--cwd', cwd);
