@@ -25,6 +25,15 @@
   const CAP = 200, STALE_MS = 15000;
   const key = (machine, surface) => machine + '|' + surface;
   const worst = (a, b) => (RANK[a] >= RANK[b] ? a : b);
+  // Claude Code writes its own spinner into the terminal title (`✳ idle`, `◐`/`◑` working, braille
+  // frames), and cmux copies that title onto the workspace. Left in, it reads as a second status
+  // glyph beside ours — and `◑` is literally our `done` glyph. Strip it; a bare glyph keeps the raw.
+  const SPINNER = /^[\s⠀-⣿✳✶✻✽✢·◐◑◒◓]+/;
+  const cleanTitle = (s) => { const raw = String(s || ''); return raw.replace(SPINNER, '').trim() || raw.trim(); };
+  // A workspace whose only listed tab carries the workspace's own name adds a row that says nothing:
+  // tapping the workspace already lands on that tab (pickLandingTab prefers waiting/done/running).
+  const soleTabRepeatsWorkspace = (w) => w.tabs.length === 1
+    && w.tabs[0].title.toLowerCase() === String(w.title || '').toLowerCase();
 
   function createSidebarModel(deps) {
     const store = (deps && deps.store) || { get() { return null; }, set() {}, remove() {} };
@@ -65,12 +74,12 @@
             present.add(key(m.id, t.id));
             const s = tabState(m.id, t, view);
             if (s === 'idle') continue;
-            tabs.push({ id: t.id, ref: t.ref, title: t.title || t.ref, pane: t.pane || null, state: s });
+            tabs.push({ id: t.id, ref: t.ref, title: cleanTitle(t.title) || t.ref, pane: t.pane || null, state: s });
             wState = worst(wState, s);
             if (s === 'waiting' || s === 'done') wCount++;
           }
           mState = worst(mState, wState); mCount += wCount;
-          return { ref: w.ref, id: w.id, title: w.title || w.ref, selected: !!w.selected, state: wState, count: wCount, tabs };
+          return { ref: w.ref, id: w.id, title: cleanTitle(w.title) || w.ref, selected: !!w.selected, state: wState, count: wCount, tabs };
         });
         return { id: m.id, label: m.label, ok: true, state: mState, count: mCount, workspaces };
       });
@@ -247,10 +256,13 @@
         head.setAttribute('aria-expanded', collapsed.has(m.id) ? 'false' : 'true');
         head.title = m.label;
         const init = el('span', 'sideinit', ((m.label || m.id).trim().charAt(0) || '?').toUpperCase());
-        const g = el('span', 'sideglyph ' + (m.ok ? m.state : 'unreachable'), m.ok ? GLYPH[m.state] : GLYPH.unreachable);
         const lab = el('span', 'sidelabel', m.label || m.id);
         const cnt = el('span', 'sidecount ' + m.state, String(m.count)); cnt.hidden = !m.count;
-        head.append(init, g, lab, cnt);
+        // The machine header carries no state dot: its count badge already sums the rows under it,
+        // and a dot per level stacked three identical dots down the left edge. Only ✗ earns a glyph.
+        head.append(init);
+        if (!m.ok) head.append(el('span', 'sideglyph unreachable', GLYPH.unreachable));
+        head.append(lab, cnt);
         head.onclick = () => {
           if (mode === 'rail') { setMode('full'); return; }
           if (collapsed.has(m.id)) collapsed.delete(m.id); else collapsed.add(m.id);
@@ -279,7 +291,7 @@
             row.onclick = () => { if (o.onJump) o.onJump({ machine: m.id, workspaceRef: w.ref }); afterNav(); };
             longPress(row, () => openSheet(row, m.id, w));
             wsBox.appendChild(row);
-            for (const tb of w.tabs) {
+            for (const tb of (soleTabRepeatsWorkspace(w) ? [] : w.tabs)) {
               const tr = el('div', 'siderow tab'); tr.setAttribute('role', 'button'); tr.dataset.surface = tb.id;
               tr.append(el('span', 'sideglyph ' + tb.state, GLYPH[tb.state]), el('span', 'sidelabel', tb.title));
               tr.onclick = (e) => { e.stopPropagation(); if (o.onJump) o.onJump({ machine: m.id, workspaceRef: w.ref, surfaceId: tb.id }); afterNav(); };
@@ -307,5 +319,5 @@
     return { render, mode: () => mode, setMode, toggle, destroy() { closeSheet(); mount.replaceChildren(); } };
   }
 
-  return { createSidebarModel, createSidebar, pickLandingTab, KEYS };
+  return { createSidebarModel, createSidebar, pickLandingTab, cleanTitle, soleTabRepeatsWorkspace, KEYS };
 });
