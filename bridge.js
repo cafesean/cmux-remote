@@ -22,7 +22,7 @@
 //   CMUX_BIN       path to the cmux CLI (default: the macOS app bundle path)
 //   BACKEND        cmux (default) | tmux — tmux drives a headless tmux server through lib/tmux-cli.js
 //   TMUX_BIN / TMUX_SOCKET / TMUX_SESSION   the tmux backend's binary, server socket, default session
-require('./loadenv');
+const { emptyShadowed } = require('./loadenv');
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
@@ -41,7 +41,7 @@ const SECRET = process.env.BRIDGE_SECRET || '';
 // anything is bound — never a silent fall back to TCP. Unset = TCP exactly as before.
 const unixListen = require('./lib/unix-listen');
 let SOCKET = '';
-try { SOCKET = unixListen.socketSetting('BRIDGE_SOCKET'); }
+try { SOCKET = unixListen.socketSetting('BRIDGE_SOCKET', process.env, emptyShadowed); }
 catch (e) { console.error(`refusing to start: ${e.code}: ${e.detail}`); process.exit(1); }
 // Machine identity (p5 radar). Radar's session identity is {machine, session_id} and NEVER cwd, so
 // every response that carries session data carries the machine it came from.

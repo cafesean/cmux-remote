@@ -406,11 +406,19 @@ and exits 1 — there is **no** silent fallback to TCP:
   is created with mode 0700. An existing directory with the wrong mode or owner is **refused, never
   `chmod`-ed** — something may already have been planted in it while it was open.
 - **A stale socket** — the file a killed process leaves behind — is removed at start (`removed stale
-  socket <path>`) only when a connect to it is refused. If something answers, the new process exits
-  with `socket_in_use` instead of taking over a live endpoint. Anything that is not a socket at the
-  path is left alone and refused.
+  socket <path>`) only when three connects to it over ~300 ms are all refused (a live listener whose
+  accept queue is momentarily full refuses too, but not for long). If something answers, the new
+  process exits with `socket_in_use` instead of taking over a live endpoint. Anything that is not a
+  socket at the path is left alone and refused.
 - The socket is created with mode 0600. The server checks the directory of every `unix:` machine
   the same way before it sends that bridge its secret.
+- **In socket mode the local bridge must be `unix:` too.** A machine at `http(s)://` on this Mac
+  (127.x, `localhost`, `::1`, `0.0.0.0`) — say a leftover `CMUX_MACHINE_URL=http://127.0.0.1:…` —
+  would still receive `BRIDGE_SECRET` on a loopback port, so the server refuses to start
+  (`loopback_tcp_machine`). Machines on other hosts may stay `http(s)`.
+- **An empty setting cannot hide the path.** The environment wins over `.env` (as for every
+  variable), so `SERVER_SOCKET=` / `BRIDGE_SOCKET=` set but empty in the environment would hide the
+  path in `.env` and start on TCP; instead the process refuses to start (`socket_setting_shadowed`).
 
 **cloudflared** can use the socket as its origin, so the server needs no port at all. In
 `~/.cloudflared/config.yml`:

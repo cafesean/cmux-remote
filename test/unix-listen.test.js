@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const http = require('http');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const ul = require('../lib/unix-listen');
@@ -111,6 +112,17 @@ test('socketSetting: unset, empty or blank -> "", a good path -> the path, a bad
   assert.match(e.detail, /^X_SOCK: /, 'the detail names the setting');
   assert.equal(codeOf(() => ul.socketSetting('X_SOCK', { X_SOCK: '/' + 'a'.repeat(103) })).code, 'socket_path_too_long');
   assert.equal(codeOf(() => ul.socketSetting('X_SOCK', { X_SOCK: ' /a/b.sock' })).code, 'socket_path_invalid', 'blanks are refused, not trimmed');
+});
+
+test('socketSetting: an empty value that hides a .env value (loadenv emptyShadowed) -> socket_setting_shadowed', () => {
+  const e = codeOf(() => ul.socketSetting('X_SOCK', { X_SOCK: '' }, ['X_SOCK']));
+  assert.ok(e instanceof ul.SocketConfigError);
+  assert.equal(e.code, 'socket_setting_shadowed');
+  assert.match(e.detail, /X_SOCK is set to "" in the environment/);
+  assert.equal(codeOf(() => ul.socketSetting('X_SOCK', { X_SOCK: '  ' }, ['X_SOCK'])).code, 'socket_setting_shadowed');
+  assert.equal(ul.socketSetting('X_SOCK', { X_SOCK: '' }, ['OTHER']), '', 'another name shadowed: not ours');
+  assert.equal(ul.socketSetting('X_SOCK', {}, ['X_SOCK']), '', 'unset: nothing hides anything');
+  assert.equal(ul.socketSetting('X_SOCK', { X_SOCK: '/a/b.sock' }, ['X_SOCK']), '/a/b.sock');
 });
 
 // ---- checkSocketDir / prepareSocketDir ---------------------------------------------------------
@@ -228,6 +240,45 @@ test('clearStaleSocket: the socket a SIGKILLed child left -> "removed", and the 
   await staleSocketAt(p);
   assert.equal(await ul.clearStaleSocket(p), 'removed');
   assert.equal(fs.existsSync(p), false);
+});
+
+test('clearStaleSocket: a LIVE listener whose accept queue is full at the first probe is not taken for stale', async () => {
+  // On macOS a listener with a full accept queue REFUSES a connect, exactly like a dead socket file.
+  // A child listens with backlog 1 and then blocks its event loop (so nothing is accepted) until a
+  // flag file appears; one parked connection fills the queue. It unblocks 50 ms into the probing —
+  // the burst a busy but live server drains — and must be found live.
+  const d = tmp();
+  const p = path.join(d, 'busy.sock');
+  const flag = path.join(d, 'go');
+  const child = spawn(process.execPath, ['-e',
+    "const fs = require('fs'); require('net').createServer(() => {}).listen({ path: process.argv[1], backlog: 1 }, () => {" +
+    " console.log('up'); while (!fs.existsSync(process.argv[2])) { /* busy: accept nothing */ } });", p, flag],
+  { stdio: ['ignore', 'pipe', 'inherit'] });
+  const gone = new Promise((resolve) => child.on('exit', resolve));
+  const parked = [];
+  try {
+    await new Promise((resolve) => child.stdout.on('data', (x) => { if (String(x).includes('up')) resolve(); }));
+    let refused = false;
+    for (let i = 0; i < 16 && !refused; i++) {
+      const r = await new Promise((resolve) => {
+        const c = net.connect(p);
+        c.once('connect', () => { parked.push(c); resolve('ok'); });
+        c.once('error', (e) => resolve(e.code));
+      });
+      refused = r === 'ECONNREFUSED';
+    }
+    assert.ok(refused, 'precondition: the live listener refuses a connect once its queue is full');
+    const ino = fs.lstatSync(p).ino;
+    setTimeout(() => fs.writeFileSync(flag, ''), 50);
+    await rejectsWith(ul.clearStaleSocket(p), 'socket_in_use');
+    assert.ok(fs.lstatSync(p).isSocket(), 'the live socket file is still there');
+    assert.equal(fs.lstatSync(p).ino, ino);
+  } finally {
+    for (const c of parked) c.destroy();
+    if (!fs.existsSync(flag)) fs.writeFileSync(flag, '');
+    child.kill('SIGKILL');
+    await gone;
+  }
 });
 
 test('clearStaleSocket: a socket of another uid -> socket_wrong_owner, left in place', async () => {
