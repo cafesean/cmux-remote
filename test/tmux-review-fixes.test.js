@@ -2,8 +2,8 @@
 // p18 review fixes — one real-tmux test per finding, each written to FAIL on the pre-fix code.
 //
 //   1  refs skip the epoch fence: after a tmux restart `surface:0` names the NEW server's %0, so every
-//      write verb refuses refs (reads keep them), and radar dispatch tries the epoch-bound surfaceId
-//      before the tabRef.
+//      write verb refuses refs (reads keep them). Radar is not supported on tmux (owner, p18): every
+//      radar route that could type into a pane or start a session refuses before reaching a bridge.
 //   2  a tmux started from inside a pane inherits CMUX_TMUX_EPOCH; its own %0 must not mint the OUTER
 //      %0's id. ensure() exports CMUX_TMUX_PID and surfaceFromEnv requires $TMUX's pid to match.
 //   3  user text in format-expanded tmux arguments (-c, rename-window) is `#`-escaped.
@@ -16,12 +16,17 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const http = require('http');
+const os = require('os');
 const path = require('path');
 const ids = require('../lib/tmux-ids');
 const { charWidth, textWidth } = require('../lib/tmux-grid');
 const receiver = require('../radar/hook-receiver');
 const { createDispatcher } = require('../radar/dispatch');
-const { startTmux, tmuxBinary, waitFor } = require('./helpers/tmux-server');
+const sessions = require('../radar/mod-sessions');
+const { createRadar } = require('../radar-server');
+const { startTmux, tmuxBinary, waitFor, sleep } = require('./helpers/tmux-server');
+const { bootBridge, callBridge } = require('./helpers/bridge-child');
 
 const skip = tmuxBinary() ? false : 'tmux not installed';
 const x = (cli, args) => new Promise((resolve) => {
@@ -82,44 +87,117 @@ test('1a: after a tmux restart, write verbs refuse refs — `surface:0` never ty
   } finally { await own.stop(); }
 });
 
-test('1b: radar dispatch sends the resume seed to the session\'s surfaceId, not its tabRef', { skip }, async () => {
-  const e = await epochNow();
-  const right = (await srv.runOk(['new-window', '-d', '-t', 'main:', '-P', '-F', '#{pane_id}', 'cat'])).trim();
-  const wrong = (await srv.runOk(['new-window', '-d', '-t', 'main:', '-P', '-F', '#{pane_id}', 'cat'])).trim();
-  const NOW = Date.parse('2026-09-21T12:00:00.000Z');
-  const ago = (m) => new Date(NOW - m * 60000).toISOString();
-  const session = {
-    key: { machine: 'box', sessionId: 'sess-1' },
-    // the ref is what a stale state.json carries; the id is epoch-bound
-    surface: { tabRef: `surface:${wrong.slice(1)}`, surfaceId: S(e, right) }, surfaceReason: null,
-    repo: 'r', worktree: 'feature/PROJ-1-x', epic: 'PROJ-1', status: 'idle', lastEventAt: ago(10), lastSubmitAt: ago(11),
-  };
-  const state = { collectorId: 'box', sessions: [session], workRefs: [{
-    urn: 'urn:work:jira:PROJ-1', source: 'jira', sourceId: 'PROJ-1', kind: 'epic', title: 't',
-    status: { native: 'In Progress', nativeCategory: 'indeterminate', canonical: 'active' },
-    cluster: 'PROJ-1', links: ['urn:work:git:r/feature/PROJ-1-x'], selectable: true, route: null }] };
-  const sent = [];
-  const d = createDispatcher({
-    config: () => ({ role: 'leader', repos: [{ id: 'r', path: '/repo/r' }], resume: { minIdleSec: 90, maxIdleHours: 24, requireSurface: true },
-      dispatch: { enabled: false } }),
-    readState: async () => state,
-    now: () => NOW,
-    // the bridge's /cmux/send, over the real emulator: text, then enter
-    bridgeSend: async (a) => {
-      sent.push(a.surface);
-      const t = await x(cli, ['send', '--surface', a.surface, '--', a.text]);
-      if (t.err) return { ok: false, error: t.stderr };
-      const k = await x(cli, ['send-key', '--surface', a.surface, '--', 'enter']);
-      return k.err ? { ok: false, error: k.stderr } : { ok: true };
-    },
-    spawn: async () => ({ sessionId: 'spawned', machine: 'box' }),
-  });
-  const r = await d.dispatch({ workRefUrns: ['urn:work:jira:PROJ-1'], authority: 'sean', runId: 'run-1' });
-  assert.equal(r.status, 200, JSON.stringify(r.payload));
-  assert.equal(r.payload.route.kind, 'resume', JSON.stringify(r.payload));
-  assert.deepEqual(sent, [S(e, right)]);
-  await waitFor(async () => (await srv.capture(right)).includes('PROJ-1'), { what: 'the seed in the session pane' });
-  assert.ok(!(await srv.capture(wrong)).includes('PROJ-1'), 'the tabRef pane got nothing');
+test('1b: under BACKEND=tmux radar refuses every pane-writing route — a live, correctly-shaped session gets no keys and tmux gains nothing', { skip }, async () => {
+  // Radar is not supported on the tmux backend (owner, p18). The session below is the most dangerous
+  // shape radar can hold: its `surface` is the collector's own join over a real tmux bridge's tree
+  // ({workspace, tabRef, tabUuid, tabStatus, via} — radar/mod-sessions.js surfaceOf), its tabUuid is
+  // live and writable (proved first), and it is idle on a free cluster. Only the refusal stands
+  // between radar and the pane.
+  const SECRET = 'p18-radar-secret';
+  const own = await startTmux({ cols: 100, rows: 30 });
+  const b = await bootBridge({ env: { BACKEND: 'tmux', TMUX_SOCKET: own.socket, TMUX_BIN: own.tmuxBin, BRIDGE_SECRET: SECRET } });
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'p18-radar-')));
+  let srvHttp = null;
+  try {
+    const tree = async () => {
+      const r = await callBridge(b.base, '/cmux/tree', { secret: SECRET });
+      assert.equal(r.status, 200, r.text);
+      return r.json;
+    };
+    await tree();                                                  // ensure(): identity variables, then main with %0
+    const history = () => own.capture('%0', ['-S', '-']);
+    // the session's identity, from its own pane's environment exactly as its hook would record it
+    const envFile = path.join(own.dir, 'session-env.txt');
+    await own.type('%0', `printf '%s|%s|%s|%s\\n' "$TMUX_PANE" "$CMUX_TMUX_EPOCH" "$CMUX_TMUX_PID" "$TMUX" > '${envFile}'`);
+    const line = await waitFor(() => fs.existsSync(envFile) && fs.readFileSync(envFile, 'utf8').includes('\n') && fs.readFileSync(envFile, 'utf8'),
+      { what: 'the session pane environment' });
+    const [TMUX_PANE, CMUX_TMUX_EPOCH, CMUX_TMUX_PID, TMUX] = line.trim().split('|');
+    await own.type('%0', 'exec cat');                              // from here the pane echoes whatever it is sent
+    const recorded = receiver.cmuxIdentity({ TMUX_PANE, CMUX_TMUX_EPOCH, CMUX_TMUX_PID, TMUX });
+    const join = sessions.joinSurface(sessions.buildSurfaceIndex(await tree(), null), '/repo/r', 1,
+      { surfaceId: recorded.surfaceId, tabId: recorded.tabId });
+    const surface = join.surface;
+    assert.ok(surface, JSON.stringify(join));
+    assert.deepEqual(Object.keys(surface).sort(), ['tabRef', 'tabStatus', 'tabUuid', 'via', 'workspace']);
+    assert.equal(surface.via, 'recorded');
+    assert.equal(surface.tabUuid, S(await own.startTime(), '%0'));
+
+    // control: the address is live — the bridge itself types into that pane by this id
+    const ctl = await fetch(`${b.base}/cmux/send`, { method: 'POST', headers: { 'x-bridge-secret': SECRET },
+      body: JSON.stringify({ surface: surface.tabUuid, text: 'P18-CONTROL', submit: true }) });
+    assert.equal(ctl.status, 200, await ctl.text());
+    await waitFor(async () => (await history()).includes('P18-CONTROL'), { what: 'the control text in the pane' });
+
+    const NOW = Date.parse('2026-09-21T12:00:00.000Z');
+    const ago = (m) => new Date(NOW - m * 60000).toISOString();
+    const state = { collectorId: 'box', sessions: [{
+      key: { machine: 'box', sessionId: 'sess-1' }, surface, surfaceReason: null,
+      repo: 'r', worktree: 'feature/PROJ-1-x', epic: 'PROJ-1', status: 'idle', lastEventAt: ago(10), lastSubmitAt: ago(11),
+    }], workRefs: [{
+      urn: 'urn:work:jira:PROJ-1', source: 'jira', sourceId: 'PROJ-1', kind: 'epic', title: 't',
+      status: { native: 'In Progress', nativeCategory: 'indeterminate', canonical: 'active' },
+      cluster: 'PROJ-1', links: ['urn:work:git:r/feature/PROJ-1-x'], selectable: true, route: null }] };
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+      configVersion: 1, role: 'leader', collectorId: 'box', repos: [{ id: 'r', path: '/repo/r' }],
+      resume: { minIdleSec: 90, maxIdleHours: 24, requireSurface: true },
+      bridges: [{ id: 'box', baseUrl: b.base, secretRef: 'P18_BRIDGE_SECRET' }],
+      dispatch: { enabled: true, authorityTokenRef: 'P18_OPERATOR_TOKEN' },
+    }));
+    const bridgeCalls = [];
+    let dispatches = 0;
+    let handoffs = 0;
+    const radar = createRadar({
+      createCollector: () => ({ paths: { dir, config: path.join(dir, 'config.json') }, getState: async () => state,
+        scan: async () => ({ ok: true, published: true, warnings: [], error: null, durationMs: 1, state: null }),
+        start: () => {}, stop: () => {}, isScanning: () => false }),
+      scanOnStart: false, log: () => {}, now: () => NOW,
+      env: { BACKEND: 'tmux', P18_BRIDGE_SECRET: SECRET, P18_OPERATOR_TOKEN: 'op' },
+      // every way radar reaches a pane or a session, counted: the bridge transport, the dispatcher,
+      // and the p6 handoff module (spawn, preview, commit)
+      bridgeHttp: async (url, o) => {
+        bridgeCalls.push(url);
+        const r = await fetch(url, { method: (o && o.method) || 'GET', headers: (o && o.headers) || {}, body: o && o.body });
+        return { ok: r.ok, status: r.status, json: await r.json().catch(() => null) };
+      },
+      createDispatcher: (deps) => { const real = createDispatcher(deps); return { ...real, dispatch: (x2) => { dispatches++; return real.dispatch(x2); } }; },
+      createHandoff: (...a) => { handoffs++; return require('../radar/handoff').createHandoff(...a); },
+    });
+    srvHttp = http.createServer((req, res) => radar.handle(req, res, new URL(req.url, 'http://x')));
+    await new Promise((r) => srvHttp.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${srvHttp.address().port}`;
+
+    const before = {
+      panes: await own.runOk(['list-panes', '-a', '-F', '#{session_name} #{window_id} #{pane_id}']),
+      sessions: await own.runOk(['list-sessions', '-F', '#{session_name}']),
+      screen: await history(),
+    };
+    const refused = [
+      ['/api/radar/dispatch', { workRefUrns: ['urn:work:jira:PROJ-1'], authority: 'operator', runId: 'P18-DISPATCH', operatorToken: 'op' }],
+      ['/api/radar/dispatch', { workRefUrns: ['urn:work:jira:PROJ-1'], authority: 'sean', runId: 'P18-DISPATCH-2' }],
+      ['/api/radar/inbox/reply', { machine: 'box', sessionId: 'sess-1', text: 'P18-REPLY' }],
+      ['/api/radar/handoff/preview', { selectors: ['PROJ-1'] }],
+      ['/api/radar/handoff', { selectors: ['PROJ-1'], idempotencyKey: 'p18-k1' }],
+    ];
+    for (const [route, body] of refused) {
+      const r = await fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      assert.equal(r.status, 501, route);
+      assert.deepEqual(await r.json(), { error: 'unsupported_backend', backend: 'tmux', detail: 'unsupported: radar is not available on the tmux backend' }, route);
+    }
+    await sleep(200);
+    assert.deepEqual(bridgeCalls, [], 'no bridge call at all — the emulator is never reached');
+    assert.equal(dispatches, 0, 'the dispatcher never runs');
+    assert.equal(handoffs, 0, 'the handoff module (spawn) never loads');
+    assert.equal(await own.runOk(['list-panes', '-a', '-F', '#{session_name} #{window_id} #{pane_id}']), before.panes, 'no pane or window created');
+    assert.equal(await own.runOk(['list-sessions', '-F', '#{session_name}']), before.sessions, 'no session created');
+    const after = await history();
+    assert.equal(after, before.screen, 'the pane received no keys');
+    for (const marker of ['P18-DISPATCH', 'P18-REPLY', 'scoped work packet']) assert.ok(!after.includes(marker), marker);
+  } finally {
+    if (srvHttp) await new Promise((r) => { srvHttp.closeAllConnections(); srvHttp.close(() => r()); });
+    await b.stop();
+    await own.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---- 2 -------------------------------------------------------------------------------------------

@@ -62,6 +62,7 @@ function cmuxIdentity(env) {
     return '';
   };
   let surfaceId = pick('CMUX_SURFACE_ID', 'SUPACODE_SURFACE_ID', 'CMUX_PANEL_ID');
+  // DORMANT: radar is not supported on the tmux backend (owner, p18), so nothing acts on this id.
   if (!surfaceId) {
     try { surfaceId = require('../lib/tmux-ids').surfaceFromEnv(e); } catch (err) { debug(`tmux identity: ${err && err.message}`); }
   }

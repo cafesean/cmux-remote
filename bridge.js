@@ -57,6 +57,7 @@ const tmuxCli = BACKEND === 'tmux' ? require('./lib/tmux-cli').createTmuxCli({
 // What this machine can do, for the page to gate on (additive key in /cmux/tree).
 const CAPABILITIES = Object.freeze({
   backend: BACKEND, browser: BACKEND === 'cmux', sidebarStatus: BACKEND === 'cmux', tabsInPane: BACKEND === 'cmux',
+  radar: BACKEND === 'cmux',   // radar types into panes and starts sessions; not supported on tmux (owner, p18)
 });
 // One spawn point for both backends. cmux: the exact execFile cmux() always made.
 function cli(args, opts, cb) {

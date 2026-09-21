@@ -137,6 +137,19 @@ const REPLY_OUTCOMES = {
   text_inserted_submit_failed: [502, 'Text was placed in the tab but not submitted — finish it there.'],
 };
 
+// p18: radar is NOT supported on the tmux backend (owner decision, 2026-09-21). Every route that types
+// into a pane or starts a session — and the handoff preview that opens that flow — refuses there
+// before it reads a body or calls a bridge, so the tmux emulator is never reached. Reads write
+// nothing and are left alone. BACKEND is the one the bridge reads from the same release .env
+// (loadenv.js), normalised the way bridge.js normalises it.
+const TMUX_REFUSED_ROUTES = new Set([
+  '/api/radar/dispatch', '/api/radar/inbox/reply', '/api/radar/handoff/preview', '/api/radar/handoff',
+]);
+const TMUX_REFUSAL = Object.freeze({
+  error: 'unsupported_backend', backend: 'tmux', detail: 'unsupported: radar is not available on the tmux backend',
+});
+const isTmuxBackend = (env) => String((env && env.BACKEND) || '').trim().toLowerCase() === 'tmux';
+
 // The route's transport. radar/http.js and mod-sessions' defaultHttp are both GET-only, and the send
 // is a POST — so this is the one place a bridge-bound method/body exists. It owns NO timeout: the
 // ROUTE owns every deadline through an AbortController it created (§5.5 steps 6-8), which is what
@@ -487,6 +500,7 @@ function createRadar(opts) {
   async function handle(req, res, u) {
     const p = u.pathname;
     if (u.searchParams.has('token')) return sendJson(res, 401, { error: 'token_in_url' });
+    if (req.method === 'POST' && TMUX_REFUSED_ROUTES.has(p) && isTmuxBackend(env)) return sendJson(res, 501, TMUX_REFUSAL);
 
     try {
       if (req.method === 'GET' && p === '/api/radar/state') return await routeState(res);
