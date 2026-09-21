@@ -120,6 +120,13 @@ try {
   check('the tab strip rendered its add button (sanity for the next check)', addButtons.includes('+'), JSON.stringify(addButtons));
   check("no '+🌐' button exists", (await page.locator('button', { hasText: '+🌐' }).count()) === 0, JSON.stringify(addButtons));
 
+  // 4b. no radar on a tmux machine: both chips are MOUNTED (radar.js and inbox.js loaded) and hidden
+  for (const id of ['radarBtn', 'inboxBtn']) {
+    const chip = page.locator('#' + id);
+    const n = await chip.count();
+    check(`#${id} is mounted but hidden`, n === 1 && await chip.isHidden(), `count=${n}`);
+  }
+
   // 5. the pane menu: '+ Browser tab here' hidden, the terminal entry still offered
   await page.locator('.pane').first().locator('.pact').first().click();
   await page.waitForSelector('#splitMenu:not([hidden])', { timeout: 3000 });

@@ -43,7 +43,7 @@ test('BACKEND unset: /cmux/tree carries the cmux capabilities', async () => {
   try {
     const r = await callBridge(b.base, '/cmux/tree', { secret: SECRET });
     assert.equal(r.status, 200, r.text);
-    assert.deepEqual(r.json.capabilities, { backend: 'cmux', browser: true, sidebarStatus: true, tabsInPane: true });
+    assert.deepEqual(r.json.capabilities, { backend: 'cmux', browser: true, sidebarStatus: true, tabsInPane: true, radar: true });
     assert.match(b.stdout(), /backend: cmux/);
   } finally {
     await b.stop();
@@ -60,7 +60,7 @@ test('BACKEND=tmux: tmux capabilities, and `main` exists right after boot, befor
     assert.match(b.stdout(), /backend: tmux/);
     const r = await callBridge(b.base, '/cmux/tree', { secret: SECRET });
     assert.equal(r.status, 200, r.text);
-    assert.deepEqual(r.json.capabilities, { backend: 'tmux', browser: false, sidebarStatus: false, tabsInPane: false });
+    assert.deepEqual(r.json.capabilities, { backend: 'tmux', browser: false, sidebarStatus: false, tabsInPane: false, radar: false });
     assert.equal(r.json.workspaces.length, 1);
     assert.equal(r.json.workspaces[0].tabs[0].status, '');       // no sidebar status source on tmux
   } finally {

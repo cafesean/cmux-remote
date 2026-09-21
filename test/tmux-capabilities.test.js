@@ -14,7 +14,7 @@ const path = require('path');
 const { bootServer, call } = require('./helpers/server-boot');
 
 const REPO = path.join(__dirname, '..');
-const TMUX_CAPS = { backend: 'tmux', browser: false, sidebarStatus: false, tabsInPane: false };
+const TMUX_CAPS = { backend: 'tmux', browser: false, sidebarStatus: false, tabsInPane: false, radar: false };
 const TREE = { workspaces: [{ ref: 'workspace:1', id: 'W1', title: 'one', selected: true,
   tabs: [{ id: 'S1', ref: 'surface:1', title: 'sh', type: 'terminal', selected: true, pane: 'P1', paneRef: 'pane:1', inPane: true, status: '' }],
   panes: [{ ref: 'pane:1', id: 'P1', index: 0, focused: true, selected: 'S1', tabs: ['S1'] }] }] };
@@ -93,13 +93,38 @@ test('page: canBrowser() is true with no capabilities (pre-p18 bridge) and false
   assert.equal(canBrowser({ machine: null, caps: {} }), true);
 });
 
+test('page: canRadar() gates the Radar and Inbox chips and refuses to open either on a radar:false machine', () => {
+  const src = fs.readFileSync(path.join(REPO, 'public', 'app.js'), 'utf8');
+  const m = /const canRadar = \(\) => \{ (.*) \};\n/.exec(src);
+  assert.ok(m, 'canRadar definition');
+  // eslint-disable-next-line no-new-func
+  const canRadar = (state) => new Function('state', m[1])(state);
+  assert.equal(canRadar({ machine: 'a', caps: {} }), true, 'no capabilities = pre-p18 bridge = radar on');
+  assert.equal(canRadar({ machine: 'a', caps: { a: { backend: 'cmux', browser: true } } }), true, 'a p18 bridge before this key');
+  assert.equal(canRadar({ machine: 'a', caps: { a: { backend: 'cmux', radar: true } } }), true);
+  assert.equal(canRadar({ machine: 'a', caps: { a: TMUX_CAPS } }), false);
+  const body = (fn) => {
+    const b = new RegExp(`function ${fn}\\(\\) \\{([\\s\\S]*?)\\n  \\}`).exec(src);
+    assert.ok(b, fn);
+    return b[1];
+  };
+  assert.match(body('syncRadarBtn'), /elRadarBtn\.hidden = !canRadar\(\);/);
+  assert.match(body('syncInboxBtn'), /elInboxBtn\.hidden = !canRadar\(\);/);
+  for (const [fn, open] of [['toggleRadar', 'radarUI.open()'], ['toggleInbox', 'inboxUI.open()']]) {
+    const b = body(fn);
+    const gate = b.indexOf('if (!canRadar()) return;');
+    assert.ok(gate > 0 && gate < b.indexOf(open), `${fn}: refuses before it opens`);
+    assert.ok(b.indexOf("state.tabType === '") < gate, `${fn}: leaving stays possible`);
+  }
+});
+
 test('docs: README has the headless tmux section with its settings and the features it loses', () => {
   const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf8');
   const at = readme.indexOf('### Headless backend (tmux)');
   assert.ok(at > readme.indexOf('## Configuration') && at < readme.indexOf('## Running as a background service'), 'under ## Configuration');
   const sec = readme.slice(at, readme.indexOf('\n## ', at));
   for (const v of ['BACKEND', 'TMUX_BIN', 'TMUX_SOCKET', 'TMUX_SESSION']) assert.ok(sec.includes('`' + v + '`'), v);
-  for (const lost of ['No browser tabs', 'No sidebar statuses', 'One tab per pane', 'do not survive a reboot']) assert.ok(sec.includes(lost), lost);
+  for (const lost of ['No browser tabs', 'No sidebar statuses', 'No radar', 'One tab per pane', 'do not survive a reboot']) assert.ok(sec.includes(lost), lost);
   assert.match(sec, /tmux socket is a full shell for its user/);
   assert.match(sec, /\| workspace \| window \|/);
   const env = fs.readFileSync(path.join(REPO, '.env.example'), 'utf8');

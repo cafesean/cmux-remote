@@ -606,6 +606,9 @@
   // A machine without browser surfaces (the tmux backend) says so in its capabilities; no
   // capabilities means a pre-p18 bridge, which always had them.
   const canBrowser = () => { const c = state.caps[state.machine]; return !(c && c.browser === false); };
+  // Radar and its inbox type into panes and start sessions; the tmux backend does not support them
+  // (owner, p18) and says `radar: false`. Same rule as the browser: no capabilities = pre-p18 = on.
+  const canRadar = () => { const c = state.caps[state.machine]; return !(c && c.radar === false); };
 
   function renderHeader() {
     const ws = currentWs();
@@ -711,6 +714,7 @@
   // Radar's toolbar chip carries its own on/off state, exactly like Files.
   function syncRadarBtn() {
     if (!elRadarBtn) return;
+    elRadarBtn.hidden = !canRadar();
     const inRadar = state.tabType === 'radar';
     elRadarBtn.setAttribute('aria-pressed', inRadar ? 'true' : 'false');
     elRadarBtn.title = inRadar ? 'Hide radar' : 'Radar';
@@ -718,6 +722,7 @@
   // The inbox chip carries its own on/off state too — same toolbar, same contract.
   function syncInboxBtn() {
     if (!elInboxBtn) return;
+    elInboxBtn.hidden = !canRadar();
     const inInbox = state.tabType === 'inbox';
     elInboxBtn.setAttribute('aria-pressed', inInbox ? 'true' : 'false');
     elInboxBtn.title = inInbox ? 'Hide inbox' : 'Inbox';
@@ -2917,6 +2922,7 @@
       if (state.tab && findTab(state.tab.id)) return selectTab(state.tab.id);
       exitInboxMode(); renderTabs(); return;
     }
+    if (!canRadar()) return;
     try {
       exitFilesMode();
       if (state.browser && state.browser.surface) exitBrowserMode();
@@ -2944,6 +2950,7 @@
       if (state.tab && findTab(state.tab.id)) return selectTab(state.tab.id);
       exitRadarMode(); renderTabs(); return;
     }
+    if (!canRadar()) return;
     try {
       exitFilesMode();
       if (state.browser && state.browser.surface) exitBrowserMode();

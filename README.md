@@ -350,6 +350,8 @@ reports in `/cmux/tree`):
 - **No browser tabs.** The `+🌐` button and "+ Browser tab here" are hidden; every `/cmux/browser/*`
   route answers `501 {"error":"unsupported_backend","backend":"tmux"}`.
 - **No sidebar statuses.** tmux has no status source, so tabs never show running / needs-input.
+- **No radar.** The Radar and Inbox buttons are hidden, and radar's dispatch, inbox reply and
+  handoff routes answer `501 {"error":"unsupported_backend","backend":"tmux",…}` without touching a pane.
 - **One tab per pane.** "New tab" splits the pane instead; split-off always refuses.
 - **Sessions do not survive a reboot.** A fresh `main` workspace appears when the tmux server
   restarts.
