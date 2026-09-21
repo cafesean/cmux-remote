@@ -6,14 +6,17 @@
 //
 // Env (a .env in the CWD is auto-loaded):
 //   PORT           default 8080 — the UI/proxy port
+//   SERVER_SOCKET  absolute path of a UNIX socket to listen on INSTEAD of a TCP port (p19, shared Macs):
+//                  its directory must be 0700 and ours; PORT/HOST/SERVER_HOST are then ignored
 //   SERVER_TOKEN   token the browser must present on /api/* (empty = open; trusted LAN only)
 //
 //   Machine registry (any of these, merged by id — nothing is committed to the repo):
 //     CMUX_MACHINE_URL / CMUX_MACHINE_SECRET / CMUX_MACHINE_LABEL      — a single default machine
+//       (a baseUrl is http(s)://host:port, or unix:/abs/path/bridge.sock for a bridge on a UNIX socket)
 //     CMUX_MACHINE_ACCESS_ID / CMUX_MACHINE_ACCESS_SECRET             — optional Cloudflare Access token
 //     CMUX_MACHINES   — JSON array [{id,label,baseUrl,secret,accessId?,accessSecret?}] (extends/overrides)
 //     CMUX_CONFIG     — path to a gitignored JSON file { "machines": [ ... ] } (extends/overrides)
-require('./loadenv');
+const { emptyShadowed } = require('./loadenv');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -25,27 +28,14 @@ const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || process.env.SERVER_HOST || '127.0.0.1';
 const SERVER_TOKEN = process.env['SERVER_TOKEN'] || '';
 const PUBLIC_DIR = path.join(__dirname, 'public');
-
-// ---- radar (p5) -------------------------------------------------------------
-// OFF BY DEFAULT, and off means OFF: with RADAR_ENABLED unset, nothing under radar/ is required,
-// no timer is installed, no handler is registered, and every /api/radar/* path 404s exactly as it
-// did before radar was written. Rollback is `unset RADAR_ENABLED` + restart — there is no second
-// switch to find. See README → "Radar (p5)".
-//
-// The load is inside a try/catch on purpose. Radar is an add-on to a terminal mirror people depend
-// on: a broken collector has to degrade to "no radar", never to "no cmux".
-const RADAR_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.RADAR_ENABLED || '').trim());
-let radar = null;
-if (RADAR_ENABLED) {
-  try {
-    radar = require('./radar-server').createRadar();
-    radar.start();
-    console.log(`radar: enabled — ${radar.paths.dir}`);
-  } catch (e) {
-    radar = null;
-    console.error(`radar: failed to start, continuing WITHOUT it: ${(e && e.message) || e}`);
-  }
-}
+// p19: SERVER_SOCKET set → listen on that UNIX socket and open NO TCP port, so no other local user
+// can bind the endpoint first and collect SERVER_TOKEN from the tunnel. A bad value refuses to start
+// here, before anything is bound — never a silent fall back to TCP. Unset = TCP exactly as before.
+const unixListen = require('./lib/unix-listen');
+const { parseUnixBaseUrl, unixFetch } = require('./lib/unix-fetch');
+let SERVER_SOCKET = '';
+try { SERVER_SOCKET = unixListen.socketSetting('SERVER_SOCKET', process.env, emptyShadowed); }
+catch (e) { console.error(`refusing to start: ${e.code}: ${e.detail}`); process.exit(1); }
 
 // Build the machine registry from env + optional config file. Later sources override earlier by id.
 function loadMachines() {
@@ -72,9 +62,76 @@ function loadMachines() {
       if (j && Array.isArray(j.machines)) for (const m of j.machines) if (m && m.id) byId.set(m.id, m);
     } catch (_) { console.error(`CMUX_CONFIG (${process.env.CMUX_CONFIG}): unreadable / invalid JSON — ignored`); }
   }
-  return [...byId.values()].map((m) => ({ ...m, baseUrl: String(m.baseUrl || '').replace(/\/$/, '') }));
+  // p19: a `unix:<path>` baseUrl is a bridge on a UNIX socket. Its path gets the same rules as a
+  // listener's, and its directory the same 0700/owner/ancestor check, before this server sends the
+  // bridge secret there. Any bad one refuses to start — every bad machine is named, not just the first.
+  const bad = [];
+  const list = [...byId.values()].map((m) => {
+    const baseUrl = String(m.baseUrl || '').replace(/\/$/, '');
+    let socketPath;
+    try { socketPath = parseUnixBaseUrl(baseUrl) || undefined; }
+    catch (e) { bad.push(`${e.code}: machine "${m.id}": ${e.detail}`); }
+    return { ...m, baseUrl, socketPath };
+  });
+  if (bad.length) { for (const b of bad) console.error(`refusing to start: ${b}`); process.exit(1); }
+  for (const m of list) if (m.socketPath) {
+    try { unixListen.prepareSocketDir(path.dirname(m.socketPath)); }
+    catch (e) { console.error(`refusing to start: ${e.code}: machine "${m.id}": ${e.detail}`); process.exit(1); }
+  }
+  return list;
 }
 const MACHINES = loadMachines();
+
+// p19: socket mode (SERVER_SOCKET set, or any unix: machine) exists because on a shared Mac another
+// user can bind a loopback TCP port first. A bridge on THIS Mac still reached over http(s) — a stale
+// CMUX_MACHINE_URL=http://127.0.0.1:<port>, or the default machine a mistyped CMUX_CONFIG leaves
+// behind — would get BRIDGE_SECRET on exactly such a port, so that refuses to start: the local bridge
+// must be unix:. Remote http(s) machines stay allowed; TCP mode is untouched.
+const SOCKET_MODE = !!SERVER_SOCKET || MACHINES.some((m) => m.socketPath);
+// '' unless baseUrl is http(s) to this Mac (127.0.0.0/8, localhost, ::1, 0.0.0.0); else scheme://host
+function loopbackHttp(baseUrl) {
+  let u; try { u = new URL(baseUrl); } catch (_) { return ''; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+  const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  const local = h === 'localhost' || h.endsWith('.localhost') || /^127\./.test(h) || h === '0.0.0.0'
+    || h === '::1' || h === '::' || /^::ffff:(127\.|7f[0-9a-f]{2}:)/.test(h);
+  return local ? `${u.protocol}//${u.host}` : '';
+}
+if (SOCKET_MODE) {
+  const tcpLocal = MACHINES.filter((m) => !m.socketPath && loopbackHttp(m.baseUrl));
+  for (const m of tcpLocal) {
+    console.error(`refusing to start: loopback_tcp_machine: machine "${m.id}": ${loopbackHttp(m.baseUrl)} is a TCP port on this Mac — in socket mode a local bridge must be unix:<socket path>`);
+  }
+  if (tcpLocal.length) process.exit(1);
+}
+
+// ---- radar (p5) -------------------------------------------------------------
+// OFF BY DEFAULT, and off means OFF: with RADAR_ENABLED unset, nothing under radar/ is required,
+// no timer is installed, no handler is registered, and every /api/radar/* path 404s exactly as it
+// did before radar was written. Rollback is `unset RADAR_ENABLED` + restart — there is no second
+// switch to find. See README → "Radar (p5)".
+//
+// The load is inside a try/catch on purpose. Radar is an add-on to a terminal mirror people depend
+// on: a broken collector has to degrade to "no radar", never to "no cmux".
+//
+// p19: radar is TCP-only and is NOT loaded in socket mode. Its reply/dispatch routes send the bridge
+// secret to its own bridge URLs, which default to http://127.0.0.1:8799 — exactly the fixed loopback
+// endpoint socket mode exists to retire. So with SERVER_SOCKET set or any unix: machine it stays off
+// (and /api/radar/* 404s), on either backend.
+const RADAR_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.RADAR_ENABLED || '').trim());
+let radar = null;
+if (RADAR_ENABLED && SOCKET_MODE) {
+  console.error('radar: NOT started — radar is TCP-only and this server runs in socket mode (SERVER_SOCKET or a unix: machine); its bridge calls would default to 127.0.0.1:8799');
+} else if (RADAR_ENABLED) {
+  try {
+    radar = require('./radar-server').createRadar();
+    radar.start();
+    console.log(`radar: enabled — ${radar.paths.dir}`);
+  } catch (e) {
+    radar = null;
+    console.error(`radar: failed to start, continuing WITHOUT it: ${(e && e.message) || e}`);
+  }
+}
 const findMachine = (id) => (id ? MACHINES.find((m) => m.id === id) : MACHINES[0]) || null;
 
 // Cloudflare Access service-token headers, for machines reached over a named tunnel gated by CF Access.
@@ -83,12 +140,18 @@ const accessHeaders = (m) => (m.accessId && m.accessSecret)
   ? { 'CF-Access-Client-Id': m.accessId, 'CF-Access-Client-Secret': m.accessSecret }
   : {};
 
+// p19: the one way this file reaches a bridge. http(s): the global fetch, exactly as before.
+// unix:<path>: lib/unix-fetch over the socket — Node's fetch cannot dial a UNIX socket.
+function upstream(m, pathAndQuery, init) {
+  return m.socketPath ? unixFetch(m.socketPath, pathAndQuery, init) : fetch(`${m.baseUrl}${pathAndQuery}`, init);
+}
+
 // Fetch a bridge endpoint with its secret (+ CF Access token if set) and a hard timeout.
 async function bridge(m, pathAndQuery, opt = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opt.timeout || 15000);
   try {
-    return await fetch(`${m.baseUrl}${pathAndQuery}`, {
+    return await upstream(m, pathAndQuery, {
       ...opt,
       headers: { 'x-bridge-secret': m.secret, ...accessHeaders(m), ...(opt.headers || {}) },
       signal: ctrl.signal,
@@ -177,7 +240,7 @@ async function relayDownload(req, res, u) {
   if (req.headers['range']) headers.range = req.headers['range'];
   let up;
   try {
-    up = await fetch(`${m.baseUrl}/cmux/fs/download?path=${encodeURIComponent(tk.path)}`,
+    up = await upstream(m, `/cmux/fs/download?path=${encodeURIComponent(tk.path)}`,
       { headers, signal: ctrl.signal });
   } catch (_) { return sendJson(res, 502, { error: 'bridge_unreachable' }); }
   const out = { 'cache-control': 'no-store' };
@@ -378,7 +441,7 @@ async function handleApi(req, res, u) {
       res.on('close', onResClose);
       return relay(res, (async () => {
         try {
-          return await fetch(`${m.baseUrl}${pq}`, {
+          return await upstream(m, pq, {
             headers: { 'x-bridge-secret': m.secret, ...accessHeaders(m) },
             signal: ctrl.signal,
           });
@@ -455,7 +518,7 @@ async function handleApi(req, res, u) {
     const qs = q.toString();
     let up;
     try {
-      up = await fetch(`${m.baseUrl}${p.replace('/api/cmux', '/cmux')}?${qs}`, {
+      up = await upstream(m, `${p.replace('/api/cmux', '/cmux')}?${qs}`, {
         headers: { 'x-bridge-secret': m.secret, ...accessHeaders(m) }, signal: ctrl.signal,
       });
     } catch (_) { res.writeHead(502); return res.end(); }
@@ -625,7 +688,7 @@ async function handleApi(req, res, u) {
     req.on('close', () => ctrl.abort());
     let up;
     try {
-      up = await fetch(`${m.baseUrl}/cmux/browser/stream?surface=${encodeURIComponent(surface)}`, {
+      up = await upstream(m, `/cmux/browser/stream?surface=${encodeURIComponent(surface)}`, {
         headers: { 'x-bridge-secret': m.secret, ...accessHeaders(m) }, signal: ctrl.signal,
       });
     } catch (_) { res.writeHead(502); return res.end(); }
@@ -693,19 +756,38 @@ const httpServer = http.createServer((req, res) => {
   res.writeHead(404); res.end('not found');
 });
 
-httpServer.listen(PORT, HOST, () => {
-  // The BOUND port, not the requested one — they differ when PORT=0 (ephemeral), which is how the
-  // tests boot a server without colliding with the real one on :8080.
-  const bound = (httpServer.address() && httpServer.address().port) || PORT;
-  console.log(`cmux-remote server on http://${HOST}:${bound} with ${MACHINES.length} machine(s)`);
+// What both listen paths print once the server is reachable.
+function afterListen() {
   // id, label and host only — never the secret. This is the first place a two-Mac setup can be
   // checked: a machine missing here was never parsed out of CMUX_MACHINES / CMUX_CONFIG.
   for (const m of MACHINES) {
-    let host = m.baseUrl; try { host = new URL(m.baseUrl).host; } catch (_) { /* print as given */ }
+    let host = m.baseUrl;
+    if (m.socketPath) host = `unix:${m.socketPath}`;
+    else try { host = new URL(m.baseUrl).host; } catch (_) { /* print as given */ }
     console.log(`  machine "${m.id}" (${m.label}) → ${host}${m.accessId ? ' [CF Access]' : ''}`);
   }
   if (!SERVER_TOKEN) console.log('WARNING: SERVER_TOKEN empty → UI/API open. Set it before exposing outside a trusted LAN.');
-});
+}
+if (SERVER_SOCKET) {
+  // lib/unix-listen.js checks the directory (real path, 0700, ours, safe ancestors), refuses a live
+  // socket at the path, removes a stale one, listens, then chmods the socket 0600.
+  if (process.env.PORT || process.env.HOST || process.env.SERVER_HOST) console.log('note: SERVER_SOCKET is set — PORT/HOST/SERVER_HOST are ignored; no TCP port is opened');
+  unixListen.listenUnix(httpServer, SERVER_SOCKET).then(
+    (r) => {
+      if (r === 'removed') console.log(`removed stale socket ${SERVER_SOCKET}`);
+      console.log(`cmux-remote server on unix:${SERVER_SOCKET} with ${MACHINES.length} machine(s)`);
+      afterListen();
+    },
+    (e) => { console.error(`refusing to start: ${e.code || 'listen_failed'}: ${e.detail || e.message}`); process.exit(1); });
+} else {
+  httpServer.listen(PORT, HOST, () => {
+    // The BOUND port, not the requested one — they differ when PORT=0 (ephemeral), which is how the
+    // tests boot a server without colliding with the real one on :8080.
+    const bound = (httpServer.address() && httpServer.address().port) || PORT;
+    console.log(`cmux-remote server on http://${HOST}:${bound} with ${MACHINES.length} machine(s)`);
+    afterListen();
+  });
+}
 
 // Radar's timers go when the process is asked to leave. Installing a signal handler REPLACES the
 // default terminate-on-SIGTERM, so this exits explicitly — and it is installed ONLY when radar is
