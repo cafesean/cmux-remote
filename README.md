@@ -263,6 +263,7 @@ trusted LAN. Both processes print a warning at startup when a secret is missing.
 | `BRIDGE_PORT` | `8799` | bridge port |
 | `BRIDGE_HOST` | `127.0.0.1` | bridge bind address |
 | `CMUX_BIN` | macOS app path | path to the cmux CLI |
+| `BACKEND` | `cmux` | `tmux` drives a tmux server instead of the cmux app — see [Headless backend (tmux)](#headless-backend-tmux) |
 | `CMUX_MACHINE_LABEL` | `My Mac` | display name for the single default machine |
 | `CMUX_MACHINE_ACCESS_ID` / `CMUX_MACHINE_ACCESS_SECRET` | — | optional Cloudflare Access service token for a bridge behind a gated named tunnel |
 | `FS_ROOTS` | `workspace-cwds` | directories the Files tab may read: colon-separated absolute paths and/or the literal `workspace-cwds`. `FS_ROOTS=/` exposes the whole disk — see Security notes |
@@ -315,6 +316,52 @@ log lists every machine it parsed at startup — a Mac missing there was never r
 
 Radar keeps its own per-machine list (`bridges[]` in its config, see [Radar](#radar-p5)); registering
 a machine here does not register it there.
+
+### Headless backend (tmux)
+
+cmux is a desktop app, so a bridge normally needs someone logged in to the Mac's desktop. For a Mac
+where nobody ever logs in — a shared or headless box whose users only reach it through the web UI —
+the bridge can drive a **tmux server** instead. Set `BACKEND=tmux` on that bridge. It answers every
+route with the same JSON the cmux backend produces, from a built-in cmux CLI emulator
+(`lib/tmux-cli.js`); the server and the page need no configuration at all.
+
+| Variable (bridge) | Default | Notes |
+|---|---|---|
+| `BACKEND` | `cmux` | `cmux` or `tmux`. Any other value makes the bridge refuse to start, so a typo never picks a backend silently |
+| `TMUX_BIN` | `/opt/homebrew/bin/tmux`, then `/usr/local/bin/tmux`, then `tmux` on `PATH` | tmux 3.2 or newer |
+| `TMUX_SOCKET` | `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/default` | the tmux server to drive. Point it at a private socket for a server started at boot (`tmux -u -D -S <socket> -f <conf>`) |
+| `TMUX_SESSION` | `main` | created when the server has no session at all; new workspaces are added to it |
+
+How the model maps:
+
+| cmux | tmux |
+|---|---|
+| window | session |
+| workspace | window |
+| pane | pane (real split geometry, so the multi-pane mirror and divider drags work) |
+| tab (surface) | the same pane — exactly one tab per pane |
+
+Ids handed to the page are UUIDs derived from the tmux server's start time, so after a tmux restart an
+id cached by a phone is refused instead of reaching whichever pane now has that number.
+
+What a tmux machine does not have (the page hides what it can, from the `capabilities` the bridge
+reports in `/cmux/tree`):
+
+- **No browser tabs.** The `+🌐` button and "+ Browser tab here" are hidden; every `/cmux/browser/*`
+  route answers `501 {"error":"unsupported_backend","backend":"tmux"}`.
+- **No sidebar statuses.** tmux has no status source, so tabs never show running / needs-input.
+- **One tab per pane.** "New tab" splits the pane instead; split-off always refuses.
+- **Sessions do not survive a reboot.** A fresh `main` workspace appears when the tmux server
+  restarts.
+- **The terminal size is the tmux window's size**, not the phone's; the page's font fit does the rest.
+- **Nothing that needs a desktop session works from a pane**: the login keychain stays locked,
+  `open` / `pbcopy` / GUI apps fail, and macOS privacy prompts cannot be answered — keep work outside
+  the privacy-protected folders (`~/Desktop`, `~/Documents`, `~/Downloads`).
+
+Security: **the tmux socket is a full shell for its user.** Anyone who can connect to it can type
+into every pane. Keep it in a directory only that user can enter (tmux itself refuses a socket
+directory other users can reach), exactly as you would protect the user's own login. Typed text is
+handed to tmux on stdin, never on a command line another local user could read with `ps`.
 
 ---
 

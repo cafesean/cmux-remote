@@ -10,7 +10,8 @@
 // index.html alone, and they still bust caches because this CACHE version bumps with them.
 // v18: p17 sidebar — a new script and new shell markup. Bump both the cache generation and the
 // service worker registration URL so installed clients replace any older worker immediately.
-const CACHE = 'cmux-shell-v18';
+// v19: p18 capability gating in app.js (browser entry points hidden on tmux machines).
+const CACHE = 'cmux-shell-v19';
 const SHELL = ['/', '/app.js', '/sidebar.js', '/radar.js', '/inbox.js'];
 
 self.addEventListener('install', (e) => {
