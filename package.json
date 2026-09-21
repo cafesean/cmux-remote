@@ -18,6 +18,7 @@
     "radar": "node radar/radar-cli.js",
     "test": "node --test test/*.test.js",
     "test:tmux": "node --test test/tmux-*.test.js",
+    "test:sockets": "node --test test/unix-*.test.js test/p19-*.test.js",
     "test:browser": "node test/p8-browser-run.mjs",
     "test:eval:inbox": "node scripts/eval-inbox.mjs",
     "test:browser:inbox": "node scripts/browser-inbox.mjs"

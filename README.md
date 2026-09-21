@@ -262,6 +262,8 @@ trusted LAN. Both processes print a warning at startup when a secret is missing.
 | `HOST` / `SERVER_HOST` | `127.0.0.1` | server bind address |
 | `BRIDGE_PORT` | `8799` | bridge port |
 | `BRIDGE_HOST` | `127.0.0.1` | bridge bind address |
+| `BRIDGE_SOCKET` | unset | absolute path of a UNIX socket for the bridge to listen on **instead of** `BRIDGE_PORT` (no TCP port is opened) — see [Listening on UNIX sockets](#listening-on-unix-sockets-shared-macs) |
+| `SERVER_SOCKET` | unset | the same for the server, instead of `PORT` / `HOST` |
 | `CMUX_BIN` | macOS app path | path to the cmux CLI |
 | `BACKEND` | `cmux` | `tmux` drives a tmux server instead of the cmux app — see [Headless backend (tmux)](#headless-backend-tmux) |
 | `CMUX_MACHINE_LABEL` | `My Mac` | display name for the single default machine |
@@ -364,6 +366,70 @@ Security: **the tmux socket is a full shell for its user.** Anyone who can conne
 into every pane. Keep it in a directory only that user can enter (tmux itself refuses a socket
 directory other users can reach), exactly as you would protect the user's own login. Typed text is
 handed to tmux on stdin, never on a command line another local user could read with `ps`.
+
+### Listening on UNIX sockets (shared Macs)
+
+On a Mac with several user accounts, a loopback TCP port is not private. Any local user can bind any
+free port above 1024, so another user can take the server's or the bridge's port first — at boot,
+or in the seconds after a restart — and receive every request sent to it: the browser's
+`SERVER_TOKEN` (via the tunnel) or the server's `BRIDGE_SECRET`. A UNIX socket inside a directory
+only you can enter cannot be bound or reached by them.
+
+Both processes can listen on a UNIX socket instead of a port. **This is opt-in**: with the settings
+below unset, everything listens on TCP exactly as before.
+
+| Setting | Set on | Value |
+|---|---|---|
+| `BRIDGE_SOCKET` | bridge | absolute socket path, e.g. `/Users/you/.local/state/cmux-remote/run/bridge.sock`. `BRIDGE_PORT` / `BRIDGE_HOST` are then ignored |
+| `SERVER_SOCKET` | server | absolute socket path, e.g. `/Users/you/.local/state/cmux-remote/run/server.sock`. `PORT` / `HOST` / `SERVER_HOST` are then ignored |
+| `unix:` baseUrl | server (`CMUX_MACHINE_URL`, `CMUX_MACHINES`, `CMUX_CONFIG`) | `unix:` + the bridge's socket path, e.g. `CMUX_MACHINE_URL=unix:/Users/you/.local/state/cmux-remote/run/bridge.sock` |
+
+```bash
+BRIDGE_SOCKET=/Users/you/.local/state/cmux-remote/run/bridge.sock
+SERVER_SOCKET=/Users/you/.local/state/cmux-remote/run/server.sock
+CMUX_MACHINE_URL=unix:/Users/you/.local/state/cmux-remote/run/bridge.sock
+```
+
+The startup log says `cmux-remote bridge on unix:<path>` / `cmux-remote server on unix:<path> with
+N machine(s)`, and a socket machine is listed as `→ unix:<path>`.
+
+Rules, checked before anything is bound. Any violation prints `refusing to start: <code>: <detail>`
+and exits 1 — there is **no** silent fallback to TCP:
+
+- **The path** is absolute and normalised (no `..`, `//` or trailing `/`), uses only
+  `A-Z a-z 0-9 . _ / -`, and is **at most 103 bytes**. Node on macOS silently binds a *truncated*
+  name for longer paths, so the socket would appear somewhere else; 103 leaves room for the
+  terminating NUL other clients (curl, cloudflared) need.
+- **The directory** must be its own real path (not reached through a symlink), a directory owned by
+  you with **no group or other permission bits** (`chmod 700`), and every directory above it must be
+  owned by root or you and not writable by others unless sticky (like `/tmp`). A missing directory
+  is created with mode 0700. An existing directory with the wrong mode or owner is **refused, never
+  `chmod`-ed** — something may already have been planted in it while it was open.
+- **A stale socket** — the file a killed process leaves behind — is removed at start (`removed stale
+  socket <path>`) only when a connect to it is refused. If something answers, the new process exits
+  with `socket_in_use` instead of taking over a live endpoint. Anything that is not a socket at the
+  path is left alone and refused.
+- The socket is created with mode 0600. The server checks the directory of every `unix:` machine
+  the same way before it sends that bridge its secret.
+
+**cloudflared** can use the socket as its origin, so the server needs no port at all. In
+`~/.cloudflared/config.yml`:
+
+```yaml
+ingress:
+  - hostname: cmux.example.com
+    service: unix:/Users/you/.local/state/cmux-remote/run/server.sock
+  - service: http_status:404
+```
+
+cloudflared must run as the same user (it has to enter the 0700 directory). Check the file with
+`cloudflared tunnel --config ~/.cloudflared/config.yml ingress validate` before restarting it.
+
+**Radar stays TCP-only.** Radar's reply and dispatch routes reach bridges by `http(s)` URL, and an
+unconfigured install defaults to `http://127.0.0.1:8799` — exactly the kind of fixed port this mode
+avoids. So in socket mode (`SERVER_SOCKET` set, or any `unix:` machine) the server does not load
+radar, even with `RADAR_ENABLED=1`, and logs `radar: NOT started — …`; `/api/radar/*` answers 404.
+The `radar handoff` CLI also talks to the server over `http(s)` only.
 
 ---
 
@@ -620,6 +686,11 @@ collector). A failure shows up as a radar-scoped error and a line on stderr, nev
 - **Rendered markdown is sanitized.** `marked` passes raw HTML through by design and the viewer runs
   in the same origin that holds `SERVER_TOKEN`, so rendered output always goes through DOMPurify
   before insertion; code and raw markdown are inserted as text and never touch `innerHTML`.
+- **On a Mac shared by several users, use UNIX sockets.** Any local user can bind a free loopback
+  port before your server or bridge does and collect the token or secret sent to it. Set
+  `SERVER_SOCKET` / `BRIDGE_SOCKET` (and a `unix:` machine URL) to sockets inside a 0700 directory of
+  yours — see [Listening on UNIX sockets](#listening-on-unix-sockets-shared-macs). Root and admin
+  accounts can still reach them, as they can reach everything else of yours.
 - **Nothing sensitive is committed.** `.env`, `config.json`, logs, and `node_modules` are gitignored; the
   repo carries only `.env.example` and `config.example.json` with placeholder values.
 
@@ -636,6 +707,7 @@ cmux-remote/
 ├── radar-server.js        # /api/radar/* routes — required ONLY when RADAR_ENABLED is set
 ├── radar/                 # the radar collector: config, git module, derivations, CLI, schema
 ├── loadenv.js             # tiny zero-dep .env loader (used by both)
+├── lib/                   # tmux backend (tmux-cli.js …), UNIX-socket listener + client (unix-listen.js, unix-fetch.js)
 ├── public/
 │   ├── index.html         # the web UI (PWA metas + service-worker registration)
 │   ├── app.js             # pane mirror (one view per cmux pane), browser mirror, input modes, caches
