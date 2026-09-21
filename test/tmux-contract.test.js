@@ -225,9 +225,11 @@ test('shape parity: every non-browser POST route (and the tmux side really did i
   const lt = (await call(tmuxB.base, 'GET', `/cmux/layout?workspace=${t.ws}`)).json;
   const hf = lf.handles.find((h) => h.axis === 'x'), ht = lt.handles.find((h) => h.axis === 'x');
   assert.ok(hf && ht, 'both layouts have an x divider');
+  // the page names a divider's panes by ID (app.js paneIdOf), never by the handle's refs
+  const idOf = (l, ref) => (l.panes.find((p) => p.ref === ref) || {}).id;
   const beforeW = (await srv.runOk(['list-panes', '-t', 'main:0', '-F', '#{pane_width}'])).trim();
-  await both('/cmux/resize-pane', { workspace: f.ws, paneA: hf.a[0], paneB: hf.b[0], axis: 'x', target: 0.3 },
-    { workspace: t.ws, paneA: ht.a[0], paneB: ht.b[0], axis: 'x', target: 0.3 }, async (b) => {
+  await both('/cmux/resize-pane', { workspace: f.ws, paneA: idOf(lf, hf.a[0]), paneB: idOf(lf, hf.b[0]), axis: 'x', target: 0.3 },
+    { workspace: t.ws, paneA: idOf(lt, ht.a[0]), paneB: idOf(lt, ht.b[0]), axis: 'x', target: 0.3 }, async (b) => {
       assert.equal(b.status, 200);
       assert.notEqual((await srv.runOk(['list-panes', '-t', 'main:0', '-F', '#{pane_width}'])).trim(), beforeW, 'the divider moved');
     });
