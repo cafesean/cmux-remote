@@ -50,14 +50,24 @@ function maybePrune(radarDir, now) {
 // session running in a cmux tab inherits it. Reading it here is the difference between Jump knowing
 // the tab and Jump guessing from a cwd that three workspaces share. Empty for a session started
 // outside cmux — recorded as absent, never faked.
+//
+// A session in a pane of cmux-remote's headless tmux backend (p18) has no CMUX_* ids, but tmux gives
+// every pane TMUX_PANE=%N and the bridge puts CMUX_TMUX_EPOCH in the tmux server's environment. The
+// two mint exactly the tab id the bridge's tree reports for that pane — pure arithmetic, no spawn.
+// A real CMUX_SURFACE_ID still wins, so tmux running inside a cmux tab keeps the cmux identity.
 function cmuxIdentity(env) {
   const e = env || {};
   const pick = (...names) => {
     for (const n of names) { const v = e[n]; if (typeof v === 'string' && v.trim()) return v.trim(); }
     return '';
   };
+  let surfaceId = pick('CMUX_SURFACE_ID', 'SUPACODE_SURFACE_ID', 'CMUX_PANEL_ID');
+  // DORMANT: radar is not supported on the tmux backend (owner, p18), so nothing acts on this id.
+  if (!surfaceId) {
+    try { surfaceId = require('../lib/tmux-ids').surfaceFromEnv(e); } catch (err) { debug(`tmux identity: ${err && err.message}`); }
+  }
   return {
-    surfaceId: pick('CMUX_SURFACE_ID', 'SUPACODE_SURFACE_ID', 'CMUX_PANEL_ID'),
+    surfaceId,
     tabId: pick('CMUX_TAB_ID', 'SUPACODE_TAB_ID'),
     workspaceId: pick('CMUX_WORKSPACE_ID', 'SUPACODE_WORKTREE_ID'),
   };

@@ -65,6 +65,7 @@
 
   const state = {
     machine: null, machines: [],
+    caps: {},                 // machine id -> capabilities from its bridge (p18); absent = pre-p18 bridge
     workspaces: [],           // [{ ref, id, title, selected, tabs:[…], panes:[{id,ref,tabs:[id]}] }]
     wsRef: null,              // current workspace ref
     tab: null,                // { id, ref } — the FOCUSED surface: what typing, keys and × act on
@@ -471,6 +472,7 @@
     closeWsMenu(); closeSettings();
     state.menuPane = paneId || state.focusPane || null;
     state.menuBtn = btn;
+    const nbb = $('paneNewBrowser'); if (nbb) nbb.hidden = !canBrowser();
     const t = $('splitMenuTitle');
     if (t) t.textContent = 'Split ' + (paneTitle(paneSelectedSurface(state.menuPane)) || 'this pane');
     popoverUnder(btn, elSplitMenu);
@@ -581,6 +583,7 @@
   function applyFleet(data) {
     const machines = (data && Array.isArray(data.machines)) ? data.machines : [];
     if (!machines.length) { setStatus('tree failed', true); renderSideBadge(sideModel.beatFailed()); return; }
+    for (const m of machines) if (m.capabilities) state.caps[m.id] = m.capabilities;
     lastFleet = machines;
     const mine = machines.find((m) => m.id === state.machine);
     if (mine) {
@@ -600,6 +603,12 @@
   const loadTree = loadFleet;   // every existing caller keeps its name
 
   function currentWs() { return state.workspaces.find((w) => w.ref === state.wsRef) || null; }
+  // A machine without browser surfaces (the tmux backend) says so in its capabilities; no
+  // capabilities means a pre-p18 bridge, which always had them.
+  const canBrowser = () => { const c = state.caps[state.machine]; return !(c && c.browser === false); };
+  // Radar and its inbox type into panes and start sessions; the tmux backend does not support them
+  // (owner, p18) and says `radar: false`. Same rule as the browser: no capabilities = pre-p18 = on.
+  const canRadar = () => { const c = state.caps[state.machine]; return !(c && c.radar === false); };
 
   function renderHeader() {
     const ws = currentWs();
@@ -695,7 +704,7 @@
         return b;
       };
       kids.push(mk('+', 'New terminal tab', () => doNewTab()));
-      kids.push(mk('+🌐', 'New browser tab', () => doNewBrowser()));
+      if (canBrowser()) kids.push(mk('+🌐', 'New browser tab', () => doNewBrowser()));
     }
     elTabs.replaceChildren(...kids);
     syncFilesBtn();
@@ -705,6 +714,7 @@
   // Radar's toolbar chip carries its own on/off state, exactly like Files.
   function syncRadarBtn() {
     if (!elRadarBtn) return;
+    elRadarBtn.hidden = !canRadar();
     const inRadar = state.tabType === 'radar';
     elRadarBtn.setAttribute('aria-pressed', inRadar ? 'true' : 'false');
     elRadarBtn.title = inRadar ? 'Hide radar' : 'Radar';
@@ -712,6 +722,7 @@
   // The inbox chip carries its own on/off state too — same toolbar, same contract.
   function syncInboxBtn() {
     if (!elInboxBtn) return;
+    elInboxBtn.hidden = !canRadar();
     const inInbox = state.tabType === 'inbox';
     elInboxBtn.setAttribute('aria-pressed', inInbox ? 'true' : 'false');
     elInboxBtn.title = inInbox ? 'Hide inbox' : 'Inbox';
@@ -2911,6 +2922,7 @@
       if (state.tab && findTab(state.tab.id)) return selectTab(state.tab.id);
       exitInboxMode(); renderTabs(); return;
     }
+    if (!canRadar()) return;
     try {
       exitFilesMode();
       if (state.browser && state.browser.surface) exitBrowserMode();
@@ -2938,6 +2950,7 @@
       if (state.tab && findTab(state.tab.id)) return selectTab(state.tab.id);
       exitRadarMode(); renderTabs(); return;
     }
+    if (!canRadar()) return;
     try {
       exitFilesMode();
       if (state.browser && state.browser.surface) exitBrowserMode();
@@ -3502,6 +3515,7 @@
     if (!state.machine) { gate('No machines configured. Set CMUX_MACHINE_URL on the server.'); return; }
     rememberMachine(state.machine);
     if (boot.error) setStatus(machineErr(boot.error), true);
+    if (boot.capabilities && state.machine) state.caps[state.machine] = boot.capabilities;
     applyTree(boot.workspaces || []);
     syncLayout(true);                 // geometry is a second call — the tree paints first, then splits
     // A remembered machine that is no longer registered comes back as machine:null with an empty

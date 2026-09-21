@@ -256,7 +256,8 @@ async function handleApi(req, res, u) {
     try {
       const r = await bridge(m, '/cmux/tree');
       const d = await r.json().catch(() => ({}));
-      return sendJson(res, 200, { machines, machine: m.id, workspaces: (d && d.workspaces) || [], error: (d && d.error) || undefined });
+      return sendJson(res, 200, { machines, machine: m.id, workspaces: (d && d.workspaces) || [], error: (d && d.error) || undefined,
+        capabilities: (d && d.capabilities) || undefined });
     } catch (_) { return sendJson(res, 200, { machines, machine: m.id, workspaces: [], error: 'bridge_unreachable' }); }
   }
   // p17: every machine's tree in one round trip, for the attention sidebar. The fan-out is parallel
@@ -269,7 +270,7 @@ async function handleApi(req, res, u) {
       if (!r.ok || (d && d.error)) {
         return { id: m.id, label: m.label, ok: false, error: (d && d.error) || ('http_' + r.status), workspaces: [] };
       }
-      return { id: m.id, label: m.label, ok: true, workspaces: (d && d.workspaces) || [] };
+      return { id: m.id, label: m.label, ok: true, workspaces: (d && d.workspaces) || [], capabilities: (d && d.capabilities) || undefined };
     }));
     const machines = results.map((x, i) => (x.status === 'fulfilled' ? x.value
       : { id: MACHINES[i].id, label: MACHINES[i].label, ok: false, error: 'bridge_unreachable', workspaces: [] }));
