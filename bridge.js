@@ -16,6 +16,8 @@
 //
 // Env (a .env in the CWD is auto-loaded):
 //   BRIDGE_PORT    default 8799
+//   BRIDGE_SOCKET  absolute path of a UNIX socket to listen on INSTEAD of a TCP port (p19, shared Macs):
+//                  its directory must be 0700 and ours; BRIDGE_PORT/BRIDGE_HOST are then ignored
 //   BRIDGE_SECRET  shared secret the server presents; empty = no auth (trusted LAN only)
 //   CMUX_BIN       path to the cmux CLI (default: the macOS app bundle path)
 //   BACKEND        cmux (default) | tmux — tmux drives a headless tmux server through lib/tmux-cli.js
@@ -33,6 +35,14 @@ const { normalizeLayout } = require('./panelayout');
 const PORT = Number(process.env.BRIDGE_PORT || 8799);
 const HOST = process.env.BRIDGE_HOST || '127.0.0.1';
 const SECRET = process.env.BRIDGE_SECRET || '';
+// p19: BRIDGE_SOCKET set → listen on that UNIX socket and open NO TCP port. On a shared Mac any user
+// can bind a free loopback port before we do and collect BRIDGE_SECRET from the server; a socket in a
+// 0700 directory of ours cannot be bound or reached by them. A bad value refuses to start here, before
+// anything is bound — never a silent fall back to TCP. Unset = TCP exactly as before.
+const unixListen = require('./lib/unix-listen');
+let SOCKET = '';
+try { SOCKET = unixListen.socketSetting('BRIDGE_SOCKET'); }
+catch (e) { console.error(`refusing to start: ${e.code}: ${e.detail}`); process.exit(1); }
 // Machine identity (p5 radar). Radar's session identity is {machine, session_id} and NEVER cwd, so
 // every response that carries session data carries the machine it came from.
 const MACHINE_ID = process.env.RADAR_MACHINE_ID || os.hostname();
@@ -1725,14 +1735,8 @@ const server = http.createServer((req, res) => {
   if (req.url && req.url.startsWith('/cmux/')) return handleCmux(req, res);
   return send(res, 404, { error: 'not_found' });
 });
-server.listen(PORT, HOST, () => {
-  // Report the BOUND port, not the requested one: BRIDGE_PORT=0 asks the OS for a free port, which
-  // is how the test suite starts throwaway bridges without ever touching the live :8799.
-  const bound = (server.address() && server.address().port) || PORT;
-  console.log(`cmux-remote bridge on ${HOST}:${bound}`);
-  if (HOST === '127.0.0.1' || HOST === 'localhost') {
-    console.log(`note: bound to loopback — only a server on THIS Mac can reach it. To register this Mac on a server elsewhere, set BRIDGE_HOST=0.0.0.0 (LAN, secret-gated) or point a tunnel at :${bound}.`);
-  }
+// What both listen paths print and do once the bridge is reachable.
+function afterListen() {
   if (!SECRET) console.log('WARNING: BRIDGE_SECRET empty → /cmux/* is open. Only run on a trusted LAN.');
   console.log(`backend: ${BACKEND}`);
   // Contact the tmux server once at boot so `main` exists before the first page load. A failure is
@@ -1742,4 +1746,27 @@ server.listen(PORT, HOST, () => {
       (r) => console.log(`tmux: ready (epoch ${r.epoch}, tmux ${r.version})`),
       (e) => console.log(`tmux: not ready yet — ${(e && e.message) || e}`));
   }
-});
+}
+if (SOCKET) {
+  // lib/unix-listen.js checks the directory (real path, 0700, ours, safe ancestors), refuses a live
+  // socket at the path, removes a stale one, listens, then chmods the socket 0600.
+  if (process.env.BRIDGE_PORT || process.env.BRIDGE_HOST) console.log('note: BRIDGE_SOCKET is set — BRIDGE_PORT/BRIDGE_HOST are ignored; no TCP port is opened');
+  unixListen.listenUnix(server, SOCKET).then(
+    (r) => {
+      if (r === 'removed') console.log(`removed stale socket ${SOCKET}`);
+      console.log(`cmux-remote bridge on unix:${SOCKET}`);
+      afterListen();
+    },
+    (e) => { console.error(`refusing to start: ${e.code || 'listen_failed'}: ${e.detail || e.message}`); process.exit(1); });
+} else {
+  server.listen(PORT, HOST, () => {
+    // Report the BOUND port, not the requested one: BRIDGE_PORT=0 asks the OS for a free port, which
+    // is how the test suite starts throwaway bridges without ever touching the live :8799.
+    const bound = (server.address() && server.address().port) || PORT;
+    console.log(`cmux-remote bridge on ${HOST}:${bound}`);
+    if (HOST === '127.0.0.1' || HOST === 'localhost') {
+      console.log(`note: bound to loopback — only a server on THIS Mac can reach it. To register this Mac on a server elsewhere, set BRIDGE_HOST=0.0.0.0 (LAN, secret-gated) or point a tunnel at :${bound}.`);
+    }
+    afterListen();
+  });
+}
