@@ -147,8 +147,10 @@ test('resize (F18): B left 40 shrinks A by 5 and leaves C; C right has no border
   assert.equal(r2.stderr, 'invalid_state: Pane has no adjacent border');
   const r3 = await x(cli, ['rpc', 'pane.resize', JSON.stringify({ pane_id: P(a.id), direction: 'right', amount: 4 })]);
   assert.equal(r3.stderr, 'invalid_state: below one cell');
-  // right on A grows A into B; the ref form of the pane is accepted too
-  const r4 = await x(cli, ['rpc', 'pane.resize', JSON.stringify({ pane: `pane:${a.id.slice(1)}`, direction: 'right', amount: 16 })]);
+  // right on A grows A into B (by id: review fix 1 refuses a ref on any write, so the ref form fails)
+  const ref = await x(cli, ['rpc', 'pane.resize', JSON.stringify({ pane: `pane:${a.id.slice(1)}`, direction: 'right', amount: 16 })]);
+  assert.match(ref.stderr, /^not_found: pane:/);
+  const r4 = await x(cli, ['rpc', 'pane.resize', JSON.stringify({ pane_id: P(a.id), direction: 'right', amount: 16 })]);
   assert.equal(r4.err, null, r4.stderr);
   const g2 = await geometry(win);
   assert.equal(g2.find((p) => p.id === a.id).w, a.w - 5 + 2);

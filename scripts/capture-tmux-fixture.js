@@ -7,7 +7,7 @@
 // Each scenario runs in its own throwaway tmux server — `tmux -u -D -S <mkdtemp>/s -f /dev/null`,
 // never the default socket — in a 60x8 pane whose program is a fixed sh script. When the script
 // reaches its end marker the pane is captured exactly the way lib/tmux-cli.js captures it
-// (`capture-pane -p -e`) together with the cursor, and written as <name>.ansi + <name>.json.
+// (`capture-pane -p -e -N`) together with the cursor, and written as <name>.ansi + <name>.json.
 // The server is killed and its directory removed afterwards. The committed files are what the grid
 // tests read, so those tests need no tmux at all.
 const { execFileSync, spawn } = require('child_process');
@@ -87,7 +87,7 @@ async function record(bin, sc) {
     }
     await waitFor(sc.done);
     await sleep(100);
-    const capture = tmux(['capture-pane', '-p', '-e', '-t', 'fx']);
+    const capture = tmux(['capture-pane', '-p', '-e', '-N', '-t', 'fx']);
     const [w, h, cx, cy, cf, alt] = tmux(['display', '-p', '-t', 'fx',
       '#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{cursor_flag} #{alternate_on}']).trim().split(' ').map(Number);
     Object.assign(meta, { columns: w, rows: h, cursor: { column: cx, row: cy, visible: cf === 1 }, alt: alt === 1 });

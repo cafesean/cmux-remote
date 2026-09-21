@@ -58,8 +58,9 @@ async function startTmux(opts) {
     exited = new Promise((resolve) => server.on('exit', resolve));
     server.on('error', () => {});
     try {
-      await waitFor(() => fs.existsSync(socket), { what: 'the tmux socket' });
-      await runOk(['set-option', '-g', 'default-size', `${cols}x${rows}`]);
+      // answering, not merely present: a restart can find the old server's socket file still there
+      await waitFor(async () => fs.existsSync(socket) && (await run(['set-option', '-g', 'default-size', `${cols}x${rows}`])).code === 0,
+        { what: 'the tmux server to answer' });
     } catch (e) {
       try { server.kill('SIGKILL'); } catch (_) {}
       fs.rmSync(dir, { recursive: true, force: true });
@@ -90,6 +91,15 @@ async function startTmux(opts) {
     capture: async (target, extra) => runOk(['capture-pane', '-p', '-t', target, ...(extra || [])]),
     // type a shell line into a pane; the tests' own control path, never the emulator's
     type: (target, line) => runOk(['send-keys', '-t', target, '-l', '--', line]).then(() => runOk(['send-keys', '-t', target, 'Enter'])),
+    // a tmux RESTART on the same socket: new server, new start_time, pane numbers from %0 again
+    async restart() {
+      if (server && server.exitCode === null && server.signalCode === null) {
+        await run(['kill-server']);
+        await exited;
+      }
+      fs.rmSync(socket, { force: true });
+      await launch();
+    },
     async stop() {
       if (server && server.exitCode === null && server.signalCode === null) {
         await run(['kill-server']);

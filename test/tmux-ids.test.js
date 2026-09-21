@@ -84,17 +84,27 @@ test('ref / parseRef', () => {
   assert.equal(ids.parseRef(ids.mint(4, EPOCH, 12), 4), null);
 });
 
-test('surfaceFromEnv: TMUX_PANE + CMUX_TMUX_EPOCH -> the surface id; anything missing or malformed -> ""', () => {
-  assert.equal(ids.surfaceFromEnv({ TMUX_PANE: '%12', CMUX_TMUX_EPOCH: '1789991468' }), ids.mint(4, 1789991468, 12));
+test('surfaceFromEnv: TMUX_PANE + CMUX_TMUX_EPOCH (+ a matching server pid) -> the surface id; else ""', () => {
+  // review fix 2: the pid in $TMUX must be the one ensure() exported as CMUX_TMUX_PID, so a tmux
+  // started inside a pane (which inherits both CMUX_TMUX_* variables) cannot claim the outer ids
+  const OK = { TMUX_PANE: '%12', CMUX_TMUX_EPOCH: '1789991468', CMUX_TMUX_PID: '4242', TMUX: '/private/tmp/x/s,4242,0' };
+  assert.equal(ids.surfaceFromEnv(OK), ids.mint(4, 1789991468, 12));
+  // the story's two-variable form is no longer enough on its own
+  assert.equal(ids.surfaceFromEnv({ TMUX_PANE: '%12', CMUX_TMUX_EPOCH: '1789991468' }), '');
   // the AC's malformed TMUX_PANE values; '12' is a well-formed EPOCH, so the epoch list differs
   for (const v of ['12', '%x', 'abc', '%', '%12x']) {
-    assert.equal(ids.surfaceFromEnv({ TMUX_PANE: v, CMUX_TMUX_EPOCH: '1789991468' }), '', `TMUX_PANE=${v}`);
+    assert.equal(ids.surfaceFromEnv({ ...OK, TMUX_PANE: v }), '', `TMUX_PANE=${v}`);
   }
   for (const v of ['%x', 'abc', '%12', '1.5', '-1', '']) {
-    assert.equal(ids.surfaceFromEnv({ TMUX_PANE: '%12', CMUX_TMUX_EPOCH: v }), '', `CMUX_TMUX_EPOCH=${v}`);
+    assert.equal(ids.surfaceFromEnv({ ...OK, CMUX_TMUX_EPOCH: v }), '', `CMUX_TMUX_EPOCH=${v}`);
   }
-  assert.equal(ids.surfaceFromEnv({ TMUX_PANE: '%12' }), '');
-  assert.equal(ids.surfaceFromEnv({ CMUX_TMUX_EPOCH: '1789991468' }), '');
+  // a nested server: its own pid in $TMUX, the outer pid inherited in CMUX_TMUX_PID
+  assert.equal(ids.surfaceFromEnv({ ...OK, TMUX: '/private/tmp/x/inner,5151,0' }), '');
+  assert.equal(ids.surfaceFromEnv({ ...OK, TMUX: '' }), '');
+  assert.equal(ids.surfaceFromEnv({ ...OK, CMUX_TMUX_PID: '' }), '');
+  assert.equal(ids.surfaceFromEnv({ ...OK, CMUX_TMUX_PID: 'x' }), '');
+  // a socket path containing a comma still reads the pid from the right field
+  assert.equal(ids.surfaceFromEnv({ ...OK, TMUX: '/tmp/a,b/s,4242,3' }), ids.mint(4, 1789991468, 12));
   assert.equal(ids.surfaceFromEnv({}), '');
   assert.equal(ids.surfaceFromEnv(undefined), '');
 });

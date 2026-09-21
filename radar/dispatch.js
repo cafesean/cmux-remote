@@ -150,7 +150,11 @@ function createDispatcher(deps) {
 
     if (route.kind === 'resume') {
       const session = ((state && state.sessions) || []).find((s) => s && s.key && s.key.sessionId === route.sessionId);
-      const surfaceRef = session && session.surface && (session.surface.tabRef || session.surface.surfaceId);
+      // The surface id first: on the tmux backend it is bound to the tmux server's epoch, where a
+      // tabRef (`surface:N`, from a snapshot up to a minute old) names whatever pane holds that number
+      // NOW — after a tmux restart, a fresh shell. The ref stays as the fallback for sessions that
+      // recorded no id; the tmux backend refuses ref writes, and a refused send falls back to spawn.
+      const surfaceRef = session && session.surface && (session.surface.surfaceId || session.surface.tabRef);
       if (!surfaceRef) {
         return { status: 409, payload: { error: ERRORS.NO_SURFACE, detail: 'eligible session has no addressable surface', route } };
       }
