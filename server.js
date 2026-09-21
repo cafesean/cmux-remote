@@ -16,7 +16,7 @@
 //     CMUX_MACHINE_ACCESS_ID / CMUX_MACHINE_ACCESS_SECRET             — optional Cloudflare Access token
 //     CMUX_MACHINES   — JSON array [{id,label,baseUrl,secret,accessId?,accessSecret?}] (extends/overrides)
 //     CMUX_CONFIG     — path to a gitignored JSON file { "machines": [ ... ] } (extends/overrides)
-require('./loadenv');
+const { emptyShadowed } = require('./loadenv');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -34,7 +34,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const unixListen = require('./lib/unix-listen');
 const { parseUnixBaseUrl, unixFetch } = require('./lib/unix-fetch');
 let SERVER_SOCKET = '';
-try { SERVER_SOCKET = unixListen.socketSetting('SERVER_SOCKET'); }
+try { SERVER_SOCKET = unixListen.socketSetting('SERVER_SOCKET', process.env, emptyShadowed); }
 catch (e) { console.error(`refusing to start: ${e.code}: ${e.detail}`); process.exit(1); }
 
 // Build the machine registry from env + optional config file. Later sources override earlier by id.
@@ -82,6 +82,29 @@ function loadMachines() {
 }
 const MACHINES = loadMachines();
 
+// p19: socket mode (SERVER_SOCKET set, or any unix: machine) exists because on a shared Mac another
+// user can bind a loopback TCP port first. A bridge on THIS Mac still reached over http(s) — a stale
+// CMUX_MACHINE_URL=http://127.0.0.1:<port>, or the default machine a mistyped CMUX_CONFIG leaves
+// behind — would get BRIDGE_SECRET on exactly such a port, so that refuses to start: the local bridge
+// must be unix:. Remote http(s) machines stay allowed; TCP mode is untouched.
+const SOCKET_MODE = !!SERVER_SOCKET || MACHINES.some((m) => m.socketPath);
+// '' unless baseUrl is http(s) to this Mac (127.0.0.0/8, localhost, ::1, 0.0.0.0); else scheme://host
+function loopbackHttp(baseUrl) {
+  let u; try { u = new URL(baseUrl); } catch (_) { return ''; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+  const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  const local = h === 'localhost' || h.endsWith('.localhost') || /^127\./.test(h) || h === '0.0.0.0'
+    || h === '::1' || h === '::' || /^::ffff:(127\.|7f[0-9a-f]{2}:)/.test(h);
+  return local ? `${u.protocol}//${u.host}` : '';
+}
+if (SOCKET_MODE) {
+  const tcpLocal = MACHINES.filter((m) => !m.socketPath && loopbackHttp(m.baseUrl));
+  for (const m of tcpLocal) {
+    console.error(`refusing to start: loopback_tcp_machine: machine "${m.id}": ${loopbackHttp(m.baseUrl)} is a TCP port on this Mac — in socket mode a local bridge must be unix:<socket path>`);
+  }
+  if (tcpLocal.length) process.exit(1);
+}
+
 // ---- radar (p5) -------------------------------------------------------------
 // OFF BY DEFAULT, and off means OFF: with RADAR_ENABLED unset, nothing under radar/ is required,
 // no timer is installed, no handler is registered, and every /api/radar/* path 404s exactly as it
@@ -96,7 +119,6 @@ const MACHINES = loadMachines();
 // endpoint socket mode exists to retire. So with SERVER_SOCKET set or any unix: machine it stays off
 // (and /api/radar/* 404s), on either backend.
 const RADAR_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.RADAR_ENABLED || '').trim());
-const SOCKET_MODE = !!SERVER_SOCKET || MACHINES.some((m) => m.socketPath);
 let radar = null;
 if (RADAR_ENABLED && SOCKET_MODE) {
   console.error('radar: NOT started — radar is TCP-only and this server runs in socket mode (SERVER_SOCKET or a unix: machine); its bridge calls would default to 127.0.0.1:8799');

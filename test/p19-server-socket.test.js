@@ -46,20 +46,24 @@ async function socketPair(serverEnv) {
     SERVER_TOKEN: TOKEN, CMUX_MACHINE_URL: `unix:${bsock}`, CMUX_MACHINE_SECRET: SECRET, ...(serverEnv || {}) } });
   return { d, bsock, ssock, bridge, server, async stop() { await server.stop(); await bridge.stop(); } };
 }
-// A server child that is expected to REFUSE to start.
-function runRefused(env, ms = 5000) {
+// A server child that is expected to REFUSE to start (or, with `until`, to announce itself: it is
+// then stopped and `matched` is true). `dotenv` is written to its scratch cwd as .env first.
+function runRefused(env, dotenv, until) {
+  const ms = 5000;
   const cwd = tmp();
+  if (dotenv != null) fs.writeFileSync(path.join(cwd, '.env'), dotenv);
   const child = spawn(process.execPath, [SERVER_JS], {
     cwd, env: { PATH: process.env.PATH, HOME: cwd, TMPDIR: process.env.TMPDIR || '/tmp', PORT: '0', HOST: '127.0.0.1', SERVER_TOKEN: TOKEN, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
   let err = '';
-  child.stdout.on('data', (x) => { out += x; });
+  let matched = false;
+  child.stdout.on('data', (x) => { out += x; if (until && !matched && until.test(out)) { matched = true; child.kill('SIGTERM'); } });
   child.stderr.on('data', (x) => { err += x; });
   return new Promise((resolve) => {
     const timer = setTimeout(() => child.kill('SIGKILL'), ms);
-    child.on('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal, out, err, cwd }); });
+    child.on('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal, out, err, cwd, matched }); });
   });
 }
 // A test-owned fake bridge on a socket: records requests and their 'close' times.
@@ -183,6 +187,60 @@ test('refusals exit 1 before binding: bad unix: machine URLs (named by id) and a
   }
   assert.deepEqual(fs.readdirSync(open), [], 'no socket was created in the open dir');
   assert.equal(fs.lstatSync(open).mode & 0o777, 0o755, 'and it was never chmod-ed');
+});
+
+test('socket mode refuses an http(s) machine on this Mac (loopback TCP); remote http(s) machines are allowed', async () => {
+  const d = tmp();
+  const ssock = path.join(d, 'server.sock');
+  for (const url of ['http://127.0.0.1:19999', 'http://localhost:19999', 'http://[::1]:19999', 'http://127.1.2.3:9', 'http://0.0.0.0:9', 'https://localhost.']) {
+    const r = await runRefused({ SERVER_SOCKET: ssock, CMUX_MACHINE_URL: url, CMUX_MACHINE_SECRET: SECRET });
+    assert.equal(r.code, 1, `${url}: exit ${r.code} ${r.signal}\n${r.out}\n${r.err}`);
+    assert.match(r.err, /refusing to start: loopback_tcp_machine: machine "default": https?:\/\/\S+ is a TCP port on this Mac/, url);
+    assert.ok(!r.out.includes('cmux-remote server on'), `${url}: never announced a listener`);
+    assert.equal(fs.existsSync(ssock), false, `${url}: no server socket was created`);
+  }
+  // a mistyped CMUX_CONFIG is "ignored" — the loopback default machine it leaves behind is refused
+  const typo = await runRefused({ SERVER_SOCKET: ssock, CMUX_CONFIG: path.join(d, 'no-such-config.json'),
+    CMUX_MACHINE_URL: 'http://127.0.0.1:19999', CMUX_MACHINE_SECRET: SECRET });
+  assert.equal(typo.code, 1);
+  assert.match(typo.err, /CMUX_CONFIG \(.*no-such-config\.json\): unreadable/);
+  assert.match(typo.err, /loopback_tcp_machine: machine "default"/);
+  // socket mode through a unix: machine (TCP listener): the http loopback machine next to it is named
+  const mixed = await runRefused({ CMUX_MACHINES: JSON.stringify([
+    { id: 'sock', baseUrl: `unix:${d}/bridge.sock`, secret: SECRET }, { id: 'old', baseUrl: 'http://127.0.0.1:19999', secret: SECRET }]) });
+  assert.equal(mixed.code, 1);
+  assert.match(mixed.err, /refusing to start: loopback_tcp_machine: machine "old"/);
+  assert.ok(!/machine "sock"/.test(mixed.err));
+  // a remote http(s) machine is fine in socket mode
+  const s = await bootServer({ socket: ssock, env: { SERVER_TOKEN: TOKEN, CMUX_MACHINE_URL: 'http://192.0.2.10:8799', CMUX_MACHINE_SECRET: SECRET } });
+  try {
+    await waitFor(() => s.stdout().includes('  machine "default" (My Mac) → 192.0.2.10:8799\n'), { what: 'the machine line' });
+    assert.equal((await call(ssock, 'GET', '/api/cmux/machines', { token: TOKEN })).status, 200);
+  } finally { await s.stop(); }
+});
+
+test('SERVER_SOCKET="" in the environment hiding a .env socket path refuses to start; unset or set, the old rules hold', async () => {
+  const d = tmp();
+  const envSock = path.join(d, 'env.sock');
+  const fileSock = path.join(d, 'file.sock');
+  const dotenv = `SERVER_SOCKET=${fileSock}\nSERVER_TOKEN=${TOKEN}\n`;
+  const up = /cmux-remote server on (unix:\S+|http:\/\/\S+) with/;
+  const shadowed = await runRefused({ SERVER_SOCKET: '' }, dotenv, up);
+  assert.equal(shadowed.matched, false, `it started:\n${shadowed.out}`);
+  assert.equal(shadowed.code, 1, `exit ${shadowed.code}\n${shadowed.err}`);
+  assert.match(shadowed.err, /refusing to start: socket_setting_shadowed: SERVER_SOCKET is set to "" in the environment, which hides the SERVER_SOCKET= line in \.env/);
+  assert.equal(fs.existsSync(fileSock), false);
+  // unset in the environment: the .env path is used (loadenv's rule, unchanged)
+  const fromFile = await runRefused({}, dotenv, up);
+  assert.ok(fromFile.matched, fromFile.out + fromFile.err);
+  assert.ok(fromFile.out.includes(`cmux-remote server on unix:${fileSock} with`), fromFile.out);
+  // set in the environment: the environment still wins over .env (unchanged), no refusal
+  const fromEnv = await runRefused({ SERVER_SOCKET: envSock }, dotenv, up);
+  assert.ok(fromEnv.matched, fromEnv.out + fromEnv.err);
+  assert.ok(fromEnv.out.includes(`cmux-remote server on unix:${envSock} with`), fromEnv.out);
+  // an empty SERVER_SOCKET with no .env value is plain TCP, as before
+  const plain = await runRefused({ SERVER_SOCKET: '' }, `SERVER_TOKEN=${TOKEN}\n`, up);
+  assert.ok(plain.matched && /cmux-remote server on http:\/\//.test(plain.out), plain.out + plain.err);
 });
 
 test('radar backstop: not loaded in socket mode (SERVER_SOCKET or a unix: machine); TCP with http machines still loads it', async () => {

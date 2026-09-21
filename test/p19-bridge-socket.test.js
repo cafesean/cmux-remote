@@ -34,9 +34,11 @@ function tcpListeners(pid) {
   const r = spawnSync('/usr/sbin/lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], { encoding: 'utf8' });
   return r.stdout.trim();
 }
-// A bridge child that is expected to REFUSE to start: its exit code and output within `ms`.
-function runRefused(env, ms = 5000) {
+// A bridge child that is expected to REFUSE to start: its exit code and output within `ms`. With
+// `until`, a child that announces itself is stopped and `matched` is true. `dotenv` becomes its .env.
+function runRefused(env, dotenv, until, ms = 5000) {
   const cwd = tmp();
+  if (dotenv != null) fs.writeFileSync(path.join(cwd, '.env'), dotenv);
   const child = spawn(process.execPath, [BRIDGE_JS], {
     cwd,
     env: { PATH: process.env.PATH, HOME: cwd, TMPDIR: process.env.TMPDIR || '/tmp', BRIDGE_PORT: '0', BRIDGE_HOST: '127.0.0.1',
@@ -45,12 +47,13 @@ function runRefused(env, ms = 5000) {
   });
   let out = '';
   let err = '';
-  child.stdout.on('data', (d) => { out += d; });
+  let matched = false;
+  child.stdout.on('data', (d) => { out += d; if (until && !matched && until.test(out)) { matched = true; child.kill('SIGTERM'); } });
   child.stderr.on('data', (d) => { err += d; });
   const t0 = Date.now();
   return new Promise((resolve) => {
     const timer = setTimeout(() => { child.kill('SIGKILL'); }, ms);
-    child.on('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal, out, err, ms: Date.now() - t0, cwd }); });
+    child.on('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal, out, err, ms: Date.now() - t0, cwd, matched }); });
   });
 }
 const bridgeEnv = (extra) => ({ CMUX_BIN: fake.file, BRIDGE_SECRET: SECRET, ...(extra || {}) });
@@ -156,6 +159,21 @@ test('refusals: exit 1 with `refusing to start: <code>` and no socket created', 
     if (!path.isAbsolute(p)) assert.equal(fs.existsSync(path.join(r.cwd, p)), false, 'no socket under the cwd either');
   }
   assert.equal(fs.lstatSync(open).mode & 0o777, 0o755, 'the open dir was never chmod-ed');
+});
+
+test('BRIDGE_SOCKET="" in the environment hiding a .env socket path refuses to start; unset, the .env path is used', async () => {
+  const d = tmp();
+  const fileSock = path.join(d, 'bridge.sock');
+  const dotenv = `BRIDGE_SOCKET=${fileSock}\n`;
+  const up = /cmux-remote bridge on \S+\n/;
+  const shadowed = await runRefused({ BRIDGE_SOCKET: '' }, dotenv, up);
+  assert.equal(shadowed.matched, false, `it started:\n${shadowed.out}`);
+  assert.equal(shadowed.code, 1, `exit ${shadowed.code}\n${shadowed.err}`);
+  assert.match(shadowed.err, /refusing to start: socket_setting_shadowed: BRIDGE_SOCKET is set to "" in the environment, which hides the BRIDGE_SOCKET= line in \.env/);
+  assert.equal(fs.existsSync(fileSock), false);
+  const fromFile = await runRefused({}, dotenv, up);
+  assert.ok(fromFile.matched, fromFile.out + fromFile.err);
+  assert.ok(fromFile.out.includes(`cmux-remote bridge on unix:${fileSock}\n`), fromFile.out);
 });
 
 test('BRIDGE_SOCKET unset: the TCP boot line is unchanged', async () => {

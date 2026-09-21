@@ -19,7 +19,7 @@ const haveBase = () => git(['rev-parse', '--verify', `${BASE}^{commit}`]).status
 
 // Every file p19 added or changed in this repo.
 const P19_FILES = [
-  'bridge.js', 'server.js', 'lib/unix-listen.js', 'lib/unix-fetch.js',
+  'bridge.js', 'server.js', 'loadenv.js', 'lib/unix-listen.js', 'lib/unix-fetch.js',
   'README.md', '.env.example', 'package.json',
   'test/helpers/bridge-child.js', 'test/helpers/server-boot.js', 'test/helpers/unix-call.js',
   'test/unix-listen.test.js', 'test/unix-fetch.test.js', 'test/p19-bridge-socket.test.js',
@@ -46,7 +46,8 @@ test('README: a "Listening on UNIX sockets (shared Macs)" section right after "H
   assert.ok(!/\n#{2,3} /.test(md.slice(md.indexOf('\n', tmuxAt), at)), 'nothing else sits between them');
   const s = section(md, h);
   for (const needle of ['BRIDGE_SOCKET', 'SERVER_SOCKET', 'unix:', 'CMUX_MACHINE_URL=unix:', '103 bytes', 'service: unix:',
-    'chmod 700', 'removed stale', 'socket_in_use', 'refusing to start', 'ingress validate']) {
+    'chmod 700', 'removed stale', 'socket_in_use', 'refusing to start', 'ingress validate',
+    'loopback_tcp_machine', 'socket_setting_shadowed']) {
     assert.ok(s.includes(needle), `the section names ${needle}`);
   }
   assert.match(s, /Radar stays TCP-only/);
@@ -100,10 +101,10 @@ test('identifier scan: no owner domain, private IPs or shared-Mac user names in 
       const m = src.match(re);
       if (m) hits.push(`${f}: ${re} -> ${JSON.stringify(m[0])}`);
     }
-    // IPv4 literals: loopback, any-address and the documentation range (192.0.2.x) only
+    // IPv4 literals: loopback (127.0.0.0/8), any-address and the documentation range (192.0.2.x) only
     for (const m of src.matchAll(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g)) {
       const ip = m[0];
-      if (ip === '127.0.0.1' || ip === '0.0.0.0' || ip.startsWith('192.0.2.')) continue;
+      if (ip.startsWith('127.') || ip === '0.0.0.0' || ip.startsWith('192.0.2.')) continue;
       hits.push(`${f}: IPv4 literal ${ip}`);
     }
   }
