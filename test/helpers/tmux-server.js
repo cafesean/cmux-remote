@@ -49,10 +49,23 @@ async function startTmux(opts) {
     SHELL: '/bin/sh',
     TMPDIR: process.env.TMPDIR || os.tmpdir(),
   };
-  const server = spawn(bin, ['-u', '-D', '-S', socket, '-f', '/dev/null'], { env, stdio: 'ignore' });
-  const exited = new Promise((resolve) => server.on('exit', resolve));
-  server.on('error', () => {});
-
+  // `lazy: true` reserves the socket path without starting the server (a bridge that boots before
+  // its tmux); srv.launch() starts it later.
+  let server = null;
+  let exited = Promise.resolve();
+  const launch = async () => {
+    server = spawn(bin, ['-u', '-D', '-S', socket, '-f', '/dev/null'], { env, stdio: 'ignore' });
+    exited = new Promise((resolve) => server.on('exit', resolve));
+    server.on('error', () => {});
+    try {
+      await waitFor(() => fs.existsSync(socket), { what: 'the tmux socket' });
+      await runOk(['set-option', '-g', 'default-size', `${cols}x${rows}`]);
+    } catch (e) {
+      try { server.kill('SIGKILL'); } catch (_) {}
+      fs.rmSync(dir, { recursive: true, force: true });
+      throw e;
+    }
+  };
   const run = (args, runOpts) => new Promise((resolve) => {
     const ro = runOpts || {};
     const child = execFile(bin, ['-u', '-S', socket, ...args], { env, timeout: ro.timeout || 8000, maxBuffer: 8 * 1024 * 1024 },
@@ -66,17 +79,10 @@ async function startTmux(opts) {
     return r.stdout;
   };
 
-  try {
-    await waitFor(() => fs.existsSync(socket), { what: 'the tmux socket' });
-    await runOk(['set-option', '-g', 'default-size', `${cols}x${rows}`]);
-  } catch (e) {
-    try { server.kill('SIGKILL'); } catch (_) {}
-    fs.rmSync(dir, { recursive: true, force: true });
-    throw e;
-  }
+  if (!o.lazy) await launch();
 
   const srv = {
-    dir, socket, tmuxBin: bin, env, run, runOk, waitFor,
+    dir, socket, tmuxBin: bin, env, run, runOk, waitFor, launch,
     // the emulator under test, pinned to THIS server's socket (last, so `extra` cannot move it)
     cli: (extra) => createTmuxCli({ tmuxBin: bin, session: 'main', home: dir, ...(extra || {}), socket }),
     display: async (target, fmt) => (await runOk(['display', '-p', '-t', target, fmt])).trim(),
@@ -85,10 +91,12 @@ async function startTmux(opts) {
     // type a shell line into a pane; the tests' own control path, never the emulator's
     type: (target, line) => runOk(['send-keys', '-t', target, '-l', '--', line]).then(() => runOk(['send-keys', '-t', target, 'Enter'])),
     async stop() {
-      await run(['kill-server']);
-      const hard = setTimeout(() => { try { server.kill('SIGKILL'); } catch (_) {} }, 3000);
-      await exited;
-      clearTimeout(hard);
+      if (server && server.exitCode === null && server.signalCode === null) {
+        await run(['kill-server']);
+        const hard = setTimeout(() => { try { server.kill('SIGKILL'); } catch (_) {} }, 3000);
+        await exited;
+        clearTimeout(hard);
+      }
       fs.rmSync(dir, { recursive: true, force: true });
     },
   };

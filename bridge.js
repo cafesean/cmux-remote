@@ -18,6 +18,8 @@
 //   BRIDGE_PORT    default 8799
 //   BRIDGE_SECRET  shared secret the server presents; empty = no auth (trusted LAN only)
 //   CMUX_BIN       path to the cmux CLI (default: the macOS app bundle path)
+//   BACKEND        cmux (default) | tmux — tmux drives a headless tmux server through lib/tmux-cli.js
+//   TMUX_BIN / TMUX_SOCKET / TMUX_SESSION   the tmux backend's binary, server socket, default session
 require('./loadenv');
 const http = require('http');
 const fs = require('fs');
@@ -36,6 +38,31 @@ const SECRET = process.env.BRIDGE_SECRET || '';
 const MACHINE_ID = process.env.RADAR_MACHINE_ID || os.hostname();
 const CMUX_BIN = process.env.CMUX_BIN || '/Applications/cmux.app/Contents/Resources/bin/cmux';
 const CMUX_ENV = { ...process.env, CMUX_QUIET: '1' };
+// p18: which program answers the cmux argv this file builds. `cmux` (the default) is the cmux CLI,
+// exactly as before. `tmux` is lib/tmux-cli.js — an in-process emulator that takes the same argv and
+// answers in cmux's shapes from a headless tmux server, so every handler below runs unchanged. A typo
+// must not silently pick a backend, so anything else refuses to start, before a port is bound.
+const BACKEND = String(process.env.BACKEND || 'cmux').trim().toLowerCase();
+if (BACKEND !== 'cmux' && BACKEND !== 'tmux') {
+  console.error(`BACKEND must be "cmux" or "tmux" (got ${JSON.stringify(process.env.BACKEND)}) — refusing to start`);
+  process.exit(1);
+}
+const tmuxCli = BACKEND === 'tmux' ? require('./lib/tmux-cli').createTmuxCli({
+  tmuxBin: process.env.TMUX_BIN || '',            // '' → Homebrew tmux, then PATH
+  socket: process.env.TMUX_SOCKET || '',          // '' → ${TMUX_TMPDIR||/tmp}/tmux-${uid}/default
+  session: process.env.TMUX_SESSION || 'main',
+  home: os.homedir(),
+  log: (m) => console.log(`tmux: ${m}`),
+}) : null;
+// What this machine can do, for the page to gate on (additive key in /cmux/tree).
+const CAPABILITIES = Object.freeze({
+  backend: BACKEND, browser: BACKEND === 'cmux', sidebarStatus: BACKEND === 'cmux', tabsInPane: BACKEND === 'cmux',
+});
+// One spawn point for both backends. cmux: the exact execFile cmux() always made.
+function cli(args, opts, cb) {
+  if (tmuxCli) return tmuxCli.exec(args, opts, cb);
+  return execFile(CMUX_BIN, args, { timeout: opts.timeout, env: CMUX_ENV, maxBuffer: 8 * 1024 * 1024 }, cb);
+}
 
 const UUID = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}';
 // A surface target: a surface ref (surface:N) or a raw UUID. This is what every terminal op addresses.
@@ -79,7 +106,7 @@ function adaptArgs(args, flag) {
   return rest;                                                       // unsupported flag: drop it
 }
 function cmux(args, cb, timeout = 8000, tries = 0) {
-  execFile(CMUX_BIN, args, { timeout, env: CMUX_ENV, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+  cli(args, { timeout }, (err, stdout, stderr) => {
     const m = err && tries < 3 && String(stderr || '').match(/unknown flag '(--[a-z-]+)'/);
     if (m) {
       const next = adaptArgs(args, m[1]);
@@ -466,6 +493,7 @@ async function cmuxTree(res) {
   const cov = await attachStatuses(ws);
   send(res, 200, {
     workspaces: ws,
+    capabilities: CAPABILITIES,   // p18 (additive): what the page may offer for this machine
     // ---- p5 radar (additive keys; `workspaces` is untouched) ----
     machineId: MACHINE_ID,
     statusTruncated: cov.statusTruncated,
@@ -808,7 +836,7 @@ const SEND_CMD_TIMEOUT_MS = Number(process.env.CMUX_SEND_TIMEOUT_MS) || 8000;
 // cmux()) carries `dispatched` forward — once any attempt has started a child, no later attempt is
 // allowed to claim nothing happened. cb(null) on success, cb({dispatched, detail}) on failure.
 function runSendCommand(args, cb, dispatched, tries) {
-  const child = execFile(CMUX_BIN, args, { timeout: SEND_CMD_TIMEOUT_MS, env: CMUX_ENV, maxBuffer: 8 * 1024 * 1024 },
+  const child = cli(args, { timeout: SEND_CMD_TIMEOUT_MS },
     (err, stdout, stderr) => {
       const started = dispatched || child.pid !== undefined;
       const m = err && (tries || 0) < 3 && String(stderr || '').match(/unknown flag '(--[a-z-]+)'/);
@@ -1575,6 +1603,8 @@ function handleCmux(req, res) {
   if (SECRET && req.headers['x-bridge-secret'] !== SECRET) return send(res, 403, { error: 'forbidden' });
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { return send(res, 400, { error: 'bad_url' }); }
   const p = u.pathname;
+  // tmux has no browser surfaces: say so plainly (the page hides these from capabilities anyway)
+  if (tmuxCli && p.startsWith('/cmux/browser/')) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
   const surfaceParam = () => u.searchParams.get('surface') || '';
 
   if (req.method === 'GET' && p === '/cmux/tree') return cmuxTree(res);
@@ -1703,4 +1733,12 @@ server.listen(PORT, HOST, () => {
     console.log(`note: bound to loopback — only a server on THIS Mac can reach it. To register this Mac on a server elsewhere, set BRIDGE_HOST=0.0.0.0 (LAN, secret-gated) or point a tunnel at :${bound}.`);
   }
   if (!SECRET) console.log('WARNING: BRIDGE_SECRET empty → /cmux/* is open. Only run on a trusted LAN.');
+  console.log(`backend: ${BACKEND}`);
+  // Contact the tmux server once at boot so `main` exists before the first page load. A failure is
+  // only logged: every later request runs ensure() again, so a tmux that comes up late is picked up.
+  if (tmuxCli) {
+    tmuxCli.ensure().then(
+      (r) => console.log(`tmux: ready (epoch ${r.epoch}, tmux ${r.version})`),
+      (e) => console.log(`tmux: not ready yet — ${(e && e.message) || e}`));
+  }
 });
