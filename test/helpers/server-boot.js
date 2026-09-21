@@ -9,6 +9,10 @@
 //   * HOME points at the scratch dir, so anything that falls back to os.homedir() (radar's default
 //     ~/.radar) lands in the temp tree. No test can touch the real radar state.
 //
+// p19: `socket: <path>` boots it on a UNIX socket instead (SERVER_SOCKET) and waits for the
+// `on unix:` boot line; the result then has socketPath set and port/base null. Without the option
+// nothing here behaves differently.
+//
 // (This file lives under test/ but declares no tests; `node --test` treats it as a file with zero
 // subtests, which passes.)
 const { spawn } = require('child_process');
@@ -27,6 +31,7 @@ async function bootServer(opts) {
     { PATH: process.env.PATH, HOME: cwd, TMPDIR: process.env.TMPDIR || '/tmp', PORT: '0', HOST: '127.0.0.1' },
     o.env || {},
   );
+  if (o.socket) env.SERVER_SOCKET = o.socket;
   const child = spawn(process.execPath, [...(o.nodeArgs || []), SERVER_JS], {
     cwd, env, stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -42,6 +47,11 @@ async function bootServer(opts) {
     const fail = (m) => reject(new Error(`${m}\n--- stdout ---\n${out}\n--- stderr ---\n${err}`));
     const timer = setTimeout(() => fail(`server did not announce a port in ${BOOT_TIMEOUT_MS}ms`), BOOT_TIMEOUT_MS);
     const check = () => {
+      if (o.socket) {
+        const u = /cmux-remote server on unix:(\S+) with /.exec(out);
+        if (u) { clearTimeout(timer); resolve(u[1]); }
+        return;
+      }
       const m = /cmux-remote server on http:\/\/[^:\s]+:(\d+)/.exec(out);
       if (m) { clearTimeout(timer); resolve(Number(m[1])); }
     };
@@ -53,7 +63,7 @@ async function bootServer(opts) {
 
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
 
-  return {
+  const booted = {
     port,
     cwd,
     child,
@@ -69,6 +79,9 @@ async function bootServer(opts) {
       clearTimeout(hard);
     },
   };
+  // in socket mode `port` holds the path the boot line announced
+  if (o.socket) return Object.assign(booted, { socketPath: port, port: null, base: null });
+  return booted;
 }
 
 // Small fetch wrapper: returns status + parsed body without throwing on a non-JSON payload, because

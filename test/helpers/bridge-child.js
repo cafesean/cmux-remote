@@ -9,6 +9,10 @@
 // The routes under test (/cmux/session-events) never shell out to cmux, so a child bridge is
 // perfectly happy on a machine where cmux is absent.
 //
+// p19: `socket: <path>` boots it on a UNIX socket instead (BRIDGE_SOCKET) and waits for the
+// `on unix:` boot line; the result then has socketPath set and port/base null. Without the option
+// nothing here behaves differently.
+//
 // (Declares no tests; `node --test` treats a file with zero subtests as a pass.)
 const { spawn } = require('child_process');
 const fsp = require('fs/promises');
@@ -33,6 +37,7 @@ async function bootBridge(opts) {
     },
     o.env || {},
   );
+  if (o.socket) env.BRIDGE_SOCKET = o.socket;
   const child = spawn(process.execPath, [BRIDGE_JS], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
 
   let out = '';
@@ -46,6 +51,11 @@ async function bootBridge(opts) {
     const fail = (m) => reject(new Error(`${m}\n--- stdout ---\n${out}\n--- stderr ---\n${err}`));
     const timer = setTimeout(() => fail(`bridge did not announce a port in ${BOOT_TIMEOUT_MS}ms`), BOOT_TIMEOUT_MS);
     const check = () => {
+      if (o.socket) {
+        const u = /cmux-remote bridge on unix:(\S+)\n/.exec(out);   // the whole line: a chunk may end mid-path
+        if (u) { clearTimeout(timer); resolve(u[1]); }
+        return;
+      }
       const m = /cmux-remote bridge on [^:\s]+:(\d+)/.exec(out);
       if (m && Number(m[1]) > 0) { clearTimeout(timer); resolve(Number(m[1])); }
     };
@@ -57,7 +67,7 @@ async function bootBridge(opts) {
 
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
 
-  return {
+  const booted = {
     port, cwd, child,
     base: `http://127.0.0.1:${port}`,
     stdout: () => out,
@@ -70,6 +80,9 @@ async function bootBridge(opts) {
       clearTimeout(hard);
     },
   };
+  // in socket mode `port` holds the path the boot line announced
+  if (o.socket) return Object.assign(booted, { socketPath: port, port: null, base: null });
+  return booted;
 }
 
 async function callBridge(base, pathAndQuery, opts) {
