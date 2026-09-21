@@ -7,7 +7,8 @@
 //
 //   call(target, method, pathAndQuery, { headers, token, secret, body })
 //        -> { status, headers, text, json, body }   body: object -> JSON, string/Buffer -> raw
-//   firstFrame(target, pathAndQuery, opts) -> { status, json }   the first SSE `data:` frame, then hang up
+//   firstFrame(target, pathAndQuery, opts) -> { status, data, json }   the first SSE `data:` frame, then
+//        hang up; json is null when the frame is not JSON (/cmux/stream sends base64 screen text)
 //   openStream(target, pathAndQuery, opts) -> { status, headers, close() }   an SSE request left open
 //
 // (Declares no tests; `node --test` treats a file with zero subtests as a pass.)
@@ -66,10 +67,16 @@ function firstFrame(target, pathAndQuery, opts, timeoutMs = 10000) {
           const block = buf.slice(0, i);
           buf = buf.slice(i + 2);
           const data = block.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).join('\n');
-          if (data) { clearTimeout(timer); req.destroy(); return resolve({ status: res.statusCode, json: JSON.parse(data) }); }
+          if (data) {
+            clearTimeout(timer);
+            req.destroy();
+            let json = null;
+            try { json = JSON.parse(data); } catch (_) { /* a text frame */ }
+            return resolve({ status: res.statusCode, data, json });
+          }
         }
       });
-      res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode, json: null, text: buf }); });
+      res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode, data: null, json: null, text: buf }); });
     });
     const timer = setTimeout(() => { req.destroy(); reject(new Error(`no data frame from ${pathAndQuery}`)); }, timeoutMs);
     req.on('error', (e) => { if (!/socket hang up|aborted/.test(String(e))) { clearTimeout(timer); reject(e); } });
