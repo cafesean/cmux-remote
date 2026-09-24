@@ -233,6 +233,23 @@ try {
   const ratio = boxes[0] / (boxes[0] + boxes[1]);
   check('pane widths follow the layout fractions', Math.abs(ratio - 0.6) < 0.03, 'ratio=' + ratio.toFixed(3));
 
+  // --- the composer stays usable in a narrow pane ---
+  // A three-way split on a wide screen gave the field one character of width: the buttons are fixed
+  // and only the textarea shrinks. Below the threshold the field takes its own line.
+  const composerAt = (w) => page.evaluate((w) => {
+    const f = document.querySelector('footer'), t = document.getElementById('text'), s = document.getElementById('send');
+    f.style.width = w ? w + 'px' : '';
+    const tr = t.getBoundingClientRect(), sr = s.getBoundingClientRect(), fr = f.getBoundingClientRect();
+    const out = { field: tr.width, footer: fr.width, sameLine: Math.abs(tr.bottom - sr.bottom) < 6 };
+    f.style.width = '';
+    return out;
+  }, w);
+  const wide = await composerAt(0);
+  check('a wide pane keeps the field beside Send', wide.sameLine && wide.field > 200, JSON.stringify(wide));
+  const thin = await composerAt(260);
+  check('a narrow pane gives the field its own full-width line', !thin.sameLine && thin.field > thin.footer * 0.8,
+    JSON.stringify(thin));
+
   // --- the pane with several tabs offers them in its header ---
   const chips = await page.locator('.pane').nth(0).locator('.pchip').count();
   check('a multi-tab pane shows its tabs in the pane header', chips === 2, 'chips=' + chips);
