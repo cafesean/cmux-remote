@@ -277,6 +277,29 @@ try {
   }, null, { timeout: 6000 }).then(() => check('a split moved ON THE MAC follows to the mirror', true))
     .catch(() => check('a split moved ON THE MAC follows to the mirror', false));
 
+  // --- a divider torn out from under the pointer must not wedge the page -----------------------
+  // A re-render mid-drag used to detach the handle, its pointerup never came, and `dragging` stayed
+  // set for the page's life: every later pane drag was refused and every layout frame dropped. The
+  // pane-drag checks below, and the push that follows this, are what fail if that comes back.
+  {
+    const h = await page.locator('.phandle.x').first().boundingBox();
+    await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(wrap.x + wrap.width * 0.45, h.y + h.height / 2, { steps: 4 });
+    await page.evaluate(() => document.querySelectorAll('.phandle').forEach((e) => e.remove()));
+    await page.mouse.move(wrap.x + wrap.width * 0.5, h.y + h.height / 2, { steps: 2 });
+    await page.mouse.up();
+    await page.waitForTimeout(600);
+    await fetch(`http://127.0.0.1:${BRIDGE_PORT}/stub/push-layout?target=0.3`);
+    await page.waitForFunction(() => {
+      const p = document.querySelectorAll('.pane');
+      if (p.length !== 2 || !document.querySelector('.phandle.x')) return false;
+      const a = p[0].getBoundingClientRect().width, b = p[1].getBoundingClientRect().width;
+      return Math.abs(a / (a + b) - 0.3) < 0.04;
+    }, null, { timeout: 6000 }).then(() => check('a divider torn out mid-drag does not freeze the layout', true))
+      .catch(() => check('a divider torn out mid-drag does not freeze the layout', false));
+  }
+
   // --- drag a pane by its header to rearrange it -----------------------------------------------
   // The arrangement is a drag, not a menu: the header band is the grip, the drop position decides
   // whether the pane lands BESIDE the target (an edge) or INSIDE it as a tab (the middle).
