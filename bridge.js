@@ -438,8 +438,11 @@ async function loadTree() {
 // TARGETING TRAP: the rpc methods take `<thing>_id` (a UUID) — a `workspace` ref param is accepted and
 // then SILENTLY IGNORED, answering for whatever workspace is currently selected. Verified on 0.64.20:
 // `pane.list {"workspace":"workspace:8"}` returned the panes of workspace:19 once :19 became selected.
-// So always pass UUIDs as *_id. Clients already address workspaces by UUID (ws.id).
-const rpcTarget = (key, value) => (/^[0-9A-Fa-f-]{36}$/.test(value) ? { [key + '_id']: value } : { [key]: value });
+// The same trap bit `pane.resize`: divider handles carry pane REFS (panelayout.js uses p.ref), so
+// `{"pane":"pane:28"}` was ignored and cmux resized the FOCUSED pane instead — "no adjacent border"
+// on one side, the wrong divider moving on the other, and the drag snapping back. Verified on 0.64.25:
+// `*_id` accepts a short ref as well as a UUID, so always send `*_id`.
+const rpcTarget = (key, value) => ({ [key + '_id']: value });
 async function loadLayout(workspace) {
   const out = await cmuxP(['rpc', 'pane.list', JSON.stringify(rpcTarget('workspace', workspace))], 8000);
   if (out == null) return null;
