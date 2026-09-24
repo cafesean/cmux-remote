@@ -967,6 +967,9 @@
     syncSoloClass();
     // the browser mirror and the file explorer are full-bleed overlays — they own the screen while up
     if (state.tabType !== 'terminal') return;
+    // a divider is mid-drag: rebuilding would tear its handle out from under the pointer (the tree
+    // poll calls this every few seconds). The drag's own release re-renders.
+    if (dragging) return;
     const panes = visiblePanes();
     if (!panes.length) { teardownPanes(); elEmpty.style.display = 'flex'; return; }
     elEmpty.style.display = 'none';
@@ -1061,6 +1064,10 @@
     // keyboard mid-word. The frame is HELD, not dropped — and only the latest is held, because a
     // layout frame is absolute state, so replaying a queue would paint geometry that is already
     // stale. It applies when the composer is put down.
+    // Trust the DOM over the flag: a focused input that is MOVED or REMOVED (mountComposer re-parents
+    // it, destroyView/parkComposer take its pane away) loses focus without firing blur, and a flag
+    // stuck true would hold every layout frame for the life of the page.
+    if (state.composerFocused && document.activeElement !== elText) state.composerFocused = false;
     if (state.composerFocused) { state.pendingLayout = l; return; }
     renderPanes();
     renderTabs();
@@ -1216,7 +1223,7 @@
       e.preventDefault();
       dragging = { hd, rect, pos: hd.pos };
       el.classList.add('drag');
-      el.setPointerCapture && el.setPointerCapture(e.pointerId);
+      try { el.setPointerCapture(e.pointerId); } catch (_) {}
       const move = (ev) => {
         if (!dragging) return;
         const f = hd.axis === 'x' ? (ev.clientX - rect.left) / rect.width : (ev.clientY - rect.top) / rect.height;
@@ -1225,19 +1232,28 @@
         else el.style.top = (dragging.pos * 100).toFixed(3) + '%';
         previewDrag(hd, dragging.pos);
       };
-      const up = () => {
-        el.removeEventListener('pointermove', move);
-        el.removeEventListener('pointerup', up);
-        el.removeEventListener('pointercancel', up);
+      // The listeners go on WINDOW, like the pane drag. On the handle itself, anything that detached
+      // it mid-drag (a re-render, the page losing the pointer) meant its pointerup never came, and
+      // `dragging` stayed set for the life of the page: every later pane drag was refused and every
+      // layout frame dropped — "drag and drop stops working after the window has been open a while".
+      const up = (commit) => () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', end);
+        window.removeEventListener('pointercancel', abort);
+        window.removeEventListener('blur', abort);
+        el.removeEventListener('lostpointercapture', end);
         el.classList.remove('drag');
         const d = dragging; dragging = null;
         if (!d) return;
-        if (Math.abs(d.pos - hd.pos) < 0.005) return renderPanes();   // a tap, not a drag
+        if (!commit || Math.abs(d.pos - hd.pos) < 0.005) return renderPanes();   // a tap, or abandoned
         commitDrag(hd, d.pos);
       };
-      el.addEventListener('pointermove', move);
-      el.addEventListener('pointerup', up);
-      el.addEventListener('pointercancel', up);
+      const end = up(true), abort = up(false);
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', end);
+      window.addEventListener('pointercancel', abort);
+      window.addEventListener('blur', abort);
+      el.addEventListener('lostpointercapture', end);
     };
     el.addEventListener('pointerdown', onDown);
   }
