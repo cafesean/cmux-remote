@@ -12,7 +12,8 @@
 // service worker registration URL so installed clients replace any older worker immediately.
 // v19: p18 capability gating in app.js (browser entry points hidden on tmux machines).
 // v20: stuck drag / composer-focus state no longer freezes layout and pane drag for the page's life.
-const CACHE = 'cmux-shell-v20';
+// v21: the composer wraps in a narrow pane (index.html CSS only).
+const CACHE = 'cmux-shell-v21';
 const SHELL = ['/', '/app.js', '/sidebar.js', '/radar.js', '/inbox.js'];
 
 self.addEventListener('install', (e) => {
