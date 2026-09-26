@@ -13,7 +13,8 @@
 // v19: p18 capability gating in app.js (browser entry points hidden on tmux machines).
 // v20: stuck drag / composer-focus state no longer freezes layout and pane drag for the page's life.
 // v21: the composer wraps in a narrow pane (index.html CSS only).
-const CACHE = 'cmux-shell-v21';
+// v22: Fit width / Fixed size font mode toggle in the settings popover (new index.html markup).
+const CACHE = 'cmux-shell-v22';
 const SHELL = ['/', '/app.js', '/sidebar.js', '/radar.js', '/inbox.js'];
 
 self.addEventListener('install', (e) => {
