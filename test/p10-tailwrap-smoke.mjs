@@ -61,21 +61,20 @@ async function main() {
   const page = await ctx.newPage();
   // 2x font zoom BEFORE the app boots — this is what makes rows wrap, and what a phone reader
   // actually runs at (the fit-to-columns baseline is unreadably small).
-  await page.addInitScript(() => { try { localStorage.setItem('cmux_fontzoom', '2'); } catch (_) {} });
+  // P10_FONTMODE=fixed reruns the whole check under the Fixed size font mode.
+  await page.addInitScript((mode) => {
+    try { localStorage.setItem('cmux_fontzoom', '2'); if (mode) localStorage.setItem('cmux_fontmode', mode); } catch (_) {}
+  }, process.env.P10_FONTMODE || '');
   page.on('pageerror', (e) => { fail++; console.log(`  FAIL page error: ${e.message}`); });
   await page.goto(`${BASE}/#token=${encodeURIComponent(TOKEN)}`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.pane', { timeout: 20000 });
 
+  // Jump via the p17 sidebar (the old #wsMenu dropdown is gone): open it from the workspace chip and
+  // click the scratch workspace's row.
   await page.click('#wsChip');
-  await page.waitForSelector('#wsMenu:not([hidden])', { timeout: 5000 });
-  const entries = page.locator('#wsMenu button');
-  const n = await entries.count();
-  let switched = false;
-  for (let i = n - 1; i >= 0; i--) {
-    const t = (await entries.nth(i).textContent()) || '';
-    if (created.title && t.includes(created.title)) { await entries.nth(i).click(); switched = true; break; }
-  }
-  if (!switched) await entries.nth(n - 1).click();
+  const row = page.locator('#side .siderow.ws', { hasText: created.title || '\u0000' }).first();
+  await row.waitFor({ state: 'visible', timeout: 15000 });
+  await row.click();
   await sleep(3000);
 
   // Long lines: each fills the source terminal's width, so at 2x zoom every one wraps in the pane.
