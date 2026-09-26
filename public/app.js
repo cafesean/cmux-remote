@@ -58,6 +58,7 @@
   const elDropZone = $('dropZone'), elDragGhost = $('dragGhost'), elFileDrop = $('fileDrop');
   const elAttachBtn = $('attachBtn'), elAttachInput = $('attachInput'), elPasteBtn = $('pasteBtn');
   const elFontUp = $('fontUp'), elFontDown = $('fontDown'), elFontVal = $('fontVal'), elFontReset = $('fontReset');
+  const elFontMode = $('fontMode');
   // browser-mirror elements
   const elBrowser = $('browser'), elBshot = $('bshot'), elBspin = $('bspin');
   const elBurl = $('burl'), elBGo = $('bGo'), elBBack = $('bBack'), elBFwd = $('bFwd'), elBReload = $('bReload');
@@ -74,6 +75,7 @@
     treeTimer: null,
     mode: 'compose',          // 'compose' | 'live'
     zoom: 1,                  // font multiplier on top of the width auto-fit (1 = fit exactly)
+    fontMode: 'fit',          // 'fit' (font follows pane width / source columns) | 'fixed' (one size everywhere)
     tabType: 'terminal',      // 'terminal' | 'browser' | 'files' | 'viewer' — which surface + footer is active
     browser: { es: null, surface: null, w: 800, h: 600, urlTimer: null },  // browser-surface mirror state
     // ---- multi-pane mirror ----
@@ -90,6 +92,7 @@
     lastComposerSurface: null, // survives parking, so an overlay can still fill the right composer
   };
   try { const z = parseFloat(localStorage.getItem('cmux_fontzoom')); if (z > 0) state.zoom = Math.max(0.6, Math.min(3, z)); } catch (_) {}
+  try { const fm = localStorage.getItem('cmux_fontmode'); if (fm === 'fit' || fm === 'fixed') state.fontMode = fm; } catch (_) {}
   try { const sp = localStorage.getItem('cmux_split'); if (sp === 'off' || sp === 'auto') state.splitPref = sp; } catch (_) {}
 
   // Split view needs room for two readable terminals side by side; below that the mirror shows one
@@ -420,8 +423,17 @@
     _charRatio = w ? (w / 100) / 100 : 0.6;   // width per char, per px of font-size
     return _charRatio;
   }
+  // Fixed mode's font at 100% zoom — readable on a phone. Wide source lines wrap (#screen is pre-wrap).
+  const FIXED_FONT_BASE = 13;
   function fitFont(v) {
     if (!v) return;
+    // Fixed size: the same font in every pane and workspace, whatever the source column count. Desktop
+    // panes differ in columns (their own ⌘+/−, split widths), so fit-width opened every workspace at a
+    // different size and the zoom had to be redone on each switch.
+    if (state.fontMode === 'fixed') {
+      v.screenEl.style.fontSize = Math.max(7, Math.min(FIXED_FONT_BASE * state.zoom, 72)).toFixed(2) + 'px';
+      return;
+    }
     const cols = v.cols;
     if (!cols || cols < 2) return;
     const el = v.screenEl;
@@ -441,13 +453,27 @@
   const fitAllFonts = () => { for (const v of state.views.values()) fitFont(v); };
 
   // ---- font zoom (settings) ----
-  function updateFontVal() { if (elFontVal) elFontVal.textContent = Math.round(state.zoom * 100) + '%'; }
-  function applyZoom() {
-    try { localStorage.setItem('cmux_fontzoom', String(state.zoom)); } catch (_) {}
+  function updateFontVal() {
+    if (elFontVal) elFontVal.textContent = Math.round(state.zoom * 100) + '%';
+    if (elFontMode) elFontMode.textContent = state.fontMode === 'fixed' ? 'Fixed size' : 'Fit width';
+    if (elFontReset) elFontReset.textContent = state.fontMode === 'fixed' ? 'Reset font size' : 'Reset to fit width';
+  }
+  // Every font change (zoom or mode) refits all panes, then keeps a tail-following pane pinned to the
+  // bottom — the refit changes wrapping and so the scroll height.
+  function refitFonts() {
     updateFontVal();
     fitAllFonts();
     for (const v of state.views.values()) if (v.followTail) v.screenEl.scrollTop = v.screenEl.scrollHeight;
     updateJump();
+  }
+  function applyZoom() {
+    try { localStorage.setItem('cmux_fontzoom', String(state.zoom)); } catch (_) {}
+    refitFonts();
+  }
+  function toggleFontMode() {
+    state.fontMode = state.fontMode === 'fixed' ? 'fit' : 'fixed';
+    try { localStorage.setItem('cmux_fontmode', state.fontMode); } catch (_) {}
+    refitFonts();
   }
   function nudgeZoom(mult) {
     const next = Math.max(0.6, Math.min(3, +(state.zoom * mult).toFixed(3)));
@@ -2541,6 +2567,7 @@
   if (elFontUp) elFontUp.onclick = () => nudgeZoom(1.15);
   if (elFontDown) elFontDown.onclick = () => nudgeZoom(1 / 1.15);
   if (elFontReset) elFontReset.onclick = () => resetZoom();
+  if (elFontMode) elFontMode.onclick = () => toggleFontMode();
   if (elSplitMenu) {
     // every item acts on state.menuPane — the pane whose ⊞ opened this menu
     elSplitMenu.querySelectorAll('button[data-split]').forEach((b) => {
