@@ -128,7 +128,9 @@ function plan(p) {
 function log() {
   let raw = '';
   try { raw = fs.readFileSync(logPath, 'utf8'); } catch (_) { return []; }
-  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // The bridge's boot-time `cmux --version` probe (lib/cmux-version.js) is not a surface command and
+  // lands in the log at a time of its own choosing — it is no part of any send's sequence.
+  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.op !== '--version');
 }
 const started = () => log().filter((e) => e.phase === 'start').map((e) => e.op);
 const sendCommands = () => started().filter((o) => o === 'send-text' || o === 'send-key');

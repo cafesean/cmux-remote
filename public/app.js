@@ -153,9 +153,19 @@
   // still true), but an action's confirmation — "copied", "downloading …" — has to clear itself:
   // nothing else repaints the status in Files mode, so a sticky "copied" would sit there all session.
   let statusTimer = null;
+  // capabilities.cmux = {version, min, supported} from the bridge (lib/cmux-version.js). '' unless the
+  // bridge KNOWS it is below the floor: unknown (null) and pre-version bridges (no key) say nothing.
+  function cmuxCompatNote(caps) {
+    const c = caps && caps.cmux;
+    if (!c || c.supported !== false) return '';
+    return 'cmux ' + (c.version || '?') + ' < ' + (c.min || '?') + ' (update cmux)';
+  }
   function setStatus(txt, err, ms) {
     if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
     if (!txt) { elStatus.hidden = true; return; }
+    // A machine on a cmux older than the bridge's verified floor says so on its steady "live" state —
+    // the one status that stays up — so short history etc. can be read against it. No toast.
+    if (txt === 'live') { const n = cmuxCompatNote(state.caps[state.machine]); if (n) { txt = 'live · ' + n; err = true; } }
     elStatus.hidden = false; elStatus.textContent = txt; elStatus.classList.toggle('err', !!err);
     if (ms) statusTimer = setTimeout(() => { elStatus.hidden = true; statusTimer = null; }, ms);
   }
@@ -225,6 +235,9 @@
     const fs = parseFloat(cs.fontSize) || 13;
     const lh = parseFloat(cs.lineHeight) || fs * 1.32;
     const padY = parseFloat(cs.paddingTop || '0') + parseFloat(cs.paddingBottom || '0');
+    // History that arrived while the reader was scrolled up was parked (see loadHistory); it lands on
+    // the first frame that is following the tail again, where prepending it yanks nobody.
+    if (v.histPending && v.followTail !== false) { v.hist = v.histPending; v.histPending = null; }
     const hist = (v.hist && v.hist.length) ? v.hist : null;
     const off = hist ? hist.length : 0;
     const fillRows = off ? rows : Math.max(rows, Math.ceil(Math.max(0, el.clientHeight - padY) / lh));
@@ -254,8 +267,15 @@
     // The replay window slides forward as output arrives, so rows scroll OUT of the styled grid and the
     // history block no longer reaches it — a gap would open at the seam. The grid's top row changing
     // identity is exactly that event; refetch (throttled) rather than let the pane lie about its past.
+    // A `done` pane (the bridge said nothing is above, or it is an alt screen) is in the same position:
+    // its top row moving is output pushing rows above the window, or a TUI exiting — ask again.
     const topSig = v.rowSig[off] || '';
-    if (off && v.histTopSig && topSig && topSig !== v.histTopSig) refreshHistory(v);
+    if ((off || v.histDone) && v.histTopSig && topSig && topSig !== v.histTopSig) refreshHistory(v);
+    // A pane with NO history and no answer saying none exists retries on later frames (throttled in
+    // refreshHistory). Without this, a first load that was skipped (in flight for the previous surface),
+    // failed, or answered empty left the pane at one screen + cmux's replay cap for good — the refetch
+    // above only ever fired for panes that already had history.
+    else if (!off && !v.histDone && !v.histPending) refreshHistory(v);
     v.histTopSig = topSig;
 
     // Follow the tail, which is what a terminal does.
@@ -314,6 +334,7 @@
     v.screenEl.replaceChildren(); v.rowSig = []; v.screenEl.style.background = '';
     // History belongs to the surface that was in this pane, not to the pane.
     v.hist = null; v.histLen = 0; v.histTopSig = null; v.histAt = 0;
+    v.histDone = false; v.histPending = null; v.histFails = 0;
   }
 
   // ---- deep scrollback: 2000 rows per pane ------------------------------------
@@ -324,35 +345,54 @@
   //
   // The rows above that window come from the bridge's /history route (read-screen text, aligned to the
   // styled grid by content) and are painted as unstyled rows on top of it — see buildPlainRow. They are
-  // fetched ONCE per surface, never on the streaming frames: 1700 rows of text on every repaint would be
-  // ~200KB four times a second over the tunnel, which is the exact cost the hash-dedupe exists to avoid.
+  // fetched once per surface (plus throttled retries until an answer lands), never on the streaming
+  // frames: 1700 rows of text on every repaint would be ~200KB four times a second over the tunnel,
+  // which is the exact cost the hash-dedupe exists to avoid.
   const HISTORY_ROWS = 2000;        // what a pane is expected to remember, per the operator
   const HISTORY_MIN_GAP_MS = 4000;  // floor between refetches for one pane (each is a cmux read-screen)
+  // Failures back off (4s, 8s … 64s) so a bridge that keeps refusing is not asked 15 times a minute.
   function refreshHistory(v) {
     if (!v || !v.surfaceId) return;
-    if (Date.now() - (v.histAt || 0) < HISTORY_MIN_GAP_MS) return;
+    const gap = HISTORY_MIN_GAP_MS * Math.pow(2, Math.min(v.histFails || 0, 4));
+    if (Date.now() - (v.histAt || 0) < gap) return;
     loadHistory(v, v.surfaceId);
   }
+  // Outcomes, and what makes the pane ask again (renderGrid decides when):
+  //   rows          → painted (or parked in histPending while the reader is scrolled up)
+  //   complete/alt  → histDone: nothing above exists; asked again only when the grid's top row moves
+  //   anything else → not done: retried, throttled, until one of the above
+  // `histBusy` holds the SURFACE in flight, not a bare flag: a pane that switched surfaces mid-request
+  // must be able to ask for the new one at once, instead of being skipped and never asking again.
   async function loadHistory(v, sid) {
-    if (!v || !sid || !state.machine || v.histBusy) return;
-    v.histBusy = true;
+    if (!v || !sid || !state.machine || v.histBusy === sid) return;
+    const req = {};
+    v.histBusy = sid; v.histReq = req;
     v.histAt = Date.now();
+    let ok = false;
     try {
       const r = await jget('/api/cmux/history?machine=' + encodeURIComponent(state.machine)
         + '&surface=' + encodeURIComponent(sid) + '&rows=' + HISTORY_ROWS);
       const d = await r.json().catch(() => null);
       if (!r.ok || !d || !Array.isArray(d.rows)) return;
       // The pane may have switched surfaces while this was in flight; the answer describes the OLD one.
+      // The new surface is not blocked by it (see histBusy) and retries from renderGrid if it was.
       if (v.surfaceId !== sid) return;
-      if (!d.rows.length) { if (!v.hist) v.hist = null; return; }
+      if (!d.rows.length) {
+        if (d.complete || d.altScreen) { ok = true; v.histDone = true; }
+        return;
+      }
+      ok = true; v.histDone = false;
       // Prepending rows pushes everything down. Following the tail absorbs that (scrollToTail runs on
-      // the same frame); a reader who has scrolled up would be yanked, so leave them where they are and
-      // let the next attach or tail-follow pick the history up.
-      if (v.followTail === false) return;
-      v.hist = d.rows;
+      // the same frame); a reader who has scrolled up would be yanked, so the rows are parked and land
+      // on the first frame that follows the tail again (renderGrid).
+      if (v.followTail === false) { v.histPending = d.rows; return; }
+      v.hist = d.rows; v.histPending = null;
       if (v.lastGrid) renderGrid(v, v.lastGrid);
     } catch (_) { /* history is an enrichment — a pane without it is the old behaviour, not a failure */ }
-    finally { v.histBusy = false; }
+    finally {
+      if (v.histReq === req) v.histBusy = false;
+      if (v.surfaceId === sid) v.histFails = ok ? 0 : (v.histFails || 0) + 1;
+    }
   }
 
   // ---- per-tab grid cache: reopening a tab paints instantly from the last known grid (0 network),
@@ -847,7 +887,8 @@
     const v = { paneId: p.id, paneRef: p.ref, surfaceId: null, el: box, headEl: head, screenEl: screen, footEl: foot,
       rowSig: [], cols: 0, followTail: true, lastRaw: null, lastHash: null,
       // deep scrollback (loadHistory): the plain rows above the 240 the replay window can carry
-      hist: null, histLen: 0, histTopSig: null, histAt: 0, histBusy: false };
+      hist: null, histLen: 0, histTopSig: null, histAt: 0, histBusy: false,
+      histDone: false, histPending: null, histFails: 0, histReq: null };
     screen.addEventListener('scroll', () => {
       // Only a HUMAN scroll decides whether to keep following. scrollToTail sets scrollTop itself,
       // and its target sits above the grid's trailing blank rows, so treating that echo as a reader

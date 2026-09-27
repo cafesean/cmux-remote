@@ -14,7 +14,8 @@
 // v20: stuck drag / composer-focus state no longer freezes layout and pane drag for the page's life.
 // v21: the composer wraps in a narrow pane (index.html CSS only).
 // v22: Fit width / Fixed size font mode toggle in the settings popover (new index.html markup).
-const CACHE = 'cmux-shell-v22';
+// v23: pane history retries until answered, parks rows while scrolled up; cmux-version note on "live".
+const CACHE = 'cmux-shell-v23';
 const SHELL = ['/', '/app.js', '/sidebar.js', '/radar.js', '/inbox.js'];
 
 self.addEventListener('install', (e) => {
