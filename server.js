@@ -328,7 +328,9 @@ async function handleApi(req, res, u) {
   // as {ok:false, error} in its own slot instead of failing the call. Labels and ids only.
   if (req.method === 'GET' && p === '/api/cmux/fleet') {
     const results = await Promise.allSettled(MACHINES.map(async (m) => {
-      const r = await bridge(m, '/cmux/tree', { timeout: 8000 });
+      // Keep the fleet's bridge budget aligned with /tree. Under cmux contention the bridge can
+      // answer after eight seconds; aborting sooner falsely marks a live local machine unreachable.
+      const r = await bridge(m, '/cmux/tree', { timeout: 15000 });
       const d = await r.json().catch(() => ({ error: 'bad_upstream' }));
       if (!r.ok || (d && d.error)) {
         return { id: m.id, label: m.label, ok: false, error: (d && d.error) || ('http_' + r.status), workspaces: [] };
