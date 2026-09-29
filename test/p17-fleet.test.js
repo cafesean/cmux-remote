@@ -59,3 +59,28 @@ test('GET /api/cmux/fleet: every machine in one call; dead and wrong-secret ones
   assert.ok(took < 3000, `a dead machine must not delay the call (took ${took}ms)`);
   for (const m of r.json.machines) { assert.equal(m.baseUrl, undefined); assert.equal(m.secret, undefined); }
 });
+
+test('GET /api/cmux/fleet keeps a slow but recovering bridge online', { timeout: 30000 }, async (t) => {
+  const bridge = http.createServer((req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(TREE));
+    }, 9000);
+  });
+  await new Promise((resolve) => bridge.listen(0, '127.0.0.1', resolve));
+  const srv = await bootServer({ env: {
+    SERVER_TOKEN: 'tok', CMUX_MACHINE_URL: '', CMUX_CONFIG: '',
+    CMUX_MACHINES: JSON.stringify([{ id: 'slow', label: 'Slow Mac',
+      baseUrl: `http://127.0.0.1:${bridge.address().port}`, secret: 's1' }]),
+  } });
+  t.after(async () => {
+    await srv.stop();
+    bridge.closeAllConnections();
+    await new Promise((resolve) => bridge.close(resolve));
+  });
+
+  const r = await call(srv.base, 'GET', '/api/cmux/fleet', { token: 'tok' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.machines[0].ok, true, 'a transient >8s cmux stall must not show bridge_unreachable');
+  assert.deepEqual(r.json.machines[0].workspaces, TREE.workspaces);
+});
