@@ -43,7 +43,11 @@ test('BACKEND unset: /cmux/tree carries the cmux capabilities', async () => {
   try {
     const r = await callBridge(b.base, '/cmux/tree', { secret: SECRET });
     assert.equal(r.status, 200, r.text);
-    assert.deepEqual(r.json.capabilities, { backend: 'cmux', browser: true, sidebarStatus: true, tabsInPane: true, radar: true });
+    // `cmux` (version/min/supported, lib/cmux-version.js) is additive on the cmux backend only; this
+    // fake prints no version, so it is reported as unknown — never as supported.
+    const { cmux: ver, ...caps } = r.json.capabilities;
+    assert.deepEqual(caps, { backend: 'cmux', browser: true, sidebarStatus: true, tabsInPane: true, radar: true });
+    assert.deepEqual(ver, { version: null, min: '0.64.19', supported: null });
     assert.match(b.stdout(), /backend: cmux/);
   } finally {
     await b.stop();

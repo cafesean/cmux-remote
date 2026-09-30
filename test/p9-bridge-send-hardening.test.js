@@ -116,7 +116,8 @@ function plan(p) {
 function log() {
   let raw = '';
   try { raw = fs.readFileSync(logPath, 'utf8'); } catch (_) { return []; }
-  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // The boot-time `cmux --version` probe is not a surface command; it may land in any test's log.
+  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.op !== '--version');
 }
 const starts = () => log().filter((e) => e.phase === 'start');
 
