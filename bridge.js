@@ -69,6 +69,28 @@ const CAPABILITIES = Object.freeze({
   backend: BACKEND, browser: BACKEND === 'cmux', sidebarStatus: BACKEND === 'cmux', tabsInPane: BACKEND === 'cmux',
   radar: BACKEND === 'cmux',   // radar types into panes and starts sessions; not supported on tmux (owner, p18)
 });
+// Which cmux this is, and whether it is at least the version this code was verified against
+// (lib/cmux-version.js says why the floor is where it is). Probed once at boot and refreshed lazily —
+// cmux auto-updates under a running bridge. Below the floor is a WARNING, never a refusal: the page
+// shows it next to the connection status so "history is short" can be read against the cmux version.
+const cmuxVersion = require('./lib/cmux-version');
+const CMUX_VERSION_TTL_MS = 10 * 60 * 1000;
+let cmuxCompat = null, cmuxCompatAt = 0;
+function probeCmuxVersion(cb) {
+  if (tmuxCli) { if (cb) cb(null); return; }
+  cmuxCompatAt = Date.now();                     // set before the spawn: concurrent callers don't pile up
+  cli(['--version'], { timeout: 5000 }, (err, stdout) => {
+    cmuxCompat = cmuxVersion.assessCmuxVersion(err ? '' : stdout);
+    if (cb) cb(cmuxCompat);
+  });
+}
+// CAPABILITIES plus, on the cmux backend, `cmux: {version, min, supported}` (additive, p18 path: the
+// server relays `capabilities` whole). `supported: null` = not probed yet / version unreadable.
+function capabilities() {
+  if (tmuxCli) return CAPABILITIES;
+  if (Date.now() - cmuxCompatAt > CMUX_VERSION_TTL_MS) probeCmuxVersion();
+  return { ...CAPABILITIES, cmux: cmuxCompat || { version: null, min: cmuxVersion.MIN_CMUX_VERSION, supported: null } };
+}
 // One spawn point for both backends. cmux: the exact execFile cmux() always made.
 function cli(args, opts, cb) {
   if (tmuxCli) return tmuxCli.exec(args, opts, cb);
@@ -507,7 +529,7 @@ async function cmuxTree(res) {
   const cov = await attachStatuses(ws);
   send(res, 200, {
     workspaces: ws,
-    capabilities: CAPABILITIES,   // p18 (additive): what the page may offer for this machine
+    capabilities: capabilities(),   // p18 (additive): what the page may offer for this machine (+ cmux version)
     // ---- p5 radar (additive keys; `workspaces` is untouched) ----
     machineId: MACHINE_ID,
     statusTruncated: cov.statusTruncated,
@@ -696,8 +718,37 @@ function cmuxScreen(res, surface, lines) {
 // history read-screen still reports there is the PRIMARY buffer sitting behind the full-screen TUI —
 // prepending it would invent a past the reader never saw. `altScreen: true` says so, so the client can
 // tell "no history exists" from "history not fetched yet".
-const REPLAY_SB_CAP = 240;         // cmux's own ceiling on terminal.replay scrollback rows
+//
+// THE REPLAY CAP IS LEARNED, NOT ASSUMED. 240 is what 0.64.19–0.64.25 measured, but nothing promises
+// every cmux build caps replay at that number. The old shortcut — `scrollback_rows < 240` means the
+// replay already reaches the top of the buffer — answers `complete` for EVERY pane on a build whose
+// cap is lower, and the pane then shows one screen plus that cap forever. So the shortcut is only taken
+// once this bridge has SEEN the cap: the scrollback_rows of replays that read-screen proved had rows
+// above them. Every such observation must agree (a fixed row cap); if they disagree, the cap is not a
+// row count on this build and the shortcut is never taken — the read is always paid. Until then too.
+// Limit, stated: once a cap is learned, a window SMALLER than it takes the shortcut, so a build whose
+// cap varied downward per surface would not be caught. Every measured build caps at one fixed number,
+// and the learned cap lives only as long as the bridge process (a cmux update + bridge restart relearns).
+//
+// WHEN THE CONTENT JOIN FAILS, SPLICE BY COUNT. A seam that cannot be found (row text formatted
+// differently by an older cmux: wide-char spacers, soft-wrap joins, trailing-space handling) used to
+// drop the whole history silently — `rows: []` — which is exactly "a pane shows very few lines". Now
+// the join first retries whitespace-blind on several anchors, and failing that splices by row count
+// (read-screen trims trailing blank rows, so the styled window's trailing blanks are discounted). That
+// answer is marked `aligned: false, approx: true`: a row may be duplicated or lost at the seam, which
+// beats losing all ~1700 of them.
 const HISTORY_MAX_ROWS = 2000;     // rows a pane is expected to remember
+const replayCap = { n: 0, min: 0, max: 0 };   // saturated replay scrollback_rows seen by this bridge
+function learnReplayCap(cap, sbRows) {
+  if (!(sbRows > 0)) return;
+  cap.min = cap.n ? Math.min(cap.min, sbRows) : sbRows;
+  cap.max = cap.n ? Math.max(cap.max, sbRows) : sbRows;
+  cap.n++;
+}
+// True when this replay provably reaches the top of the buffer, without reading it.
+function replayReachesTop(cap, sbRows) {
+  return cap.n > 0 && cap.min === cap.max && sbRows < cap.min;
+}
 
 // Row text as the client paints it: positioned runs, gaps padded with spaces. Map row -> text.
 function spansToText(spans) {
@@ -718,23 +769,57 @@ function spansToText(spans) {
   }
   return out;
 }
+// Whitespace-blind row identity: a wide char's spacer column, NBSP vs space, trailing padding and
+// control bytes are formatting, not content.
+function normRow(s) {
+  return String(s == null ? '' : s).replace(/[\s\u0000-\u001f\u007f ​]+/g, '');
+}
 // Index in `lines` where the replay window's first row sits, or -1 when it can't be located.
 // `styled` is the replay window's rows in order (scrollback first, then viewport).
+// Passes, strictest first; within each, anchors are the first few non-blank styled rows and matches
+// are scanned from the END (the replay window is the most recent copy of a repeated line):
+//   1. trailing whitespace ignored, anchor + its successor must match
+//   2. all whitespace ignored, anchor + successor
+//   3. all whitespace ignored, anchor alone — only if it occurs exactly ONCE in the text
+// A match with fewer rows above it than the anchor has above it in the window means the buffer's top
+// is inside the window: 0, nothing above.
 function alignHistory(lines, styled) {
-  let k = -1;                                   // a blank anchor would match everywhere
-  for (let i = 0; i < styled.length && i < 40; i++) if (String(styled[i] || '').trim()) { k = i; break; }
-  if (k < 0) return -1;
-  const a0 = String(styled[k]).trimEnd();
-  const a1 = k + 1 < styled.length ? String(styled[k + 1] == null ? '' : styled[k + 1]).trimEnd() : null;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (String(lines[i]).trimEnd() !== a0) continue;
-    if (a1 !== null && i + 1 < lines.length && String(lines[i + 1]).trimEnd() !== a1) continue;
-    return i - k >= 0 ? i - k : -1;
+  const anchors = [];                                   // a blank anchor would match everywhere
+  for (let i = 0; i < styled.length && i < 40 && anchors.length < 5; i++) if (normRow(styled[i])) anchors.push(i);
+  if (!anchors.length) return -1;
+  const trimmed = (x) => String(x == null ? '' : x).trimEnd();
+  for (const f of [trimmed, normRow]) {
+    const L = lines.map(f);
+    for (const k of anchors) {
+      const a0 = f(styled[k]);
+      const a1 = k + 1 < styled.length ? f(styled[k + 1]) : null;
+      for (let i = L.length - 1; i >= 0; i--) {
+        if (L[i] !== a0) continue;
+        if (a1 !== null && i + 1 < L.length && L[i + 1] !== a1) continue;
+        return Math.max(0, i - k);
+      }
+    }
+  }
+  const L = lines.map(normRow);
+  for (const k of anchors) {
+    const a0 = normRow(styled[k]);
+    const hits = [];
+    for (let i = 0; i < L.length && hits.length < 2; i++) if (L[i] === a0) hits.push(i);
+    if (hits.length === 1) return Math.max(0, hits[0] - k);
   }
   return -1;
 }
+// Count-based seam, for when the content join fails: the plain text ends where the styled window
+// ends, less the window's trailing blank rows (read-screen trims those). Approximate by construction.
+function spliceByCount(lines, styled) {
+  let trailing = 0;
+  for (let r = styled.length - 1; r >= 0 && !normRow(styled[r]); r--) trailing++;
+  return Math.max(0, lines.length - (styled.length - trailing));
+}
 
-// GET /cmux/history?surface=&rows= -> { rows: [text…], aligned, complete?, altScreen?, styledRows }
+// GET /cmux/history?surface=&rows=
+//   -> { rows: [text…], aligned, approx?, complete?, altScreen?, styledRows, scrollbackRows, bufferRows? }
+// `complete: true` = nothing exists above the styled window (the client stops asking).
 function cmuxHistory(res, surface, rowsParam) {
   const asked = parseInt(rowsParam, 10);
   const want = Math.min(Number.isFinite(asked) && asked > 0 ? asked : HISTORY_MAX_ROWS, CMUX_SCROLLBACK_MAX);
@@ -745,12 +830,13 @@ function cmuxHistory(res, surface, rowsParam) {
     if (!rg || !Array.isArray(rg.row_spans)) return send(res, 502, { error: 'cmux_failed' });
     const sbRows = rg.scrollback_rows || 0;
     const styledRows = sbRows + (rg.rows || 0);
+    const base = { styledRows, scrollbackRows: sbRows };
     if (rg.active_screen && rg.active_screen !== 'primary') {
-      return send(res, 200, { rows: [], aligned: false, altScreen: true, styledRows });
+      return send(res, 200, { rows: [], aligned: false, altScreen: true, ...base });
     }
-    // The replay window already reaches the top of the buffer, so there is nothing above it — and no
-    // reason to pay for a 2000-line read to prove it.
-    if (sbRows < REPLAY_SB_CAP) return send(res, 200, { rows: [], aligned: true, complete: true, styledRows });
+    // The replay window provably reaches the top of the buffer (see the learned cap above), so there
+    // is nothing above it — and no reason to pay for a 2000-line read to prove it.
+    if (replayReachesTop(replayCap, sbRows)) return send(res, 200, { rows: [], aligned: true, complete: true, ...base });
     const sbText = spansToText(rg.scrollback_spans);
     const vpText = spansToText(rg.row_spans);
     const styled = [];
@@ -759,10 +845,17 @@ function cmuxHistory(res, surface, rowsParam) {
     cmux(['read-screen', '--surface', surface, '--scrollback', '--lines', String(want)], (e2, txt) => {
       if (e2) return send(res, 502, { error: 'cmux_failed' });
       const lines = String(txt || '').replace(/\n$/, '').split('\n');
-      const start = alignHistory(lines, styled);
-      if (start <= 0) return send(res, 200, { rows: [], aligned: start === 0, styledRows, bufferRows: lines.length });
+      const bufferRows = lines.length;
+      let start = alignHistory(lines, styled);
+      const aligned = start >= 0;
+      if (!aligned) start = spliceByCount(lines, styled);
+      const approx = aligned ? {} : { approx: true };
+      if (start <= 0) return send(res, 200, { rows: [], aligned, ...approx, complete: true, ...base, bufferRows });
+      // Rows exist above this replay window, so its scrollback_rows IS the cap. Only a content-proved
+      // seam teaches it — a count-based guess is not evidence.
+      if (aligned) learnReplayCap(replayCap, sbRows);
       const room = Math.max(0, want - styledRows);
-      send(res, 200, { rows: lines.slice(Math.max(0, start - room), start), aligned: true, styledRows, bufferRows: lines.length });
+      send(res, 200, { rows: lines.slice(Math.max(0, start - room), start), aligned, ...approx, ...base, bufferRows });
     }, 15000);
   }, 10000);
 }
@@ -874,6 +967,7 @@ function runSendCommand(args, cb, dispatched, tries) {
 }
 const runSendCommandP = (args) => new Promise((resolve) => runSendCommand(args, resolve, false, 0));
 
+const SUBMIT_SETTLE_MS = Number(process.env.CMUX_SUBMIT_SETTLE_MS ?? 150);
 function cmuxSend(req, res) {
   cmuxReadBody(req, (b) => {
     if (!b) return send(res, 400, { error: 'bad_json' });
@@ -904,6 +998,10 @@ function cmuxSend(req, res) {
         if (e) return answer(502, { error: e.dispatched ? 'text_command_unconfirmed' : 'send_failed', detail: e.detail });
       }
       if (b.submit) {
+        // Enter fired right on the heels of the text lands inside the TUI's paste-burst window and
+        // is read as a newline, not a submit (a separate soft-key Enter, seconds later, works).
+        // Let the text settle first — only when there was text to settle.
+        if (text) await new Promise((r) => setTimeout(r, SUBMIT_SETTLE_MS));
         const e = await runSendCommandP(['send-key', '--surface', surface, '--', 'enter']);
         if (e) return answer(502, { error: 'submit_failed_text_inserted', detail: e.detail });
       }
@@ -1742,6 +1840,13 @@ const server = http.createServer((req, res) => {
 function afterListen() {
   if (!SECRET) console.log('WARNING: BRIDGE_SECRET empty → /cmux/* is open. Only run on a trusted LAN.');
   console.log(`backend: ${BACKEND}`);
+  if (!tmuxCli) {
+    probeCmuxVersion((c) => {
+      if (!c || !c.version) console.log(`WARNING: could not read the cmux version (${CMUX_BIN} --version) — cmux-remote is verified on cmux >= ${cmuxVersion.MIN_CMUX_VERSION}`);
+      else if (!c.supported) console.log(`WARNING: cmux ${c.version} is older than ${c.min}, the earliest version cmux-remote is verified on — expect gaps (e.g. short pane history). Update cmux.`);
+      else console.log(`cmux: ${c.version} (>= ${c.min})`);
+    });
+  }
   // Contact the tmux server once at boot so `main` exists before the first page load. A failure is
   // only logged: every later request runs ensure() again, so a tmux that comes up late is picked up.
   if (tmuxCli) {

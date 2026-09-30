@@ -43,7 +43,12 @@ machines, secrets, or tunnels is ever committed — the repo ships only placehol
   and takes no parameter to raise it, so a pane used to attach showing roughly one screen of history.
   The rows above that window are fetched once per pane from `read-screen --scrollback` and painted as
   plain (unstyled — cmux has no styles for them) rows on top of the live grid, joined to it by content
-  rather than by counting rows, so nothing is duplicated or swallowed at the seam. A **full-screen TUI**
+  rather than by counting rows, so nothing is duplicated or swallowed at the seam. The join tolerates
+  row formatting that differs between cmux builds (whitespace, wide-char spacers, a re-wrapped
+  successor row); if it still cannot find the seam it splices by row count and says so (`approx`)
+  rather than dropping the history. The 240 is never assumed either — each bridge learns its cmux's
+  replay cap from what it measures. A pane whose first history request was skipped or failed keeps
+  retrying (throttled, backing off) until it gets an answer. A **full-screen TUI**
   is the one case with no history to show: cmux defines an alternate screen as having zero scrollback,
   and what `read-screen` reports there belongs to the primary buffer behind the TUI.
 - **Workspaces can be named.** cmux labels an unnamed workspace after whatever tab is in front of it,
@@ -187,9 +192,18 @@ the ⊞ menu could only ever error, and why they are gone.
 ## Requirements
 
 - **Node 18+** (uses global `fetch`; no dependencies to install).
-- **cmux** installed on each machine you want to mirror. The bridge defaults to the macOS app's CLI at
-  `/Applications/cmux.app/Contents/Resources/bin/cmux` — override with `CMUX_BIN` if yours lives
-  elsewhere.
+- **cmux 0.64.19 or newer** installed on each machine you want to mirror. The bridge defaults to the
+  macOS app's CLI at `/Applications/cmux.app/Contents/Resources/bin/cmux` — override with `CMUX_BIN`
+  if yours lives elsewhere.
+  - 0.64.19 is the earliest build the cmux behaviours this code relies on were measured against
+    (`terminal.replay`'s `render_grid` with `scrollback_spans` and `active_screen`, `read-screen
+    --scrollback --lines N`, UUID-addressed rpc params); later notes in the code name 0.64.20, 0.64.22
+    and 0.64.25. The floor lives in `lib/cmux-version.js` (`MIN_CMUX_VERSION`).
+  - The bridge runs `cmux --version` at boot (and every 10 minutes after, since cmux updates itself),
+    logs `cmux: <version> (>= 0.64.19)` — or a `WARNING` line when it is older or unreadable — and
+    reports `{version, min, supported}` as `capabilities.cmux` in `/cmux/tree`. The page then shows
+    `live · cmux X < 0.64.19 (update cmux)` in its status line. An older cmux is **not refused**: most
+    things work (the bridge already retries flags older CLIs reject), but it is unverified.
 - **macOS** for the browser-surface mirror (frames are recompressed with the built-in `/usr/bin/sips`;
   terminal mirroring itself has no macOS-specific dependency).
 
@@ -535,7 +549,7 @@ are marked no-store; the `*stream*` endpoints are long-lived SSE.
 | `POST /api/cmux/resize-pane` | `{machine, workspace, paneA, paneB, axis, target}` — drag a divider: `paneA`/`paneB` are the panes either side of it and `target` is where it should land (0..1 of the layout box) |
 | `POST /api/cmux/equalize` | `{machine, workspace}` — even out every split |
 | `GET /api/cmux/screen?machine=&surface=&lines=` | plain-text snapshot / scrollback paging |
-| `GET /api/cmux/history?machine=&surface=&rows=` | the scrollback **above** the render-grid, as plain rows — cmux caps `terminal.replay` at 240 scrollback rows and takes no parameter to raise it, so this is what makes a pane remember `rows` (default 2000) instead of one screen. Answers `{rows, aligned, styledRows, bufferRows}`; `complete:true` when the replay window already reaches the top of the buffer (no read is paid for), `altScreen:true` for a full-screen TUI, where cmux defines the scrollback as empty and the history behind it belongs to another screen. Fetched once per pane, never on the streaming frames |
+| `GET /api/cmux/history?machine=&surface=&rows=` | the scrollback **above** the render-grid, as plain rows — cmux caps `terminal.replay` at 240 scrollback rows and takes no parameter to raise it, so this is what makes a pane remember `rows` (default 2000) instead of one screen. Answers `{rows, aligned, styledRows, scrollbackRows, bufferRows}`; `aligned:false, approx:true` when the seam could not be found by content and was placed by row count; `complete:true` when nothing sits above the replay window (the read is skipped only once the bridge has learned its cmux's replay cap), `altScreen:true` for a full-screen TUI, where cmux defines the scrollback as empty and the history behind it belongs to another screen. Fetched once per pane (retried until answered), never on the streaming frames |
 | `GET /api/cmux/stream?machine=&surface=` | SSE of base64 plain-text screen frames, emitted on change |
 | `POST /api/cmux/send` | `{machine, surface, text, submit}` — type text, optionally press enter |
 | `POST /api/cmux/key` | `{machine, surface, key}` — press one allow-listed key |
