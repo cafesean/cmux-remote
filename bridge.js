@@ -967,6 +967,7 @@ function runSendCommand(args, cb, dispatched, tries) {
 }
 const runSendCommandP = (args) => new Promise((resolve) => runSendCommand(args, resolve, false, 0));
 
+const SUBMIT_SETTLE_MS = Number(process.env.CMUX_SUBMIT_SETTLE_MS ?? 150);
 function cmuxSend(req, res) {
   cmuxReadBody(req, (b) => {
     if (!b) return send(res, 400, { error: 'bad_json' });
@@ -997,6 +998,10 @@ function cmuxSend(req, res) {
         if (e) return answer(502, { error: e.dispatched ? 'text_command_unconfirmed' : 'send_failed', detail: e.detail });
       }
       if (b.submit) {
+        // Enter fired right on the heels of the text lands inside the TUI's paste-burst window and
+        // is read as a newline, not a submit (a separate soft-key Enter, seconds later, works).
+        // Let the text settle first — only when there was text to settle.
+        if (text) await new Promise((r) => setTimeout(r, SUBMIT_SETTLE_MS));
         const e = await runSendCommandP(['send-key', '--surface', surface, '--', 'enter']);
         if (e) return answer(502, { error: 'submit_failed_text_inserted', detail: e.detail });
       }
