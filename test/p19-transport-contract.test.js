@@ -156,7 +156,7 @@ function cases() {
     '/api/cmux/browser/scroll': [post('/api/cmux/browser/scroll', { surface: I.sfA1, dy: 10 })],
     '/api/cmux/browser/nav': [post('/api/cmux/browser/nav', { surface: I.sfA1, action: 'back' })],
     '/api/cmux/browser/zoom': [post('/api/cmux/browser/zoom', { surface: I.sfA1, dir: 'in' })],
-    '/api/cmux/browser/hideframe': [post('/api/cmux/browser/hideframe', { surface: I.sfA1, fx: 0.5, fy: 0.1 })],
+    '/api/cmux/browser/unhideframe': [post('/api/cmux/browser/unhideframe', { surface: I.sfA1 })],
   };
 }
 
