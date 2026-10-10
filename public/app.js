@@ -680,6 +680,7 @@
       visible: document.visibilityState === 'visible' && state.tabType === 'terminal',
     });
     renderSideBadge(snap);
+    chimeOnChange(snap);   // p25
   }
   const loadTree = loadFleet;   // every existing caller keeps its name
 
@@ -3261,6 +3262,70 @@
       return jumpTo({ machine: req.machine, surfaceId: sid }) ? { ok: true } : { ok: false, reason: 'that tab is no longer in the tree' };
     } catch (e) { return { ok: false, reason: (e && e.message) || 'jump failed' }; }
   }
+
+  // ---- In-app chime (p25) -----------------------------------------------------
+  // While the app is open, a tab that turns `waiting` (amber) or `done` (blue) plays a short chime —
+  // two rising notes for waiting, one soft note for done. Push alerts cover the app being closed.
+  // iOS keeps audio locked until a user gesture, so the AudioContext is created/resumed on the first
+  // tap anywhere. Toggle in ⚙, default ON. The first beat after load only records states (no chime).
+  const elChimeToggle = $('chimeToggle');
+  let chimeOn = true;
+  try { chimeOn = localStorage.getItem('cmux_chime') !== 'off'; } catch (_) {}
+  let audioCtx = null, chimePrev = null;
+  const unlockAudio = () => {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audioCtx) audioCtx = new AC();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      // a silent one-sample buffer completes the unlock on iOS
+      const b = audioCtx.createBuffer(1, 1, 22050), src = audioCtx.createBufferSource();
+      src.buffer = b; src.connect(audioCtx.destination); src.start(0);
+    } catch (_) {}
+  };
+  document.addEventListener('pointerdown', unlockAudio, { capture: true, passive: true });
+  function tone(freq, at, dur, gain) {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(gain, at + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(at); o.stop(at + dur + 0.02);
+  }
+  function playChime(kind) {
+    if (!chimeOn || !audioCtx || audioCtx.state !== 'running') return false;
+    const t = audioCtx.currentTime + 0.01;
+    if (kind === 'waiting') { tone(784, t, 0.18, 0.22); tone(1175, t + 0.16, 0.28, 0.22); }   // G5 → D6
+    else tone(659, t, 0.32, 0.16);                                                          // E5
+    return true;
+  }
+  window.__cmuxChime = { play: playChime, onChange: (s) => chimeOnChange(s) };   // for the desktop proof
+  function chimeOnChange(snap) {
+    if (!snap) return;
+    const now = new Map();
+    for (const m of (snap.machines || snap.fleet || [])) for (const w of (m.workspaces || [])) for (const t of (w.tabs || [])) {
+      now.set(m.id + '|' + t.id, t.state);
+    }
+    const prev = chimePrev; chimePrev = now;
+    if (!prev || document.visibilityState !== 'visible') return;
+    let kind = null;
+    for (const [k, st] of now) {
+      if (st === prev.get(k)) continue;
+      if (st === 'waiting') { kind = 'waiting'; break; }
+      if (st === 'done') kind = 'done';
+    }
+    if (kind) playChime(kind);
+  }
+  function renderChime() { if (elChimeToggle) { elChimeToggle.textContent = chimeOn ? 'On' : 'Off'; elChimeToggle.setAttribute('aria-pressed', String(chimeOn)); } }
+  if (elChimeToggle) elChimeToggle.onclick = (e) => {
+    e.stopPropagation();
+    chimeOn = !chimeOn;
+    try { localStorage.setItem('cmux_chime', chimeOn ? 'on' : 'off'); } catch (_) {}
+    renderChime(); unlockAudio();
+    if (chimeOn) setTimeout(() => playChime('done'), 60);   // a sample, so the volume can be judged
+  };
+  renderChime();
 
   // ---- Phone alerts (p20) ----------------------------------------------------
   // Web Push: the server polls cmux's notification list and pushes each new one. This side only
