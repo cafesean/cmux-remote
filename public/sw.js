@@ -20,7 +20,7 @@
 // v26: p22 — quick keys show only while the text box has focus.
 // v27: p25 — in-app chime toggle in ⚙; push alerts explicitly not silent.
 // v28: p26 — push receipts (/__lastpush) + ⚙ Send test; p27 Chrome remote-debugging prompt banner.
-const CACHE = 'cmux-shell-v32';
+const CACHE = 'cmux-shell-v33';
 const SHELL = ['/', '/app.js', '/sidebar.js'];
 
 self.addEventListener('install', (e) => {
