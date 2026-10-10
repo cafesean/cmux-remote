@@ -1834,8 +1834,17 @@
   function setUrl(u) { if (u && document.activeElement !== elBurl) elBurl.value = u; }
   // Tap -> fraction of the displayed image (which IS the content box: max-width/height keeps aspect,
   // no internal letterbox). The bridge turns (fx,fy) into a click at (fx*innerWidth, fy*innerHeight).
-  function bshotFrac(px, py) {
+  // The image fills #bview with object-fit:contain (p37: a zoomed-in frame is SMALLER than the view
+  // and must be scaled up). So the picture's own rect = the contain-fit inside the element box.
+  function bshotRect() {
     const b = elBshot.getBoundingClientRect();
+    const nw = elBshot.naturalWidth, nh = elBshot.naturalHeight;
+    if (!b.width || !b.height || !nw || !nh) return b;
+    const sc = Math.min(b.width / nw, b.height / nh), w = nw * sc, h = nh * sc;
+    return { left: b.left + (b.width - w) / 2, top: b.top + (b.height - h) / 2, width: w, height: h };
+  }
+  function bshotFrac(px, py) {
+    const b = bshotRect();
     if (!b.width || !b.height) return null;
     return { fx: Math.min(1, Math.max(0, (px - b.left) / b.width)), fy: Math.min(1, Math.max(0, (py - b.top) / b.height)) };
   }
@@ -1890,11 +1899,32 @@
     es.onmessage = (e) => { if (e.data) bFrame(e.data); };
     // EventSource auto-reconnects on error; stay quiet so a blip doesn't flash an error.
   }
+  // Page zoom (p37). cmux's own `browser zoom` only changes render sharpness under viewport emulation
+  // (devicePixelRatio 2 -> 2.4), never layout or text size, so A+/A- looked random. Zoom is done by
+  // laying the page out NARROWER (A+: text bigger, page reflows like phone zoom) or WIDER (A-: more
+  // fits) and scaling the frame to the view. Remembered per device.
+  const BZOOM_STEPS = [0.6, 0.7, 0.8, 0.9, 1, 1.15, 1.3, 1.5, 1.75];
+  let bZoom = 1;
+  try { const z = Number(localStorage.getItem('cmux_bzoom')); if (BZOOM_STEPS.includes(z)) bZoom = z; } catch (_) {}
   function browserViewportSize() {
     const b = elBview && elBview.getBoundingClientRect();
     if (!b || b.width < 200 || b.height < 200) return null;
-    return { w: Math.round(b.width), h: Math.round(b.height) };
+    // bridge accepts 200..2000 x 200..3000 CSS px
+    const w = Math.max(200, Math.min(2000, Math.round(b.width / bZoom)));
+    const h = Math.max(200, Math.min(3000, Math.round(b.height / bZoom)));
+    return { w, h };
   }
+  function bSetZoom(dir) {
+    const i = BZOOM_STEPS.indexOf(bZoom);
+    const n = BZOOM_STEPS[Math.max(0, Math.min(BZOOM_STEPS.length - 1, (i < 0 ? 4 : i) + (dir > 0 ? 1 : -1)))];
+    if (n === bZoom) { setStatus('zoom ' + Math.round(bZoom * 100) + '% (limit)'); return; }
+    bZoom = n;
+    try { localStorage.setItem('cmux_bzoom', String(n)); } catch (_) {}
+    setStatus('zoom ' + Math.round(n * 100) + '%');
+    if (state.tabType === 'browser' && state.tab) { browserStream(state.tab.id); setTimeout(refreshBrowserInfo, 800); }
+  }
+  // fill the view; object-fit keeps the aspect (set here, not in index.html, so it lands in one reload)
+  elBshot.style.width = '100%'; elBshot.style.height = '100%'; elBshot.style.objectFit = 'contain';
   // Rotation / a resized window re-lays the page out. Width only: the on-screen keyboard changes the
   // HEIGHT while typing, and re-laying the page out under the user's thumb would be worse than letterbox.
   let bvpTimer = null;
@@ -2932,7 +2962,7 @@
   function bFlushScroll() {
     bScroll.t = null;
     if (bScroll.busy) { bScroll.t = setTimeout(bFlushScroll, 60); return; }
-    const b = elBshot.getBoundingClientRect();
+    const b = bshotRect();
     const k = state.browser.h / (b.height || 1);              // display px -> page css px
     const dy = Math.round(bScroll.y * k), dx = Math.round(bScroll.x * k);
     bScroll.x = 0; bScroll.y = 0;
@@ -3028,8 +3058,8 @@
   if (elBBack) elBBack.onclick = () => bAction('nav', { action: 'back' });
   if (elBFwd) elBFwd.onclick = () => bAction('nav', { action: 'forward' });
   if (elBReload) elBReload.onclick = () => bAction('nav', { action: 'reload' });
-  if (elBZoomIn) elBZoomIn.onclick = () => bAction('zoom', { dir: 'in' });
-  if (elBZoomOut) elBZoomOut.onclick = () => bAction('zoom', { dir: 'out' });
+  if (elBZoomIn) elBZoomIn.onclick = () => bSetZoom(+1);
+  if (elBZoomOut) elBZoomOut.onclick = () => bSetZoom(-1);
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
