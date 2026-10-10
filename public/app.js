@@ -1935,6 +1935,7 @@
   function exitBrowserMode() {
     closeBrowserStream();
     bhits.r = null; bhits.stale = true; bhits.hover = false; elBshot.style.cursor = '';
+    if (bFrameBar) bFrameBar.hidden = true;
     if (state.browser.urlTimer) { clearInterval(state.browser.urlTimer); state.browser.urlTimer = null; }
     state.browser.surface = null;
     document.body.classList.remove('mode-browser');
@@ -2894,6 +2895,32 @@
   syncTyping();
   if (elKbToggle) elKbToggle.remove();   // p21: no toggle — a stale cached shell may still carry it
 
+  // Cross-origin frame tapped (e.g. Google's "Sign in with Google" popup): nothing inside it can be
+  // clicked by script — cmux refuses. The bridge focused the frame, so ⇥ / ⏎ in the key row now act
+  // inside it; this bar says so and offers to hide the frame outright.
+  let bFrameBar = null;
+  function bFrameHint(f) {
+    if (!bFrameBar) {
+      bFrameBar = document.createElement('div');
+      bFrameBar.style.cssText = 'position:absolute;left:8px;right:8px;top:8px;z-index:5;display:flex;gap:8px;align-items:center;' +
+        'padding:8px 10px;border-radius:10px;background:#1d2330;color:#e6e6e6;font:13px/1.3 var(--mono,monospace);box-shadow:0 4px 16px #0008';
+      elBview.style.position = 'relative';
+      elBview.appendChild(bFrameBar);
+    }
+    bFrameBar.innerHTML = '';
+    const msg = document.createElement('span'); msg.style.flex = '1';
+    msg.textContent = 'Embedded frame — taps can\'t reach inside. Use ⇥ then ⏎ below, or:';
+    const hide = document.createElement('button'); hide.type = 'button'; hide.textContent = 'Hide popup';
+    hide.style.cssText = 'padding:6px 10px;border-radius:8px;border:0;background:var(--accent,#4c8dff);color:#fff;font:inherit';
+    const x = document.createElement('button'); x.type = 'button'; x.textContent = '✕'; x.setAttribute('aria-label', 'Dismiss');
+    x.style.cssText = 'padding:6px 8px;border-radius:8px;border:0;background:transparent;color:inherit;font:inherit';
+    const close = () => { if (bFrameBar) bFrameBar.hidden = true; };
+    hide.onclick = () => { bAction('hideframe', f); close(); };
+    x.onclick = close;
+    bFrameBar.append(msg, hide, x);
+    bFrameBar.hidden = false;
+    clearTimeout(bFrameHint.t); bFrameHint.t = setTimeout(close, 12000);
+  }
   // ---- browser mirror wiring ----
   // Live scroll queue shared by finger drags and the mouse wheel: display px are summed and sent as
   // ONE `scroll` every 100ms (cmux can only shoot ~4 frames/s, so finer batches buy nothing), and a
@@ -2938,6 +2965,7 @@
       if (gg.max < 8 && Date.now() - gg.t < 500) {           // tap -> click
         const f = bshotFrac(gg.lx, gg.ly); if (!f) return;
         bAction('tap', f).then((d) => {
+          if (d && d.frame) return bFrameHint(f);
           if (d && d.editable) { resetBtext(d.value || ''); elBtext.focus(); }   // seed with the field's current text
         });
         return;
