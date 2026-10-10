@@ -138,6 +138,7 @@ function cases() {
     '/api/cmux/new-pane': [post('/api/cmux/new-pane', { workspace: I.wsA, direction: 'right', pane: I.paneA1 })],
     '/api/cmux/split-off': [post('/api/cmux/split-off', { surface: I.sfA1, direction: 'right', workspace: I.wsA })],
     '/api/cmux/drop-surface': [post('/api/cmux/drop-surface', { workspace: I.wsA, surface: I.sfA2, pane: I.paneA1, edge: 'center' })],
+    '/api/cmux/reorder-tab': [post('/api/cmux/reorder-tab', { workspace: I.wsA, surface: I.sfA2, target: I.sfA1, place: 'before' })],
     '/api/cmux/close-pane': [post('/api/cmux/close-pane', { workspace: I.wsA, pane: I.paneA2 })],
     '/api/cmux/focus-pane': [post('/api/cmux/focus-pane', { pane: I.paneA2, workspace: I.wsA })],
     '/api/cmux/focus-surface': [post('/api/cmux/focus-surface', { surface: I.sfA1 })],
