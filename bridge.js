@@ -1605,7 +1605,12 @@ const browserShotPath = (surface) => `${os.tmpdir()}/cmux-remote-shot-${surface.
 // downscale to ≤1000px and JPEG it → a ~2.8MB PNG becomes ~100KB. Falls back to the raw PNG if sips
 // fails. browserShot returns { buf, raw } — raw = source PNG bytes (drives the big-pane cadence brake).
 const BROWSER_SHOT_MAX_DIM = 800;    // px, longest edge after downscale (phone-width retina-ish)
-const BROWSER_SHOT_JPEG_Q = '55';    // sips formatOptions: low|normal|high|best or 0-100
+// Two JPEG qualities (p31): while the user is acting (scroll/tap burst) frames go out at LOW — about
+// half the bytes of HIGH, still readable — and once the page settles the same picture is re-sent
+// once at HIGH. Measured on a 1016x1064 text page: q55 250KB, q35 ~160KB, q30 143KB. (WebP was
+// tried: sips can't write it and cwebp is not a zero-dep option; at equal legibility it saved ~7%.)
+const BROWSER_SHOT_JPEG_Q = '60';      // settled frame (sips formatOptions 0-100)
+const BROWSER_SHOT_JPEG_Q_MOVING = '35';
 // Actions don't carry frames (they ack instantly); instead every action stamps its surface here and
 // the SSE loop BURSTS (350ms ticks) for a short window after — visual feedback lands fast exactly
 // when the user just did something, without paying a screenshot inside the action round-trip.
@@ -1629,7 +1634,7 @@ const VIEWPORT_RESET_GRACE_MS = 4000;
 const viewportDim = (v, lo, hi) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : null; };
 // shrink=false keeps the frame at its native size: `sips -Z` UPSCALES a smaller image to the cap
 // (a 390x698 phone frame became 2288x4096 / 640KB), so a phone-viewport frame must skip it.
-function browserShot(surface, shrink = true) {   // -> Promise<{buf:Buffer, raw:number}|null>
+function browserShot(surface, shrink = true, q = BROWSER_SHOT_JPEG_Q) {   // -> Promise<{buf, raw, src}|null>
   const out = browserShotPath(surface);
   const jpg = out.replace(/\.png$/, '.jpg');
   return new Promise((resolve) => cmux(['browser', surface, 'screenshot', '--out', out], (err) => {
@@ -1637,9 +1642,11 @@ function browserShot(surface, shrink = true) {   // -> Promise<{buf:Buffer, raw:
     fs.readFile(out, (e, png) => {
       if (e) return resolve(null);
       execFile('/usr/bin/sips', [...(shrink ? ['-Z', String(BROWSER_SHOT_MAX_DIM)] : []), '-s', 'format', 'jpeg',
-        '-s', 'formatOptions', BROWSER_SHOT_JPEG_Q, out, '--out', jpg], { timeout: 8000 }, (se) => {
-        if (se) return resolve({ buf: png, raw: png.length });   // sips failed → raw PNG fallback
-        fs.readFile(jpg, (je, jbuf) => resolve(je ? { buf: png, raw: png.length } : { buf: jbuf, raw: png.length }));
+        '-s', 'formatOptions', q, out, '--out', jpg], { timeout: 8000 }, (se) => {
+        // src = hash of the SOURCE pixels, so the same picture at two qualities counts as unchanged
+        const src = crypto.createHash('md5').update(png).digest('hex');
+        if (se) return resolve({ buf: png, raw: png.length, src });   // sips failed → raw PNG fallback
+        fs.readFile(jpg, (je, jbuf) => resolve(je ? { buf: png, raw: png.length, src } : { buf: jbuf, raw: png.length, src }));
       });
     });
   }, 12000));
@@ -1693,7 +1700,7 @@ function cmuxBrowserInfo(res, surface) {
 function cmuxBrowserStream(req, res, surface, vw, vh) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   res.write(': connected\n\n');
-  let lastHash = null, alive = true, busy = false, again = false, idleTicks = 0, lastRaw = 0, timer = null;
+  let lastHash = null, alive = true, busy = false, again = false, idleTicks = 0, lastRaw = 0, timer = null, sentLow = false;
   const phone = !!(vw && vh);
   browserViewers.set(surface, (browserViewers.get(surface) || 0) + 1);
   const pending = browserViewportReset.get(surface);
@@ -1713,14 +1720,17 @@ function cmuxBrowserStream(req, res, surface, vw, vh) {
     if (busy) { again = true; return; }
     busy = true;
     // A phone frame is already phone-sized: JPEG it, never resample it.
-    browserShot(surface, !phone).then((shot) => {
+    const moving = Date.now() - (browserLastAction.get(surface) || 0) < 3000;
+    browserShot(surface, !phone, moving ? BROWSER_SHOT_JPEG_Q_MOVING : BROWSER_SHOT_JPEG_Q).then((shot) => {
       busy = false;
       if (!alive) return;
       if (!shot) { res.write('event: error\ndata: cmux_failed\n\n'); return schedule(); }
       lastRaw = shot.raw;
-      const h = crypto.createHash('md5').update(shot.buf).digest('hex');
-      if (h !== lastHash) { lastHash = h; idleTicks = 0; res.write('data: ' + shot.buf.toString('base64') + '\n\n'); }
-      else idleTicks++;
+      if (shot.src !== lastHash || (sentLow && !moving)) {   // new picture, or the sharp re-send
+        if (shot.src !== lastHash) idleTicks = 0;
+        lastHash = shot.src; sentLow = moving;
+        res.write('data: ' + shot.buf.toString('base64') + '\n\n');
+      } else idleTicks++;
       if (again) { again = false; return tick(); }          // an action landed mid-shot: shoot again now
       schedule();
     });

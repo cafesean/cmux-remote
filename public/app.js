@@ -1774,7 +1774,7 @@
       g.max = Math.max(g.max, Math.abs(e.clientX - g.sx), Math.abs(e.clientY - g.sy));
     }, { passive: true });
     const end = (e) => {
-      const gg = g; g = null;
+      const gg = g; g = null; bDragging = false;
       if (!gg || state.tabType !== 'terminal') return;
       if (gg.max >= 8 || Date.now() - gg.t >= 500) return;    // a scroll or a long-press (text select)
       // takeComposer, not focusPane: tapping the pane is what REVEALS the box, so the same gesture
@@ -1794,7 +1794,7 @@
   // ---- browser surface: a refreshing screenshot you can tap / scroll / type into ----
   // Optimistic scroll: while dragging, the image is translated locally so it follows the finger
   // instantly; every REAL frame that arrives resets the shift (the remote page has caught up).
-  let bshotShift = 0;
+  let bshotShift = 0, bDragging = false;
   function shiftBshot(px) { bshotShift = px; elBshot.style.transform = px ? 'translateY(' + px + 'px)' : ''; }
   // Desktop hand cursor: the mirror is an image, so the browser can't know what is a link. After each
   // changed frame the clickable areas are fetched ONCE (only while a mouse hovers the image) and the
@@ -1828,7 +1828,7 @@
     if (!b64) return;
     bhits.stale = true; if (bhits.hover) bFetchHits();
     if (elBspin) elBspin.hidden = true;
-    shiftBshot(0);
+    if (!bDragging) shiftBshot(0);   // mid-drag the remote hasn't scrolled yet (sent on release)
     // frames arrive as JPEG (sips-recompressed) or PNG (fallback) — sniff by base64 magic
     elBshot.src = 'data:image/' + (b64.charAt(0) === '/' ? 'jpeg' : 'png') + ';base64,' + b64;
   }
@@ -2907,10 +2907,10 @@
     elBshot.addEventListener('pointermove', (e) => {
       if (!g) return;
       g.max = Math.max(g.max, Math.abs(e.clientX - g.sx), Math.abs(e.clientY - g.sy));
-      if (g.max >= 8) shiftBshot(g.base + (e.clientY - g.sy));   // image follows the finger instantly
+      if (g.max >= 8) { bDragging = true; shiftBshot(g.base + (e.clientY - g.sy)); }   // image follows the finger instantly
     });
     const end = (e) => {
-      const gg = g; g = null;
+      const gg = g; g = null; bDragging = false;
       if (!gg || state.tabType !== 'browser') return;
       if (gg.max < 8 && Date.now() - gg.t < 500) {           // tap -> click
         const f = bshotFrac(e.clientX, e.clientY); if (!f) return;
@@ -2924,11 +2924,12 @@
       }
     };
     elBshot.addEventListener('pointerup', end);
-    elBshot.addEventListener('pointercancel', () => { g = null; });
+    elBshot.addEventListener('pointercancel', () => { g = null; bDragging = false; shiftBshot(0); });
   })();
   // Mouse wheel / trackpad scroll (desktop). Only click-drag scrolled before, so a trackpad did
-  // nothing. Deltas are summed and sent every 90ms (one cmux call per batch, not per wheel event);
-  // the image shifts locally right away and the next real frame resets the shift.
+  // nothing. Deltas are summed and sent every 90ms (one cmux call per batch, not per wheel event).
+  // NO local image shift here: frames land mid-scroll and each one reset the shift, so the picture
+  // jumped up and then snapped back down (p31). The image moves only with real frames.
   (() => {
     let acc = { x: 0, y: 0 }, t = null;
     const flush = () => {
@@ -2944,7 +2945,6 @@
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? (elBshot.getBoundingClientRect().height || 600) : 1;
       acc.y += e.deltaY * unit; acc.x += e.deltaX * unit;
-      shiftBshot(bshotShift - e.deltaY * unit);
       if (!t) t = setTimeout(flush, 90);
     }, { passive: false });
   })();
