@@ -756,7 +756,9 @@
   const tabDrag = { g: null, justDropped: false };
   (() => {
     const st = document.createElement('style');
-    st.textContent = '.tab{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}.tab.dragging{opacity:.9;z-index:3;position:relative;box-shadow:0 4px 14px rgba(0,0,0,.5);border-color:var(--accent)}'
+    st.textContent = '.tab.wait .dot{background:var(--warn);box-shadow:0 0 6px var(--warn);animation:sidepulse 1.2s ease-in-out infinite}'
+      + '.tab.fin .dot{background:var(--accent);box-shadow:0 0 6px var(--accent)}'
+      + '.tab{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}.tab.dragging{opacity:.9;z-index:3;position:relative;box-shadow:0 4px 14px rgba(0,0,0,.5);border-color:var(--accent)}'
       + '.tab.drop-before{box-shadow:inset 3px 0 0 var(--accent)}.tab.drop-after{box-shadow:inset -3px 0 0 var(--accent)}';
     document.head.appendChild(st);
   })();
@@ -855,7 +857,8 @@
       const b = document.createElement('button');
       const isBrowser = t.type === 'browser';
       const isFocused = state.tab && t.id === state.tab.id;
-      b.className = 'tab' + (isFocused ? ' on' : (shown.has(t.id) ? ' vis' : '')) + (/run|need/i.test(t.status || '') ? ' run' : '') + (isBrowser ? ' browser' : '');
+      const att = t.attention === 'waiting' ? ' wait' : (t.attention === 'done' ? ' fin' : '');   // p24
+      b.className = 'tab' + (isFocused ? ' on' : (shown.has(t.id) ? ' vis' : '')) + (att || (/run|need/i.test(t.status || '') ? ' run' : '')) + (isBrowser ? ' browser' : '');
       b.type = 'button'; b.title = t.title || t.ref || t.id;
       const dot = document.createElement('span'); dot.className = 'dot'; b.appendChild(dot);
       b.dataset.id = t.id;   // addressable from tests and from Radar's Jump
