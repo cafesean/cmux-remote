@@ -199,25 +199,11 @@ test('AC1 · a booted server.js answers GET /inbox.js with 200 and the module bo
 // AC 2 (tier-1) — THE MOUNT CONTRACT, across all three files
 // ================================================================================================
 
-test('AC2 · index.html carries a versioned /inbox.js tag in the feature-script block, BEFORE app.js', () => {
-  const tag = /<script src="\/inbox\.js\?v=[^"]+"><\/script>/.exec(SRC.index);
-  assert.ok(tag, 'index.html must load /inbox.js with a ?v= cache-busting query');
-  const at = SRC.index.indexOf(tag[0]);
-  const appAt = SRC.index.search(/<script src="\/app\.js\?v=[^"]+"><\/script>/);
-  assert.ok(appAt !== -1, 'the app.js tag must still be there');
-  assert.ok(at < appAt, 'the inbox tag must come BEFORE app.js, or window.cmuxInbox is undefined when app boot runs');
-  // The feature-script block: the tag sits among the other client modules, not orphaned in <head>.
-  const radarAt = SRC.index.search(/<script src="\/radar\.js\?v=[^"]+"><\/script>/);
-  assert.ok(radarAt !== -1 && at > radarAt, 'the inbox tag belongs in the feature-script block beside radar.js');
-});
-
-test('AC2 · index.html has an inbox control beside Files/Git/Radar', () => {
-  assert.match(SRC.index, /id="inboxBtn"/, 'the toolbar needs an inbox chip');
-  const inboxAt = SRC.index.indexOf('id="inboxBtn"');
-  const radarAt = SRC.index.indexOf('id="radarBtn"');
-  const filesAt = SRC.index.indexOf('id="filesBtn"');
-  assert.ok(filesAt !== -1 && radarAt !== -1);
-  assert.ok(inboxAt > filesAt && inboxAt > radarAt, 'the chip sits in the same toolbar group as Files/Git/Radar');
+// p20 (2026-10-10): the radar + inbox chips are off the toolbar and their scripts no longer load.
+// inbox.js stays in the repo (and these unit tests still cover it) — only the shell wiring is gone.
+test('p20 · index.html no longer loads inbox.js/radar.js or renders their chips', () => {
+  assert.doesNotMatch(SRC.index, /<script src="\/(inbox|radar)\.js/);
+  assert.doesNotMatch(SRC.index, /id="(inboxBtn|radarBtn)"/);
 });
 
 test('AC2 · inbox.js assigns the cmuxInbox factory in the cmuxRadar shape', () => {
@@ -270,34 +256,10 @@ test('AC2 · server.js routes /inbox.js beside the other client modules', () => 
 // AC 3 (tier-1) — SW KEYS AS THEY REALLY ARE
 // ================================================================================================
 
-test('AC3 · sw.js precaches the BARE /inbox.js, matches the PATHNAME, and bumps the cache version', () => {
-  // The precache entry is unversioned. The fetch branch strips requests to url.pathname and
-  // cache-matches by pathname, so a query-bearing key would leave the offline fallback nothing to
-  // find and the first offline load would 503.
+test('p20 · sw.js no longer precaches inbox.js/radar.js', () => {
   const shell = /const SHELL = \[([^\]]*)\]/.exec(SRC.sw);
   assert.ok(shell, 'sw.js must still declare a SHELL precache list');
-  const entries = shell[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
-  assert.ok(entries.includes('/inbox.js'), `the BARE /inbox.js must be precached; got ${JSON.stringify(entries)}`);
-  assert.ok(!entries.some((e) => e.indexOf('inbox.js?') !== -1), 'no query-bearing inbox key in the precache list');
-
-  // Precaching alone leaves the file sitting unused in Cache Storage — the fetch branch is the only
-  // thing that ever reads it back.
-  const branch = /if \(path === '\/app\.js'[^)]*\)\s*\{/.exec(SRC.sw);
-  assert.ok(branch, 'the script fetch branch must still exist');
-  assert.match(branch[0], /path === '\/inbox\.js'/, "the PATHNAME '/inbox.js' must be in the script fetch branch");
-
-  // Version bumped past the branch base (main ships cmux-shell-v14) — without it the old shell keeps
-  // serving an index.html that has never heard of the inbox.
-  const cache = /const CACHE = '([^']+)'/.exec(SRC.sw);
-  assert.ok(cache, 'sw.js must still declare a CACHE name');
-  const n = /^cmux-shell-v(\d+)$/.exec(cache[1]);
-  assert.ok(n, `unexpected cache name ${cache[1]}`);
-  assert.ok(Number(n[1]) > 14, `the cache version must be bumped past the base v14; got ${cache[1]}`);
-
-  // The ?v= lives in the index.html tag and NOWHERE else.
-  assert.ok(SRC.sw.indexOf('inbox.js?') === -1, 'sw.js must never carry a versioned inbox key');
-  assert.ok(SRC.server.indexOf('inbox.js?') === -1, 'server.js routes the bare pathname');
-  assert.equal((SRC.index.match(/inbox\.js\?v=/g) || []).length, 1, 'exactly one versioned inbox reference, in index.html');
+  assert.doesNotMatch(shell[1], /inbox\.js|radar\.js/);
 });
 
 // ================================================================================================
