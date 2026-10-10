@@ -1896,7 +1896,7 @@
     if (TOKEN) url += '&token=' + encodeURIComponent(TOKEN);   // EventSource can't set headers
     let es; try { es = new EventSource(url); } catch (_) { return; }
     state.browser.es = es;
-    es.onmessage = (e) => { if (e.data) bFrame(e.data); };
+    es.onmessage = (e) => { state.browser.lastFrame = Date.now(); if (e.data) bFrame(e.data); };
     // EventSource auto-reconnects on error; stay quiet so a blip doesn't flash an error.
   }
   // Page zoom (p37). cmux's own `browser zoom` only changes render sharpness under viewport emulation
@@ -1937,6 +1937,20 @@
       if (vp && Math.abs(vp.w - (state.browser.vpw || 0)) > 8) { browserStream(state.tab.id); setTimeout(refreshBrowserInfo, 800); }
     }, 400);
   });
+  // After coming back to the app the stream can be silently dead (iOS dropped the connection while
+  // backgrounded): actions then 'work' but no frame ever shows, so nothing seems to scroll. One check
+  // per action: no frame within 4s and the EventSource is not OPEN -> reopen it.
+  let bWatchT = null;
+  function bWatchFrames() {
+    if (bWatchT) return;
+    const t0 = Date.now();
+    bWatchT = setTimeout(() => {
+      bWatchT = null;
+      const es = state.browser.es;
+      if (state.tabType !== 'browser' || !state.tab || document.hidden) return;
+      if ((state.browser.lastFrame || 0) < t0 && (!es || es.readyState !== 1)) browserStream(state.tab.id);
+    }, 4000);
+  }
   function closeBrowserStream() { if (state.browser.es) { try { state.browser.es.close(); } catch (_) {} state.browser.es = null; } }
 
   // Refresh URL bar + viewport dims. Polled (not one-shot) so a fresh tab settling from about:blank,
@@ -1965,6 +1979,8 @@
   function exitBrowserMode() {
     closeBrowserStream();
     bhits.r = null; bhits.stale = true; bhits.hover = false; elBshot.style.cursor = '';
+    if (bScroll.t) { clearTimeout(bScroll.t); bScroll.t = null; }
+    bScroll.x = 0; bScroll.y = 0; bScroll.busy = false;
     if (bToast) bToast.hidden = true;
     if (state.browser.urlTimer) { clearInterval(state.browser.urlTimer); state.browser.urlTimer = null; }
     state.browser.surface = null;
@@ -2954,21 +2970,26 @@
   // Live scroll queue shared by finger drags and the mouse wheel: display px are summed and sent as
   // ONE `scroll` every 100ms (cmux can only shoot ~4 frames/s, so finer batches buy nothing), and a
   // batch is never sent while the previous one is still in flight (no pile-up behind a slow call).
-  const bScroll = { x: 0, y: 0, t: null, busy: false };
-  function bQueueScroll(dyDisp, dxDisp) {
+  const bScroll = { x: 0, y: 0, t: null, busy: false, since: 0, at: null };
+  function bQueueScroll(dyDisp, dxDisp, at) {
     bScroll.y += dyDisp; bScroll.x += dxDisp || 0;
+    if (at) bScroll.at = at;
     if (!bScroll.t) bScroll.t = setTimeout(bFlushScroll, 100);
   }
   function bFlushScroll() {
     bScroll.t = null;
-    if (bScroll.busy) { bScroll.t = setTimeout(bFlushScroll, 60); return; }
+    // a request stuck >3s (network paused while the app was in the background) must not block every
+    // later scroll forever — drop the wait and carry on
+    if (bScroll.busy && Date.now() - bScroll.since < 3000) { bScroll.t = setTimeout(bFlushScroll, 60); return; }
     const b = bshotRect();
     const k = state.browser.h / (b.height || 1);              // display px -> page css px
     const dy = Math.round(bScroll.y * k), dx = Math.round(bScroll.x * k);
     bScroll.x = 0; bScroll.y = 0;
     if (Math.abs(dy) < 2 && Math.abs(dx) < 2) return;
-    bScroll.busy = true;
-    bAction('scroll', { dy, dx }).finally(() => { bScroll.busy = false; });
+    bScroll.busy = true; bScroll.since = Date.now();
+    const at = bScroll.at || { fx: 0.5, fy: 0.5 };
+    bAction('scroll', { dy, dx, fx: at.fx, fy: at.fy }).finally(() => { bScroll.busy = false; });
+    bWatchFrames();
   }
   // Tap vs drag on the screenshot: a small, quick press = a click at that point; a drag scrolls the
   // real page as the finger moves, plus a short momentum flick on release (like a native swipe).
@@ -2986,7 +3007,7 @@
       const dy = g.ly - e.clientY, now = Date.now(), dt = Math.max(1, now - g.vt);
       g.v = 0.7 * (dy / dt) + 0.3 * g.v;                      // smoothed px/ms, finger-up = positive
       g.vt = now; g.lx = e.clientX; g.ly = e.clientY;
-      bQueueScroll(dy, 0);
+      bQueueScroll(dy, 0, bshotFrac(g.sx, g.sy));
     });
     const end = () => {
       const gg = g; g = null;
@@ -3013,7 +3034,7 @@
       if (state.tabType !== 'browser') return;
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? (elBshot.getBoundingClientRect().height || 600) : 1;
-      bQueueScroll(e.deltaY * unit, e.deltaX * unit);
+      bQueueScroll(e.deltaY * unit, e.deltaX * unit, bshotFrac(e.clientX, e.clientY));
     }, { passive: false });
   })();
   // Local-echo typing: keystrokes stay in #btext (instant); the remote field syncs on a 350ms debounce.
