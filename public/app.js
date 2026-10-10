@@ -59,7 +59,7 @@
   const elText = $('text'), elSend = $('send'), elRefresh = $('refresh'), elFilesBtn = $('filesBtn');
   const elRadarBtn = $('radarBtn'), elInboxBtn = $('inboxBtn');
   const elWsChip = $('wsChip'), elWsLabel = $('wsLabel'), elHost = $('hostLabel');
-  const elKeys = $('keys'), elKbToggle = $('kbToggle'), elHint = $('hint');
+  const elKeys = $('keys'), elKbToggle = $('kbToggle'), elHint = $('hint'), elKStatus = $('kstatus');
   const elModeCompose = $('modeCompose'), elModeLive = $('modeLive');
   const elFooter = document.querySelector('footer'), elModeSeg = $('modeSeg'), elGitBtn = $('gitBtn');
   // Built in JS, not in index.html — see the note in createView about the cache-first shell. Every
@@ -175,12 +175,14 @@
   }
   function setStatus(txt, err, ms) {
     if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
-    if (!txt) { elStatus.hidden = true; return; }
+    if (!txt) { elStatus.hidden = true; if (elKStatus) elKStatus.hidden = true; return; }
     // A machine on a cmux older than the bridge's verified floor says so on its steady "live" state —
     // the one status that stays up — so short history etc. can be read against it. No toast.
     if (txt === 'live') { const n = cmuxCompatNote(state.caps[state.machine]); if (n) { txt = 'live · ' + n; err = true; } }
     elStatus.hidden = false; elStatus.textContent = txt; elStatus.classList.toggle('err', !!err);
-    if (ms) statusTimer = setTimeout(() => { elStatus.hidden = true; statusTimer = null; }, ms);
+    // p21: terminal mode shows status in the key bar above the input (index.html hides the overlay).
+    if (elKStatus) { elKStatus.hidden = false; elKStatus.textContent = txt; elKStatus.title = txt; elKStatus.classList.toggle('err', !!err); }
+    if (ms) statusTimer = setTimeout(() => { elStatus.hidden = true; if (elKStatus) elKStatus.hidden = true; statusTimer = null; }, ms);
   }
 
   // ---- render: delta-patch the colored grid ----
@@ -2702,29 +2704,36 @@
   });
   elText.addEventListener('input', autogrow);
 
-  // Fire every special key on pointerdown so a press registers the INSTANT it lands — no ~click delay,
-  // and no touch→mouse double-fire (Pointer Events unify touch + mouse into one path, firing once).
-  // Arrows additionally hold-to-repeat; the stop() is idempotent so intervals never stack or leak.
+  // p21: the quick keys are one sideways-scrolling strip, always on. A press can therefore be a
+  // scroll, so a key fires on RELEASE unless the finger moved or the browser took the gesture over
+  // (pointercancel). Arrows still repeat when held still. pointerdown is preventDefault-ed so the
+  // textarea keeps focus and the phone keyboard stays up; panning is governed by touch-action: pan-x.
   elKeys.querySelectorAll('button[data-key]').forEach((b) => {
     const key = b.dataset.key;
     const arrow = b.classList.contains('arrow');
-    let iv = null;
-    const stop = () => { if (iv) { clearInterval(iv); iv = null; } };
-    const down = (e) => {
+    let g = null;
+    const clear = () => {
+      if (g) { clearTimeout(g.hold); clearInterval(g.iv); }
+      g = null; b.classList.remove('down');
+    };
+    b.addEventListener('pointerdown', (e) => {
       if (e.button != null && e.button > 0) return;   // ignore non-primary (mouse right/middle)
       e.preventDefault();
-      stop();
-      doKey(key);
-      if (arrow) iv = setInterval(() => doKey(key), 140);
-    };
-    b.addEventListener('pointerdown', down);
-    if (arrow) { b.addEventListener('pointerup', stop); b.addEventListener('pointercancel', stop); b.addEventListener('pointerleave', stop); }
-    b.onclick = null;   // pointerdown owns activation; keep click from double-firing
+      clear();
+      g = { x: e.clientX, y: e.clientY, fired: false, hold: 0, iv: 0 };
+      b.classList.add('down');
+      if (arrow) g.hold = setTimeout(() => { if (!g) return; g.fired = true; doKey(key); g.iv = setInterval(() => doKey(key), 140); }, 350);
+    });
+    b.addEventListener('pointermove', (e) => {
+      if (g && !g.fired && Math.hypot(e.clientX - g.x, e.clientY - g.y) > 10) clear();
+    });
+    b.addEventListener('pointerup', () => { if (g && !g.fired) doKey(key); clear(); });
+    b.addEventListener('pointercancel', clear);
+    b.addEventListener('pointerleave', () => { if (g && g.fired) clear(); });
+    b.onclick = null;   // pointerup owns activation; keep click from double-firing
   });
-  if (elKbToggle) elKbToggle.onclick = () => {
-    const show = elKeys.hidden; elKeys.hidden = !show;
-    elKbToggle.classList.toggle('on', show); elKbToggle.setAttribute('aria-pressed', String(show));
-  };
+  elKeys.hidden = false;
+  if (elKbToggle) elKbToggle.remove();   // p21: no toggle — a stale cached shell may still carry it
 
   // ---- browser mirror wiring ----
   // Tap vs swipe on the screenshot: a small, quick press = a click at that point; a drag = a scroll.
