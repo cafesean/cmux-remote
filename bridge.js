@@ -1856,10 +1856,17 @@ function cmuxBrowserScroll(req, res) {
     if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
     const dy = clampInt(b.dy, 5000), dx = clampInt(b.dx, 5000);
     if (!dy && !dx) return send(res, 400, { error: 'no_delta' });
-    const args = ['browser', surface, 'scroll'];
-    if (dy) args.push('--dy', String(dy));
-    if (dx) args.push('--dx', String(dx));
-    cmux(args, (err) => { if (err) return send(res, 502, { error: 'cmux_failed' }); noteAction(surface); send(res, 200, { ok: true }); });
+    // p38: `cmux browser scroll` moves only the WINDOW, so apps that scroll inside a panel (muse.ai:
+    // an overflow:auto div 8459px tall in a 1408px window) never moved. Scroll the innermost
+    // scrollable ancestor of the element under the gesture point (fx,fy; default centre) that can
+    // still move in that direction, else the document.
+    const fx = b.fx == null ? 0.5 : clamp01(b.fx), fy = b.fy == null ? 0.5 : clamp01(b.fy);
+    if (fx == null || fy == null) return send(res, 400, { error: 'bad_coords' });
+    const js = `(function(fx,fy,dx,dy){var el=document.elementFromPoint(Math.round(fx*innerWidth),Math.round(fy*innerHeight));function can(e){var cs=getComputedStyle(e);var oy=cs.overflowY,ox=cs.overflowX;var vy=dy&&(oy==='auto'||oy==='scroll'||oy==='overlay')&&e.scrollHeight>e.clientHeight+1&&(dy>0?e.scrollTop+e.clientHeight<e.scrollHeight-1:e.scrollTop>0);var vx=dx&&(ox==='auto'||ox==='scroll'||ox==='overlay')&&e.scrollWidth>e.clientWidth+1;return vy||vx;}for(var e=el;e&&e!==document.body&&e!==document.documentElement;e=e.parentElement){if(can(e)){var t0=e.scrollTop;e.scrollBy({left:dx,top:dy,behavior:'instant'});return 'el:'+(e.scrollTop-t0);}}var d=document.scrollingElement||document.documentElement;var y0=d.scrollTop;window.scrollBy({left:dx,top:dy,behavior:'instant'});return 'doc:'+(d.scrollTop-y0);})(${fx},${fy},${dx},${dy})`;
+    browserEval(surface, js).then((out) => {
+      if (out == null) return send(res, 502, { error: 'cmux_failed' });
+      noteAction(surface); send(res, 200, { ok: true, moved: String(out).replace(/"/g, '') });
+    });
   });
 }
 
