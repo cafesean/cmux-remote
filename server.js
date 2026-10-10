@@ -759,6 +759,13 @@ async function handleApi(req, res, u) {
     const qs = new URLSearchParams({ surface: u.searchParams.get('surface') || '' });
     return relay(res, bridge(m, `/cmux/browser/info?${qs}`));
   }
+  // GET hits (clickable areas for the desktop hand cursor).
+  if (req.method === 'GET' && p === '/api/cmux/browser/hits') {
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    const qs = new URLSearchParams({ surface: u.searchParams.get('surface') || '' });
+    return relay(res, bridge(m, `/cmux/browser/hits?${qs}`));
+  }
   // GET stream — SSE of base64 PNG frames (same passthrough as /api/cmux/stream).
   if (req.method === 'GET' && p === '/api/cmux/browser/stream') {
     const m = findMachine(u.searchParams.get('machine'));
