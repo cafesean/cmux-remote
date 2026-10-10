@@ -2733,6 +2733,12 @@
     b.onclick = null;   // pointerup owns activation; keep click from double-firing
   });
   elKeys.hidden = false;
+  // p22: quick keys show only while typing. A key press keeps focus (pointerdown is preventDefault-ed),
+  // so the strip does not vanish under the finger.
+  const syncTyping = () => document.body.classList.toggle('typing', document.activeElement === elText);
+  elText.addEventListener('focus', syncTyping);
+  elText.addEventListener('blur', syncTyping);
+  syncTyping();
   if (elKbToggle) elKbToggle.remove();   // p21: no toggle — a stale cached shell may still carry it
 
   // ---- browser mirror wiring ----
