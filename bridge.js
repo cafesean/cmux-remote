@@ -484,12 +484,20 @@ async function loadLayout(workspace) {
 // /=(\S+)/ stopped at the first space and turned "Needs input" into "Needs" — the status that
 // matters most, silently mangled. The value runs to the next `key=` token or end of line.
 const STATUS_VALUE_RE = /^[^=\s]+=(.*?)(?=\s+[A-Za-z_][\w.-]*=|$)/;
+// p23: list-status returns EVERY sidebar entry for the workspace, and other hooks add their own (a
+// NEEDS YOU banner writes `needs_you_<id>=⛔ NEEDS YOU · …` at priority 100, one per session, and they
+// sort first). Reading only line one turned the status into banner text, so every tab classified as
+// idle — no sidebar indicators and no tab rows. Prefer the agent's own `claude_code=` entry; else the
+// first entry that reads as Running / Needs input; else nothing.
+const AGENT_STATUS_RE = /^(running|needs input)/i;
 function parseStatusLine(out) {
   if (!out) return '';
-  const line = String(out).split('\n').map((l) => l.trim()).filter(Boolean)[0];
-  if (!line) return '';
-  const m = line.match(STATUS_VALUE_RE);
-  return m ? m[1].trim() : '';
+  const lines = String(out).split('\n').map((l) => l.trim()).filter(Boolean);
+  const valueOf = (line) => { const m = line.match(STATUS_VALUE_RE); return m ? m[1].trim() : ''; };
+  const agent = lines.find((l) => l.startsWith('claude_code='));
+  if (agent) return valueOf(agent);
+  for (const l of lines) { const v = valueOf(l); if (AGENT_STATUS_RE.test(v)) return v; }
+  return lines.length && !/^needs_you_/.test(lines[0]) ? valueOf(lines[0]) : '';
 }
 async function statusOfWorkspace(ref) {
   return parseStatusLine(await cmuxP(['list-status', '--workspace', ref], 4000));
@@ -1257,6 +1265,25 @@ function cmuxDropSurface(req, res) {
   });
 }
 
+// POST /cmux/reorder-tab { workspace, surface, target, place } — p23: drag a tab left/right in the
+// strip. `place` is 'before' | 'after' the target tab. move-surface (not reorder-surface) so a target
+// in another pane also works; cmux selects the moved tab in its pane. Answers the fresh tree.
+function cmuxReorderTab(req, res) {
+  cmuxReadBody(req, (b) => {
+    if (!b) return send(res, 400, { error: 'bad_json' });
+    const surface = String(b.surface || ''), target = String(b.target || '');
+    if (!SURFACE_RE.test(surface) || !SURFACE_RE.test(target) || surface === target) return send(res, 400, { error: 'bad_surface' });
+    const workspace = String(b.workspace || '');
+    if (!WORKSPACE_RE.test(workspace)) return send(res, 400, { error: 'bad_workspace' });
+    const place = b.place === 'after' ? '--after' : '--before';
+    cmux(['move-surface', '--surface', surface, '--workspace', workspace, place, target, '--focus', 'false'],
+      async (err, stdout, stderr) => {
+        if (err) return send(res, 502, { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 400) });
+        send(res, 200, { ok: true, workspaces: (await treePayload()) || [] });
+      }, 15000);
+  });
+}
+
 // ---------- dropped files -----------------------------------------------------------------------
 // Dragging an image onto a terminal on the Mac gives the agent a PATH to read. From a phone there is
 // no path, so the file has to land on the Mac first: this writes the body to a directory and answers
@@ -1823,6 +1850,7 @@ function handleCmux(req, res) {
   if (req.method === 'POST' && p === '/cmux/new-pane') return cmuxNewPane(req, res);
   if (req.method === 'POST' && p === '/cmux/split-off') return cmuxSplitOff(req, res);
   if (req.method === 'POST' && p === '/cmux/drop-surface') return cmuxDropSurface(req, res);
+  if (req.method === 'POST' && p === '/cmux/reorder-tab') return cmuxReorderTab(req, res);
   if (req.method === 'POST' && p === '/cmux/close-pane') return cmuxClosePane(req, res);
   if (req.method === 'POST' && p === '/cmux/upload') return cmuxUpload(req, res);
   if (req.method === 'POST' && p === '/cmux/focus-pane') return cmuxFocusPane(req, res);
