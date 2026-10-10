@@ -1774,7 +1774,7 @@
       g.max = Math.max(g.max, Math.abs(e.clientX - g.sx), Math.abs(e.clientY - g.sy));
     }, { passive: true });
     const end = (e) => {
-      const gg = g; g = null; bDragging = false;
+      const gg = g; g = null;
       if (!gg || state.tabType !== 'terminal') return;
       if (gg.max >= 8 || Date.now() - gg.t >= 500) return;    // a scroll or a long-press (text select)
       // takeComposer, not focusPane: tapping the pane is what REVEALS the box, so the same gesture
@@ -1792,10 +1792,10 @@
   }
 
   // ---- browser surface: a refreshing screenshot you can tap / scroll / type into ----
-  // Optimistic scroll: while dragging, the image is translated locally so it follows the finger
-  // instantly; every REAL frame that arrives resets the shift (the remote page has caught up).
-  let bshotShift = 0, bDragging = false;
-  function shiftBshot(px) { bshotShift = px; elBshot.style.transform = px ? 'translateY(' + px + 'px)' : ''; }
+  // Scrolling (p33): NO local image shift. Sliding the picture under the finger and snapping it when
+  // the real frame landed moved sticky headers with the content and looked like a jump on every
+  // swipe. Drags and wheels now scroll the REAL page live in ~100ms batches (bQueueScroll below), so
+  // every frame on screen is the actual page.
   // Desktop hand cursor: the mirror is an image, so the browser can't know what is a link. After each
   // changed frame the clickable areas are fetched ONCE (only while a mouse hovers the image) and the
   // cursor is picked locally on every move. Smallest containing area wins (the innermost element).
@@ -1828,7 +1828,6 @@
     if (!b64) return;
     bhits.stale = true; if (bhits.hover) bFetchHits();
     if (elBspin) elBspin.hidden = true;
-    if (!bDragging) shiftBshot(0);   // mid-drag the remote hasn't scrolled yet (sent on release)
     // frames arrive as JPEG (sips-recompressed) or PNG (fallback) — sniff by base64 magic
     elBshot.src = 'data:image/' + (b64.charAt(0) === '/' ? 'jpeg' : 'png') + ';base64,' + b64;
   }
@@ -2896,66 +2895,68 @@
   if (elKbToggle) elKbToggle.remove();   // p21: no toggle — a stale cached shell may still carry it
 
   // ---- browser mirror wiring ----
-  // Tap vs swipe on the screenshot: a small, quick press = a click at that point; a drag = a scroll.
+  // Live scroll queue shared by finger drags and the mouse wheel: display px are summed and sent as
+  // ONE `scroll` every 100ms (cmux can only shoot ~4 frames/s, so finer batches buy nothing), and a
+  // batch is never sent while the previous one is still in flight (no pile-up behind a slow call).
+  const bScroll = { x: 0, y: 0, t: null, busy: false };
+  function bQueueScroll(dyDisp, dxDisp) {
+    bScroll.y += dyDisp; bScroll.x += dxDisp || 0;
+    if (!bScroll.t) bScroll.t = setTimeout(bFlushScroll, 100);
+  }
+  function bFlushScroll() {
+    bScroll.t = null;
+    if (bScroll.busy) { bScroll.t = setTimeout(bFlushScroll, 60); return; }
+    const b = elBshot.getBoundingClientRect();
+    const k = state.browser.h / (b.height || 1);              // display px -> page css px
+    const dy = Math.round(bScroll.y * k), dx = Math.round(bScroll.x * k);
+    bScroll.x = 0; bScroll.y = 0;
+    if (Math.abs(dy) < 2 && Math.abs(dx) < 2) return;
+    bScroll.busy = true;
+    bAction('scroll', { dy, dx }).finally(() => { bScroll.busy = false; });
+  }
+  // Tap vs drag on the screenshot: a small, quick press = a click at that point; a drag scrolls the
+  // real page as the finger moves, plus a short momentum flick on release (like a native swipe).
   (() => {
     let g = null;
     elBshot.addEventListener('pointerdown', (e) => {
       if (state.tabType !== 'browser') return;
       try { elBshot.setPointerCapture(e.pointerId); } catch (_) {}
-      g = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, t: Date.now(), max: 0, base: bshotShift };
+      g = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, t: Date.now(), max: 0, v: 0, vt: Date.now() };
     });
     elBshot.addEventListener('pointermove', (e) => {
       if (!g) return;
-      g.lx = e.clientX; g.ly = e.clientY;
       g.max = Math.max(g.max, Math.abs(e.clientX - g.sx), Math.abs(e.clientY - g.sy));
-      if (g.max >= 8) { bDragging = true; shiftBshot(g.base + (e.clientY - g.sy)); }   // image follows the finger instantly
+      if (g.max < 8) { g.lx = e.clientX; g.ly = e.clientY; return; }
+      const dy = g.ly - e.clientY, now = Date.now(), dt = Math.max(1, now - g.vt);
+      g.v = 0.7 * (dy / dt) + 0.3 * g.v;                      // smoothed px/ms, finger-up = positive
+      g.vt = now; g.lx = e.clientX; g.ly = e.clientY;
+      bQueueScroll(dy, 0);
     });
-    const end = (e) => {
-      const gg = g; g = null; bDragging = false;
+    const end = () => {
+      const gg = g; g = null;
       if (!gg || state.tabType !== 'browser') return;
       if (gg.max < 8 && Date.now() - gg.t < 500) {           // tap -> click
-        const f = bshotFrac(e.clientX, e.clientY); if (!f) return;
+        const f = bshotFrac(gg.lx, gg.ly); if (!f) return;
         bAction('tap', f).then((d) => {
           if (d && d.editable) { resetBtext(d.value || ''); elBtext.focus(); }   // seed with the field's current text
         });
-      } else {                                               // drag -> scroll (display px -> page css px)
-        const b = elBshot.getBoundingClientRect();
-        const pageDy = Math.round(-(e.clientY - gg.sy) * (state.browser.h / (b.height || 1)));
-        if (Math.abs(pageDy) > 4) bAction('scroll', { dy: pageDy });
+        return;
       }
+      // momentum: a fast release keeps going ~250ms worth of travel; a slow stop adds nothing
+      if (Date.now() - gg.vt < 80 && Math.abs(gg.v) > 0.3) bQueueScroll(Math.max(-1500, Math.min(1500, gg.v * 250)), 0);
     };
-    elBshot.addEventListener('pointerup', end);
-    // iOS can CANCEL a finger drag (it decides the touch is its own gesture) — that used to drop the
-    // whole swipe, so a finger could never scroll the page. A cancelled drag now still scrolls, using
-    // the last position the finger reached; a cancelled tap does nothing.
-    elBshot.addEventListener('pointercancel', () => {
-      const gg = g;
-      if (gg && gg.max >= 8) end({ clientX: gg.lx, clientY: gg.ly });
-      else { g = null; bDragging = false; shiftBshot(0); }
-    });
-    // Belt and braces for iOS: never let the native page take a touch that starts on the mirror.
+    elBshot.addEventListener('pointerup', (e) => { if (g) { g.lx = e.clientX; g.ly = e.clientY; } end(); });
+    // iOS can CANCEL a finger drag (it decides the touch is its own gesture); the scroll already went
+    // out live, so a cancel just ends the gesture — it never turns into a tap.
+    elBshot.addEventListener('pointercancel', () => { if (g && g.max < 8) g = null; else end(); });
+    // Never let the native page take a touch that starts on the mirror (iOS).
     elBview.addEventListener('touchmove', (e) => { if (state.tabType === 'browser') e.preventDefault(); }, { passive: false });
-  })();
-  // Mouse wheel / trackpad scroll (desktop). Only click-drag scrolled before, so a trackpad did
-  // nothing. Deltas are summed and sent every 90ms (one cmux call per batch, not per wheel event).
-  // NO local image shift here: frames land mid-scroll and each one reset the shift, so the picture
-  // jumped up and then snapped back down (p31). The image moves only with real frames.
-  (() => {
-    let acc = { x: 0, y: 0 }, t = null;
-    const flush = () => {
-      t = null;
-      const b = elBshot.getBoundingClientRect();
-      const k = state.browser.h / (b.height || 1);
-      const dy = Math.round(acc.y * k), dx = Math.round(acc.x * k);
-      acc = { x: 0, y: 0 };
-      if (Math.abs(dy) > 1 || Math.abs(dx) > 1) bAction('scroll', { dy, dx });
-    };
+    // Mouse wheel / trackpad (desktop): same live queue.
     elBview.addEventListener('wheel', (e) => {
       if (state.tabType !== 'browser') return;
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? (elBshot.getBoundingClientRect().height || 600) : 1;
-      acc.y += e.deltaY * unit; acc.x += e.deltaX * unit;
-      if (!t) t = setTimeout(flush, 90);
+      bQueueScroll(e.deltaY * unit, e.deltaX * unit);
     }, { passive: false });
   })();
   // Local-echo typing: keystrokes stay in #btext (instant); the remote field syncs on a 350ms debounce.
