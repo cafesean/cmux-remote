@@ -16,7 +16,8 @@
 // v22: Fit width / Fixed size font mode toggle in the settings popover (new index.html markup).
 // v23: pane history retries until answered, parks rows while scrolled up; cmux-version note on "live".
 // v24: p20 — radar/inbox/refresh off the toolbar; push + notificationclick handlers (phone alerts).
-const CACHE = 'cmux-shell-v24';
+// v25: p21 — always-on key bar (status + quick keys) above the input; ⌨ toggle removed.
+const CACHE = 'cmux-shell-v25';
 const SHELL = ['/', '/app.js', '/sidebar.js'];
 
 self.addEventListener('install', (e) => {
