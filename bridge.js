@@ -1627,14 +1627,16 @@ const browserViewers = new Map();      // surface -> open stream count
 const browserViewportReset = new Map(); // surface -> pending reset timer
 const VIEWPORT_RESET_GRACE_MS = 4000;
 const viewportDim = (v, lo, hi) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : null; };
-function browserShot(surface, maxDim) {   // -> Promise<{buf:Buffer, raw:number}|null>
+// shrink=false keeps the frame at its native size: `sips -Z` UPSCALES a smaller image to the cap
+// (a 390x698 phone frame became 2288x4096 / 640KB), so a phone-viewport frame must skip it.
+function browserShot(surface, shrink = true) {   // -> Promise<{buf:Buffer, raw:number}|null>
   const out = browserShotPath(surface);
   const jpg = out.replace(/\.png$/, '.jpg');
   return new Promise((resolve) => cmux(['browser', surface, 'screenshot', '--out', out], (err) => {
     if (err) return resolve(null);
     fs.readFile(out, (e, png) => {
       if (e) return resolve(null);
-      execFile('/usr/bin/sips', ['-Z', String(maxDim || BROWSER_SHOT_MAX_DIM), '-s', 'format', 'jpeg',
+      execFile('/usr/bin/sips', [...(shrink ? ['-Z', String(BROWSER_SHOT_MAX_DIM)] : []), '-s', 'format', 'jpeg',
         '-s', 'formatOptions', BROWSER_SHOT_JPEG_Q, out, '--out', jpg], { timeout: 8000 }, (se) => {
         if (se) return resolve({ buf: png, raw: png.length });   // sips failed → raw PNG fallback
         fs.readFile(jpg, (je, jbuf) => resolve(je ? { buf: png, raw: png.length } : { buf: jbuf, raw: png.length }));
@@ -1710,8 +1712,8 @@ function cmuxBrowserStream(req, res, surface, vw, vh) {
     timer = null;
     if (busy) { again = true; return; }
     busy = true;
-    // A phone frame is already phone-sized; never shrink it (sips -Z is the longest-edge cap).
-    browserShot(surface, phone ? 4096 : 0).then((shot) => {
+    // A phone frame is already phone-sized: JPEG it, never resample it.
+    browserShot(surface, !phone).then((shot) => {
       busy = false;
       if (!alive) return;
       if (!shot) { res.write('event: error\ndata: cmux_failed\n\n'); return schedule(); }
