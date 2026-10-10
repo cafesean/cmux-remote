@@ -1634,7 +1634,20 @@ const VIEWPORT_RESET_GRACE_MS = 4000;
 const viewportDim = (v, lo, hi) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : null; };
 // shrink=false keeps the frame at its native size: `sips -Z` UPSCALES a smaller image to the cap
 // (a 390x698 phone frame became 2288x4096 / 640KB), so a phone-viewport frame must skip it.
-function browserShot(surface, shrink = true, q = BROWSER_SHOT_JPEG_Q) {   // -> Promise<{buf, raw, src}|null>
+// One screenshot at a time PER SURFACE (p39). cmux refuses a second concurrent shot ("Another browser
+// screenshot is already in progress") and every stream of a surface writes the same PNG path, so two
+// viewers of one tab (phone + desktop) made each other's frames fail or read a half-written file —
+// after switching back to the tab no frame arrived at all and scrolling looked dead. Shots now queue.
+const browserShotQueue = new Map();   // surface -> tail Promise
+function browserShot(surface, shrink = true, q = BROWSER_SHOT_JPEG_Q) {
+  const prev = browserShotQueue.get(surface) || Promise.resolve();
+  const run = prev.then(() => browserShotNow(surface, shrink, q));
+  const tail = run.catch(() => null);
+  browserShotQueue.set(surface, tail);
+  tail.then(() => { if (browserShotQueue.get(surface) === tail) browserShotQueue.delete(surface); });
+  return run;
+}
+function browserShotNow(surface, shrink, q) {   // -> Promise<{buf, raw, src}|null>
   const out = browserShotPath(surface);
   const jpg = out.replace(/\.png$/, '.jpg');
   return new Promise((resolve) => cmux(['browser', surface, 'screenshot', '--out', out], (err) => {
