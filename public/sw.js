@@ -17,7 +17,8 @@
 // v23: pane history retries until answered, parks rows while scrolled up; cmux-version note on "live".
 // v24: p20 — radar/inbox/refresh off the toolbar; push + notificationclick handlers (phone alerts).
 // v25: p21 — always-on key bar (status + quick keys) above the input; ⌨ toggle removed.
-const CACHE = 'cmux-shell-v25';
+// v26: p22 — quick keys show only while the text box has focus.
+const CACHE = 'cmux-shell-v26';
 const SHELL = ['/', '/app.js', '/sidebar.js'];
 
 self.addEventListener('install', (e) => {
