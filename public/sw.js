@@ -18,7 +18,8 @@
 // v24: p20 — radar/inbox/refresh off the toolbar; push + notificationclick handlers (phone alerts).
 // v25: p21 — always-on key bar (status + quick keys) above the input; ⌨ toggle removed.
 // v26: p22 — quick keys show only while the text box has focus.
-const CACHE = 'cmux-shell-v26';
+// v27: p25 — in-app chime toggle in ⚙; push alerts explicitly not silent.
+const CACHE = 'cmux-shell-v27';
 const SHELL = ['/', '/app.js', '/sidebar.js'];
 
 self.addEventListener('install', (e) => {
@@ -81,6 +82,7 @@ self.addEventListener('push', (e) => {
     body: d.body || '',
     tag: d.tag || undefined,
     renotify: !!d.tag,
+    silent: false,   // p25: every alert sounds (done and needs-you); iOS plays its default sound
     icon: '/icon-180.png',
     badge: '/icon-180.png',
     data: { machine: d.machine || null, surface: d.surface || null },
