@@ -748,10 +748,104 @@
     if (first) selectTab(first.id); else { elEmpty.style.display = 'flex'; }
   }
 
+  // ---- tab drag-to-reorder (p23) ----
+  // Long-press a tab (350ms, finger still), then slide it left/right; release over another tab to
+  // drop it before/after that tab. A quick swipe still scrolls the strip. The move is made in cmux
+  // (move-surface) and the strip repaints from the tree it answers.
+  const TAB_HOLD_MS = 350;
+  const tabDrag = { g: null, justDropped: false };
+  (() => {
+    const st = document.createElement('style');
+    st.textContent = '.tab{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}.tab.dragging{opacity:.9;z-index:3;position:relative;box-shadow:0 4px 14px rgba(0,0,0,.5);border-color:var(--accent)}'
+      + '.tab.drop-before{box-shadow:inset 3px 0 0 var(--accent)}.tab.drop-after{box-shadow:inset -3px 0 0 var(--accent)}';
+    document.head.appendChild(st);
+  })();
+  function tabDropTarget(x, selfEl) {
+    for (const el of elTabs.querySelectorAll('.tab[data-id]')) {
+      if (el === selfEl) continue;
+      const r = el.getBoundingClientRect();
+      if (x >= r.left && x <= r.right) return { el, place: x < r.left + r.width / 2 ? 'before' : 'after' };
+    }
+    return null;
+  }
+  function clearDropMarks() { elTabs.querySelectorAll('.drop-before,.drop-after').forEach((el) => el.classList.remove('drop-before', 'drop-after')); }
+  function wireTabDrag(b, t) {
+    const begin = () => {
+      const g = tabDrag.g; if (!g) return;
+      g.on = true; b.classList.add('dragging');
+      try { if (navigator.vibrate) navigator.vibrate(10); } catch (_) {}
+    };
+    const start = (x, y, target) => {
+      if (target && target.closest && target.closest('.close')) return false;
+      cancel();
+      tabDrag.g = { x0: x, y0: y, on: false, drop: null, timer: setTimeout(begin, TAB_HOLD_MS) };
+      return true;
+    };
+    const move = (x, y) => {
+      const g = tabDrag.g; if (!g) return false;
+      if (!g.on) { if (Math.hypot(x - g.x0, y - g.y0) > 8) cancel(); return false; }
+      b.style.transform = 'translateX(' + (x - g.x0) + 'px)';
+      const sr = elTabs.getBoundingClientRect();
+      if (x < sr.left + 36) elTabs.scrollLeft -= 10; else if (x > sr.right - 36) elTabs.scrollLeft += 10;
+      clearDropMarks();
+      g.drop = tabDropTarget(x, b);
+      if (g.drop) g.drop.el.classList.add(g.drop.place === 'before' ? 'drop-before' : 'drop-after');
+      return true;
+    };
+    const cancel = () => {
+      const g = tabDrag.g; if (!g) return;
+      clearTimeout(g.timer); tabDrag.g = null;
+      b.classList.remove('dragging'); b.style.transform = ''; clearDropMarks();
+    };
+    const end = () => {
+      const g = tabDrag.g; if (!g) return false;
+      const was = g.on, drop = g.drop;
+      cancel();
+      if (!was) return false;
+      tabDrag.justDropped = true; setTimeout(() => { tabDrag.justDropped = false; }, 400);
+      if (drop) doReorderTab(t.id, drop.el.dataset.id, drop.place);
+      return true;
+    };
+    // touch: preventDefault on touchmove only once the drag is live, so a plain swipe still scrolls
+    b.addEventListener('touchstart', (e) => { const p = e.touches[0]; start(p.clientX, p.clientY, e.target); }, { passive: true });
+    b.addEventListener('touchmove', (e) => { const p = e.touches[0]; if (move(p.clientX, p.clientY)) e.preventDefault(); }, { passive: false });
+    b.addEventListener('touchend', (e) => { if (end()) e.preventDefault(); });
+    b.addEventListener('touchcancel', cancel);
+    b.addEventListener('contextmenu', (e) => { if (tabDrag.g) e.preventDefault(); });
+    // mouse (desktop): same gesture
+    b.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || !start(e.clientX, e.clientY, e.target)) return;
+      const mm = (ev) => move(ev.clientX, ev.clientY);
+      const mu = () => { document.removeEventListener('mousemove', mm); document.removeEventListener('mouseup', mu); end(); };
+      document.addEventListener('mousemove', mm); document.addEventListener('mouseup', mu);
+    });
+  }
+  async function doReorderTab(surface, target, place) {
+    const ws = currentWs();
+    if (!ws || !state.machine || !target || target === surface) return;
+    // optimistic: move the chip now; the tree from cmux confirms or corrects it
+    const tabs = ws.tabs || [];
+    const from = tabs.findIndex((x) => x.id === surface);
+    if (from !== -1) {
+      const [moved] = tabs.splice(from, 1);
+      const to = tabs.findIndex((x) => x.id === target);
+      tabs.splice(to === -1 ? tabs.length : (place === 'after' ? to + 1 : to), 0, moved);
+      renderTabs();
+    }
+    try {
+      const r = await jpost('/api/cmux/reorder-tab', { machine: state.machine, workspace: ws.id, surface, target, place });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) { setStatus((d && d.detail) || (d && d.error) || 'reorder failed', true, 4000); loadTree(); return; }
+      if (Array.isArray(d.workspaces) && d.workspaces.length) state.workspaces = d.workspaces;
+      renderTabs();
+    } catch (_) { setStatus('reorder failed', true, 4000); loadTree(); }
+  }
+
   // ---- tabs ----
   // A chip is `on` when it is the FOCUSED surface (what the footer drives) and `vis` when some other
   // pane is currently mirroring it — without that, a split view looks like every tab but one is idle.
   function renderTabs() {
+    if (tabDrag.g && tabDrag.g.on) return;   // p23: a repaint mid-drag would replace the chip under the finger
     const ws = currentWs();
     const tabs = (ws && ws.tabs) || [];
     const shown = new Set();
@@ -771,7 +865,8 @@
       close.setAttribute('aria-label', 'Close tab'); close.setAttribute('role', 'button');
       close.onclick = (e) => { e.preventDefault(); e.stopPropagation(); doCloseTab(t); };
       b.appendChild(close);
-      b.onclick = () => selectTab(t.id);
+      b.onclick = () => { if (tabDrag.justDropped) return; selectTab(t.id); };
+      wireTabDrag(b, t);
       kids.push(b);
     });
     // The strip only shows in the one-pane view, and there is no pane header to hang controls off,
