@@ -667,6 +667,10 @@
       <div class="stepper"><button id="pushToggle" type="button" style="width:auto;padding:6px 12px">Off</button></div>
     </div>
     <div class="setnote" id="pushNote" hidden></div>
+    <div class="setrow">
+      <span class="setlabel">Chime when open</span>
+      <div class="stepper"><button id="chimeToggle" type="button" style="width:auto;padding:6px 12px">On</button></div>
+    </div>
   </div>
 
   <div id="gate"></div>
@@ -683,7 +687,7 @@
   <script src="/gitbar.js?v=v1-p8-20260802a"></script>
   <!-- p20: radar.js + inbox.js are no longer loaded (toolbar chips removed, Sean 2026-10-10). -->
   <script src="/sidebar.js?v=v1-p17-20260914a"></script>
-  <script src="/app.js?v=v26-p22keys-20261010"></script>
-  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js?v=v26').catch(() => {});</script>
+  <script src="/app.js?v=v27-p25chime-20261010"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js?v=v27').catch(() => {});</script>
 </body>
 </html>
