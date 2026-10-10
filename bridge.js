@@ -1739,7 +1739,11 @@ function cmuxBrowserStream(req, res, surface, vw, vh) {
   if (!browserWakers.has(surface)) browserWakers.set(surface, new Set());
   browserWakers.get(surface).add(wake);
   const hb = setInterval(() => { if (alive) res.write(': hb\n\n'); }, 15000);
-  if (phone) cmux(['browser', surface, 'viewport', String(vw), String(vh)], () => { if (alive) tick(); }, 8000);
+  // (also clears any leftover WebKit page zoom: before p37 A+/A- called `browser zoom`, which under
+  // viewport emulation only shifts devicePixelRatio and makes frames look oddly sharp or soft)
+  if (phone) cmux(['browser', surface, 'viewport', String(vw), String(vh)], () => {
+    cmux(['browser', surface, 'zoom', 'reset'], () => { if (alive) tick(); }, 8000);
+  }, 8000);
   else tick();
   const done = () => {
     if (!alive) return; alive = false; if (timer) clearTimeout(timer); clearInterval(hb);
