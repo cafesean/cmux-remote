@@ -317,7 +317,10 @@
 
     /* input dock */
     footer { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line);
-      padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
+      padding: 8px 10px max(6px, calc(env(safe-area-inset-bottom) - 20px)); display: flex; flex-direction: column; gap: 8px; }
+    /* p22: the text box sits at the bottom. The full home-bar inset (~34px) left an empty row under it;
+       the bar only needs a sliver. With the keyboard up there is no home bar to clear at all. */
+    body.typing footer { padding-bottom: 6px; }
     .modeseg { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; font-size: 12px; font-family: var(--mono); }
     .modeseg button { flex: 1; text-align: center; padding: 6px 0; border-radius: 7px; color: var(--dim); background: transparent; border: none; letter-spacing: .04em; }
     .modeseg button.on { background: var(--accent); color: #fff; font-weight: 700; }
@@ -342,6 +345,9 @@
     /* In terminal mode the key bar carries the status; the overlay pill stays for files/browser. */
     body:not(.mode-browser):not(.mode-files):not(.mode-fview) #status { display: none !important; }
     body.mode-browser #keybar { display: none; }
+    /* p22: the quick keys show only while the text box has focus; the status pill stays. */
+    body:not(.typing) #keys { display: none; }
+    .kstatus { margin-right: auto; }
     .row { display: flex; gap: 8px; align-items: flex-end; }
     .row textarea { flex: 1; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
       border-radius: 9px; padding: 7px 11px; font-size: 16px; line-height: 1.25; font-family: var(--mono);
@@ -677,7 +683,7 @@
   <script src="/gitbar.js?v=v1-p8-20260802a"></script>
   <!-- p20: radar.js + inbox.js are no longer loaded (toolbar chips removed, Sean 2026-10-10). -->
   <script src="/sidebar.js?v=v1-p17-20260914a"></script>
-  <script src="/app.js?v=v25-p21keys-20261010"></script>
-  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js?v=v25').catch(() => {});</script>
+  <script src="/app.js?v=v26-p22keys-20261010"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js?v=v26').catch(() => {});</script>
 </body>
 </html>
