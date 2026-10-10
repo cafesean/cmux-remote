@@ -2926,6 +2926,28 @@
     elBshot.addEventListener('pointerup', end);
     elBshot.addEventListener('pointercancel', () => { g = null; });
   })();
+  // Mouse wheel / trackpad scroll (desktop). Only click-drag scrolled before, so a trackpad did
+  // nothing. Deltas are summed and sent every 90ms (one cmux call per batch, not per wheel event);
+  // the image shifts locally right away and the next real frame resets the shift.
+  (() => {
+    let acc = { x: 0, y: 0 }, t = null;
+    const flush = () => {
+      t = null;
+      const b = elBshot.getBoundingClientRect();
+      const k = state.browser.h / (b.height || 1);
+      const dy = Math.round(acc.y * k), dx = Math.round(acc.x * k);
+      acc = { x: 0, y: 0 };
+      if (Math.abs(dy) > 1 || Math.abs(dx) > 1) bAction('scroll', { dy, dx });
+    };
+    elBview.addEventListener('wheel', (e) => {
+      if (state.tabType !== 'browser') return;
+      e.preventDefault();
+      const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? (elBshot.getBoundingClientRect().height || 600) : 1;
+      acc.y += e.deltaY * unit; acc.x += e.deltaX * unit;
+      shiftBshot(bshotShift - e.deltaY * unit);
+      if (!t) t = setTimeout(flush, 90);
+    }, { passive: false });
+  })();
   // Local-echo typing: keystrokes stay in #btext (instant); the remote field syncs on a 350ms debounce.
   // Enter flushes the sync, presses remote Enter (submit), then clears the box. Backspace/edits are
   // just local edits — the whole-value replace sync handles them for free. Arrows move the LOCAL caret
