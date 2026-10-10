@@ -99,6 +99,7 @@ function cases() {
     '/api/cmux/machines': [json('GET', '/api/cmux/machines')],
     '/api/cmux/bootstrap': [json('GET', '/api/cmux/bootstrap'), json('GET', '/api/cmux/bootstrap?machine=nope')],
     '/api/cmux/fleet': [json('GET', '/api/cmux/fleet')],
+    '/api/cmux/chrome-prompt': [json('GET', '/api/cmux/chrome-prompt'), post('/api/cmux/chrome-prompt', { action: 'nope' })],
     '/api/cmux/tree': [json('GET', '/api/cmux/tree'), json('GET', '/api/cmux/tree?machine=nope')],
     '/api/cmux/fs/download-ticket': [json('GET', `/api/cmux/fs/download-ticket?path=${q(note)}`), json('GET', '/api/cmux/fs/download-ticket')],
     '/api/cmux/fs/download': [{ kind: 'download' }],

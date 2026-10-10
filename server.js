@@ -172,6 +172,28 @@ if (!/^(0|false|no|off)$/i.test(String(process.env.PUSH_ENABLED || '').trim())) 
   }
 }
 
+// p27: each machine's Chrome "Allow remote debugging?" dialog, polled every 8s. A dialog that appears
+// pushes a phone alert; the page shows an Allow / Deny banner from /api/cmux/chrome-prompt.
+const chromePrompts = new Map();
+async function pollChromePrompt(m) {
+  try {
+    const r = await bridge(m, '/cmux/chrome-prompt', { timeout: 12000 });
+    const d = await r.json().catch(() => ({}));
+    const was = chromePrompts.get(m.id);
+    if (d && d.present) {
+      chromePrompts.set(m.id, { present: true, app: d.app || 'Google Chrome', text: String(d.text || '').slice(0, 300), buttons: d.buttons || [], since: (was && was.since) || Date.now() });
+      if (!(was && was.present) && alerts) {
+        alerts.notify({ title: '🔐 Chrome asks to allow remote debugging', body: (MACHINES.length > 1 ? m.label + ': ' : '') + 'Open cmux-remote to Allow or Deny.', tag: 'chrome-prompt-' + m.id, machine: m.id, surface: null })
+          .catch(() => {});
+      }
+    } else chromePrompts.set(m.id, { present: false, error: d && d.error });
+  } catch (_) { /* bridge down: keep the last answer */ }
+}
+if (process.platform === 'darwin' && process.env.NODE_ENV !== 'test' && !/^(0|false|no|off)$/i.test(String(process.env.CHROME_PROMPT_ENABLED || '').trim())) {
+  const t = setInterval(() => { for (const m of MACHINES) pollChromePrompt(m); }, 8000);
+  if (t.unref) t.unref();
+}
+
 function sendJson(res, code, obj) {
   res.writeHead(code, {
     'content-type': 'application/json',
@@ -318,6 +340,25 @@ async function handleApi(req, res, u) {
       if (!res.headersSent) return sendJson(res, 500, { error: 'radar_error' });
       try { return res.end(); } catch (_) { return; }
     }
+  }
+
+  // ----- p27 Chrome "Allow remote debugging?" -----
+  if (req.method === 'GET' && p === '/api/cmux/chrome-prompt') {
+    return sendJson(res, 200, { machines: MACHINES.map((m) => ({ id: m.id, label: m.label, ...(chromePrompts.get(m.id) || { present: false }) })) });
+  }
+  if (req.method === 'POST' && p === '/api/cmux/chrome-prompt') {
+    return readBody(req, async (b) => {
+      if (!b) return sendJson(res, 400, { error: 'bad_json' });
+      const m = findMachine(b.machine);
+      if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      try {
+        const r = await bridge(m, '/cmux/chrome-prompt', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: b.action }), timeout: 15000 });
+        const d = await r.json().catch(() => ({}));
+        chromePrompts.delete(m.id);
+        setTimeout(() => pollChromePrompt(m), 800);
+        return sendJson(res, r.status, d);
+      } catch (_) { return sendJson(res, 502, { error: 'bridge_unreachable' }); }
+    });
   }
 
   // ----- p20 phone alerts -----
