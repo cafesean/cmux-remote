@@ -72,7 +72,7 @@
   const elFontUp = $('fontUp'), elFontDown = $('fontDown'), elFontVal = $('fontVal'), elFontReset = $('fontReset');
   const elFontMode = $('fontMode');
   // browser-mirror elements
-  const elBrowser = $('browser'), elBshot = $('bshot'), elBspin = $('bspin');
+  const elBrowser = $('browser'), elBshot = $('bshot'), elBspin = $('bspin'), elBview = $('bview');
   const elBurl = $('burl'), elBGo = $('bGo'), elBBack = $('bBack'), elBFwd = $('bFwd'), elBReload = $('bReload');
   const elBZoomIn = $('bZoomIn'), elBZoomOut = $('bZoomOut'), elBtext = $('btext'), elBfoot = $('bfoot');
 
@@ -1850,12 +1850,35 @@
   function browserStream(surface) {
     closeBrowserStream();
     let url = '/api/cmux/browser/stream?machine=' + encodeURIComponent(state.machine) + '&surface=' + encodeURIComponent(surface);
+    // Ask the bridge to lay the page out at THIS screen's CSS size, so a frame is 1:1 here (readable
+    // text, real tap targets) instead of a desktop pane shrunk to fit.
+    const vp = browserViewportSize();
+    if (vp) url += '&vw=' + vp.w + '&vh=' + vp.h;
+    state.browser.vpw = vp ? vp.w : 0;
+    if (vp) { state.browser.w = vp.w; state.browser.h = vp.h; }   // swipe→scroll scale, before /info catches up
     if (TOKEN) url += '&token=' + encodeURIComponent(TOKEN);   // EventSource can't set headers
     let es; try { es = new EventSource(url); } catch (_) { return; }
     state.browser.es = es;
     es.onmessage = (e) => { if (e.data) bFrame(e.data); };
     // EventSource auto-reconnects on error; stay quiet so a blip doesn't flash an error.
   }
+  function browserViewportSize() {
+    const b = elBview && elBview.getBoundingClientRect();
+    if (!b || b.width < 200 || b.height < 200) return null;
+    return { w: Math.round(b.width), h: Math.round(b.height) };
+  }
+  // Rotation / a resized window re-lays the page out. Width only: the on-screen keyboard changes the
+  // HEIGHT while typing, and re-laying the page out under the user's thumb would be worse than letterbox.
+  let bvpTimer = null;
+  window.addEventListener('resize', () => {
+    if (bvpTimer) clearTimeout(bvpTimer);
+    bvpTimer = setTimeout(() => {
+      bvpTimer = null;
+      if (state.tabType !== 'browser' || !state.browser.es || !state.tab) return;
+      const vp = browserViewportSize();
+      if (vp && Math.abs(vp.w - (state.browser.vpw || 0)) > 8) { browserStream(state.tab.id); setTimeout(refreshBrowserInfo, 800); }
+    }, 400);
+  });
   function closeBrowserStream() { if (state.browser.es) { try { state.browser.es.close(); } catch (_) {} state.browser.es = null; } }
 
   // Refresh URL bar + viewport dims. Polled (not one-shot) so a fresh tab settling from about:blank,
