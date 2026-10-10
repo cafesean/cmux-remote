@@ -9,6 +9,18 @@
 (() => {
   'use strict';
 
+  // p20: a tapped phone alert cold-starts the app at /#jump=<machine>|<surface>. Read it before the
+  // token block below rewrites the URL, then drop it so a reload does not jump again.
+  let BOOT_JUMP = null;
+  try {
+    const j = new URLSearchParams(location.hash.slice(1)).get('jump');
+    if (j && j.includes('|')) {
+      const [machine, surface] = j.split('|');
+      BOOT_JUMP = { machine, surface };
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  } catch (_) {}
+
   // ---- auth ----
   const cleanToken = (t) => String(t || '').replace(/[\s\u200B-\u200D\uFEFF]/g, '');
   let TOKEN = null;
@@ -108,6 +120,7 @@
 
   // p5 radar. Declared up here (not at its section) so renderTabs can test it without a TDZ risk.
   // It stays null unless radar.js loaded AND created cleanly — that null is the entire kill switch.
+  const SHOW_RADAR_UI = false;   // p20: radar + inbox chips hidden
   let radarUI = null;
   // p9 inbox, same contract and same reason: renderTabs/syncFilesBtn read it, and a null here means
   // the feature is simply absent.
@@ -2600,7 +2613,7 @@
   // ---- wire up ----
   if (elFilesBtn) elFilesBtn.onclick = (e) => { e.stopPropagation(); toggleFiles(); };
   if (elRadarBtn) elRadarBtn.onclick = (e) => { e.stopPropagation(); toggleRadar(); };
-  elRefresh.onclick = loadTree;
+  if (elRefresh) elRefresh.remove();   // p20: removed from the toolbar (Sean: did nothing useful); stale cached shells still carry it
   wireFileDrop();
   if (elModeCompose) elModeCompose.onclick = null;   // modes are gone (§5.3); markup kept one cache epoch
   if (elModeLive) elModeLive.onclick = null;
@@ -2809,14 +2822,31 @@
     const bs = document.body.style;
     bs.position = 'fixed'; bs.left = '0'; bs.right = '0';
     let raf = 0;
+    const typing = () => { const a = document.activeElement; return !!a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || a.isContentEditable); };
     const fit = () => {
       raf = 0;
+      // p20: with the keyboard down there is nothing to reveal, so any leftover window scroll is iOS
+      // forgetting to undo the keyboard pan (it happens across an app switch). That leftover shifts
+      // the page up AND offsets every tap — reset it. While typing, leave iOS alone (no bounce).
+      if (!typing() && (window.scrollY || window.scrollX || vv.offsetTop)) window.scrollTo(0, 0);
       bs.height = vv.height + 'px';
-      bs.top = (vv.offsetTop || 0) + 'px';   // track any offset iOS applies; NOT window.scrollTo
+      bs.top = (typing() ? (vv.offsetTop || 0) : 0) + 'px';
     };
     const on = () => { if (!raf) raf = requestAnimationFrame(fit); };
     vv.addEventListener('resize', on);
     vv.addEventListener('scroll', on);
+    // iOS does not always fire a viewport resize when the app comes back, so refit on return —
+    // now, and again once the restore animation has settled. Leaving with the keyboard up is the
+    // usual trigger, so drop focus on the way out: the keyboard state cannot go stale.
+    const settle = () => { on(); setTimeout(on, 150); setTimeout(on, 600); };
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { if (typing()) document.activeElement.blur(); }
+      else settle();
+    });
+    window.addEventListener('pageshow', settle);
+    window.addEventListener('focus', settle);
+    window.addEventListener('orientationchange', settle);
+    document.addEventListener('focusout', () => setTimeout(on, 50));
     fit();
   })();
 
@@ -2826,7 +2856,9 @@
   // `radarUI` stays null, no chip renders, and nothing below this comment ever runs again. The
   // terminal UI cannot tell the difference.
   try {
-    if (window.cmuxRadar && typeof window.cmuxRadar.create === 'function') {
+    // p20: radar + inbox are off the toolbar (Sean 2026-10-10). The modules stay in the repo; a stale
+    // cached shell may still load them, so the mount is skipped here rather than relying on index.html.
+    if (SHOW_RADAR_UI && window.cmuxRadar && typeof window.cmuxRadar.create === 'function') {
       radarUI = window.cmuxRadar.create({
         mount: $('wrap'),
         jget, jpost, promptToken,
@@ -2943,7 +2975,7 @@
   // If /inbox.js 404s (no route, stale cache) or throws in create(), inboxUI stays null, the chip is
   // removed, and the terminal mirror is untouched.
   try {
-    if (window.cmuxInbox && typeof window.cmuxInbox.create === 'function') {
+    if (SHOW_RADAR_UI && window.cmuxInbox && typeof window.cmuxInbox.create === 'function') {
       inboxUI = window.cmuxInbox.create({
         mount: $('wrap'),
         jget, jpost, promptToken,
@@ -3115,6 +3147,97 @@
       }
       return jumpTo({ machine: req.machine, surfaceId: sid }) ? { ok: true } : { ok: false, reason: 'that tab is no longer in the tree' };
     } catch (e) { return { ok: false, reason: (e && e.message) || 'jump failed' }; }
+  }
+
+  // ---- Phone alerts (p20) ----------------------------------------------------
+  // Web Push: the server polls cmux's notification list and pushes each new one. This side only
+  // subscribes the device and turns a tapped alert into a jump. iOS allows push only from the
+  // Home Screen app (standalone), and asks for permission only from a tap.
+  const elPushToggle = $('pushToggle'), elPushNote = $('pushNote');
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const pushNote = (msg) => { if (!elPushNote) return; elPushNote.textContent = msg || ''; elPushNote.hidden = !msg; };
+  const b64uToBytes = (s) => {
+    const pad = '='.repeat((4 - (s.length % 4)) % 4);
+    const raw = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+  };
+  async function pushSub() {
+    const reg = await navigator.serviceWorker.ready;
+    return { reg, sub: await reg.pushManager.getSubscription() };
+  }
+  function renderPush(on) {
+    if (!elPushToggle) return;
+    elPushToggle.textContent = on ? 'On' : 'Off';
+    elPushToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  async function syncPush() {
+    if (!elPushToggle) return;
+    if (!pushSupported()) {
+      elPushToggle.disabled = true; renderPush(false);
+      pushNote(/iPhone|iPad/.test(navigator.userAgent) && !navigator.standalone
+        ? 'Add this page to your Home Screen, then open it from there to turn alerts on.'
+        : 'This browser cannot receive push alerts.');
+      return;
+    }
+    try {
+      const { sub } = await pushSub();
+      renderPush(!!sub && Notification.permission === 'granted');
+      // re-register an existing device: keeps the server in step if its state file was lost
+      if (sub && Notification.permission === 'granted') jpost('/api/push/subscribe', { subscription: sub.toJSON() }).catch(() => {});
+    } catch (_) { renderPush(false); }
+  }
+  async function togglePush() {
+    if (!pushSupported() || !elPushToggle) return;
+    elPushToggle.disabled = true;
+    try {
+      const { reg, sub } = await pushSub();
+      if (sub && Notification.permission === 'granted') {
+        await jpost('/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {});
+        await sub.unsubscribe().catch(() => {});
+        renderPush(false); pushNote('');
+        return;
+      }
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { renderPush(false); pushNote('Notifications are blocked. Allow them in Settings → Notifications.'); return; }
+      const r = await jget('/api/push/key');
+      if (!r.ok) { pushNote('Server has push turned off.'); return; }
+      const { publicKey } = await r.json();
+      const fresh = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(publicKey) });
+      const s = await jpost('/api/push/subscribe', { subscription: fresh.toJSON() });
+      if (!s.ok) { pushNote('Could not register this device.'); return; }
+      renderPush(true);
+      pushNote('On. You get an alert when a session finishes or needs you.');
+      jpost('/api/push/test', { endpoint: fresh.endpoint }).catch(() => {});
+    } catch (e) {
+      pushNote('Could not turn alerts on: ' + ((e && e.message) || e));
+    } finally { elPushToggle.disabled = false; }
+  }
+  if (elPushToggle) elPushToggle.onclick = (e) => { e.stopPropagation(); togglePush(); };
+  syncPush();
+
+  // Tapped alert → that pane. A running app gets a message from sw.js; a cold start carries BOOT_JUMP
+  // and waits for the first tree before jumping.
+  const alertJump = (t) => radarJump({ machine: t.machine, tabUuid: t.surface });
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      const d = e.data || {};
+      if (d.type === 'cmux-jump' && d.machine && d.surface) {
+        const r = alertJump(d);
+        if (r && !r.ok) setStatus(r.reason, true, 4000);
+      }
+    });
+  }
+  if (BOOT_JUMP) {
+    let tries = 0;
+    const waitTree = () => {
+      if (state.machines.length && (BOOT_JUMP.machine !== state.machine || state.workspaces.length)) {
+        const r = alertJump(BOOT_JUMP);
+        if (r && !r.ok) setStatus(r.reason, true, 4000);
+        return;
+      }
+      if (++tries < 40) setTimeout(waitTree, 250);
+    };
+    setTimeout(waitTree, 250);
   }
 
   // ---- Files tab (p4) --------------------------------------------------------

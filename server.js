@@ -159,6 +159,19 @@ async function bridge(m, pathAndQuery, opt = {}) {
   } finally { clearTimeout(timer); }
 }
 
+// p20 phone alerts: cmux notifications -> Web Push. On by default; PUSH_ENABLED=0 turns it off.
+// A broken state file must not take the terminal mirror down with it.
+let alerts = null;
+if (!/^(0|false|no|off)$/i.test(String(process.env.PUSH_ENABLED || '').trim())) {
+  try {
+    alerts = require('./lib/alerts').createAlerts({ machines: MACHINES, bridge });
+    alerts.start();
+  } catch (e) {
+    alerts = null;
+    console.error(`push: failed to start, continuing WITHOUT it: ${(e && e.message) || e}`);
+  }
+}
+
 function sendJson(res, code, obj) {
   res.writeHead(code, {
     'content-type': 'application/json',
@@ -305,6 +318,30 @@ async function handleApi(req, res, u) {
       if (!res.headersSent) return sendJson(res, 500, { error: 'radar_error' });
       try { return res.end(); } catch (_) { return; }
     }
+  }
+
+  // ----- p20 phone alerts -----
+  if (p.startsWith('/api/push/')) {
+    if (!alerts) return sendJson(res, 404, { error: 'push_disabled' });
+    if (req.method === 'GET' && p === '/api/push/key') {
+      return sendJson(res, 200, { publicKey: alerts.publicKey(), devices: alerts.count(),
+        subscribed: alerts.has(u.searchParams.get('endpoint') || '') });
+    }
+    if (req.method === 'POST' && (p === '/api/push/subscribe' || p === '/api/push/unsubscribe' || p === '/api/push/test')) {
+      return readBody(req, async (b) => {
+        if (!b) return sendJson(res, 400, { error: 'bad_json' });
+        try {
+          if (p === '/api/push/subscribe') {
+            return alerts.subscribe(b.subscription, req.headers.origin || '')
+              ? sendJson(res, 200, { ok: true, devices: alerts.count() }) : sendJson(res, 400, { error: 'bad_subscription' });
+          }
+          if (p === '/api/push/unsubscribe') return sendJson(res, 200, { ok: alerts.unsubscribe(String(b.endpoint || '')), devices: alerts.count() });
+          const results = await alerts.test(b.endpoint ? String(b.endpoint) : '');
+          return sendJson(res, 200, { ok: results.length > 0 && results.every((x) => x.ok), results });
+        } catch (e) { return sendJson(res, 500, { error: 'push_error', detail: (e && e.message) || String(e) }); }
+      });
+    }
+    return sendJson(res, 404, { error: 'not_found' });
   }
 
   if (req.method === 'GET' && p === '/api/cmux/machines') {
