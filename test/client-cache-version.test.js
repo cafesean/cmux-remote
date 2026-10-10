@@ -9,8 +9,8 @@ const REPO = path.join(__dirname, '..');
 const index = fs.readFileSync(path.join(REPO, 'public/index.html'), 'utf8');
 const sw = fs.readFileSync(path.join(REPO, 'public/sw.js'), 'utf8');
 
-test('latest client shell uses the v23 cache generation everywhere', () => {
-  assert.match(index, /<script src="\/app\.js\?v=v23-[^"]+"><\/script>/);
-  assert.match(index, /serviceWorker\.register\('\/sw\.js\?v=v23'\)/);
-  assert.match(sw, /const CACHE = 'cmux-shell-v23';/);
+test('latest client shell uses the v24 cache generation everywhere', () => {
+  assert.match(index, /<script src="\/app\.js\?v=v24-[^"]+"><\/script>/);
+  assert.match(index, /serviceWorker\.register\('\/sw\.js\?v=v24'\)/);
+  assert.match(sw, /const CACHE = 'cmux-shell-v24';/);
 });

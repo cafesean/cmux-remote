@@ -1710,6 +1710,24 @@ function cmuxSessionEvents(res, u) {
     .catch(() => send(res, 200, { machineId: MACHINE_ID, events: [], more: false, error: 'events_unreadable' }));
 }
 
+// GET /cmux/notifications -> {notifications:[{id,title,subtitle,body,created_at,is_read,surface_id,workspace_id,tab_title}]}
+// p20: the server polls this and turns each NEW unread one into a phone push. cmux raises these itself
+// (Claude Code "Completed in …", the NEEDS YOU banner, `cmux notify`). tmux has no notification list.
+function cmuxNotifications(res) {
+  if (tmuxCli) return send(res, 200, { notifications: [], unsupported: 'tmux' });
+  cli(['list-notifications', '--json'], { timeout: 8000 }, (err, stdout) => {
+    if (err) return send(res, 502, { error: 'cmux_failed' });
+    let list;
+    try { list = JSON.parse(stdout); } catch (_) { return send(res, 502, { error: 'bad_cmux_output' }); }
+    if (!Array.isArray(list)) list = [];
+    const str = (v) => (typeof v === 'string' ? v : '');
+    send(res, 200, { notifications: list.filter((n) => n && n.id).map((n) => ({
+      id: str(n.id), title: str(n.title), subtitle: str(n.subtitle), body: str(n.body), created_at: str(n.created_at),
+      is_read: !!n.is_read, surface_id: str(n.surface_id) || null, workspace_id: str(n.workspace_id) || null, tab_title: str(n.tab_title),
+    })) });
+  });
+}
+
 // ---------- routing ---------------------------------------------------------
 function handleCmux(req, res) {
   if (SECRET && req.headers['x-bridge-secret'] !== SECRET) return send(res, 403, { error: 'forbidden' });
@@ -1724,6 +1742,7 @@ function handleCmux(req, res) {
   if (p.startsWith('/cmux/git/')) return cmuxGit(req, res, u, p.slice('/cmux/git/'.length));
   if (p.startsWith('/cmux/gitread/')) return cmuxGitRead(req, res, u, p.slice('/cmux/gitread/'.length));
   if (req.method === 'GET' && p === '/cmux/session-events') return cmuxSessionEvents(res, u);
+  if (req.method === 'GET' && p === '/cmux/notifications') return cmuxNotifications(res);
 
   // ----- pane layout (multi-pane mirror) -----
   if (req.method === 'GET' && (p === '/cmux/layout' || p === '/cmux/layout-stream')) {
