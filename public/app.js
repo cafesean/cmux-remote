@@ -3013,6 +3013,18 @@
   // URL bar + nav + zoom.
   if (elBGo) elBGo.onclick = () => { const u = normalizeUrl(elBurl.value); if (u) { bAction('nav', { action: 'goto', url: u }); elBurl.blur(); } };
   if (elBurl) elBurl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); elBGo.onclick(); } });
+  // Tap the address bar = whole URL selected, ready to type over (like a real browser). Selected one
+  // tick after focus (iOS drops a selection made inside the focus event), and the desktop mouseup
+  // that follows a focusing click is cancelled once so it can't collapse the selection to a caret.
+  if (elBurl) {
+    let skipUp = false;
+    elBurl.addEventListener('focus', () => {
+      skipUp = true;
+      setTimeout(() => { try { elBurl.setSelectionRange(0, elBurl.value.length); } catch (_) { elBurl.select(); } }, 0);
+    });
+    elBurl.addEventListener('mouseup', (e) => { if (skipUp) { e.preventDefault(); skipUp = false; } });
+    elBurl.addEventListener('blur', () => { skipUp = false; });
+  }
   if (elBBack) elBBack.onclick = () => bAction('nav', { action: 'back' });
   if (elBFwd) elBFwd.onclick = () => bAction('nav', { action: 'forward' });
   if (elBReload) elBReload.onclick = () => bAction('nav', { action: 'reload' });
