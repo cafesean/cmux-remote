@@ -2965,7 +2965,7 @@
       if (gg.max < 8 && Date.now() - gg.t < 500) {           // tap -> click
         const f = bshotFrac(gg.lx, gg.ly); if (!f) return;
         bAction('tap', f).then((d) => {
-          if (d && d.frame) return bFrameHint(f);
+          if (d && d.xframe) return bFrameHint(f);   // not 'frame': that key carries image data
           if (d && d.editable) { resetBtext(d.value || ''); elBtext.focus(); }   // seed with the field's current text
         });
         return;
