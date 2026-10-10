@@ -12,5 +12,5 @@ const sw = fs.readFileSync(path.join(REPO, 'public/sw.js'), 'utf8');
 test('latest client shell uses the v28 cache generation everywhere', () => {
   assert.match(index, /<script src="\/app\.js\?v=v28-[^"]+"><\/script>/);
   assert.match(index, /serviceWorker\.register\('\/sw\.js\?v=v28'\)/);
-  assert.match(sw, /const CACHE = 'cmux-shell-v31';/);
+  assert.match(sw, /const CACHE = 'cmux-shell-v32';/);
 });
