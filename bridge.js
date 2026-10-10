@@ -1785,7 +1785,7 @@ function cmuxBrowserTap(req, res) {
     // are real. So a tap on an ANCHOR never dispatches the click at all — the eval only reports the
     // href (nav) and the handler drives a `goto`. Everything else gets the full synthetic click:
     // DOM interaction (buttons, inputs, SPA handlers) works fine.
-    const js = `(function(fx,fy){var x=Math.round(fx*innerWidth),y=Math.round(fy*innerHeight);var el=document.elementFromPoint(x,y);if(!el)return JSON.stringify({hit:null,x:x,y:y});try{if(el.focus)el.focus();}catch(e){}if(el.tagName==='IFRAME'){var xo=false;try{xo=!el.contentDocument;}catch(e){xo=true;}if(xo){try{el.focus();}catch(e){}return JSON.stringify({hit:'IFRAME',xframe:true,x:x,y:y,loc:location.href});}}var a=el.closest?el.closest('a[href]'):null;var href=(a&&a.href&&/^https?:/i.test(a.href)&&a.href!==location.href)?a.href:null;var ed=(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable===true);if(!href){['mousedown','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0}));});}var val=ed?String(el.value!==undefined?el.value:(el.textContent||'')).slice(0,2000):null;return JSON.stringify({hit:el.tagName,editable:ed,value:val,x:x,y:y,nav:href,loc:location.href});})(${fx},${fy})`;
+    const js = `(function(fx,fy){var x=Math.round(fx*innerWidth),y=Math.round(fy*innerHeight);var el=document.elementFromPoint(x,y);if(!el)return JSON.stringify({hit:null,x:x,y:y});try{if(el.focus)el.focus();}catch(e){}if(el.tagName==='IFRAME'){var xo=false;try{xo=!el.contentDocument;}catch(e){xo=true;}if(xo){var fl=null;for(var n=el;n&&n!==document.body&&n!==document.documentElement;n=n.parentElement){var ps=getComputedStyle(n).position;if(ps==='fixed'||ps==='sticky'){fl=n;}}if(fl){fl.setAttribute('data-cmr-hidden','1');fl.style.setProperty('display','none','important');return JSON.stringify({hit:'IFRAME',xframe:true,closed:true,x:x,y:y,loc:location.href});}try{el.focus();}catch(e){}return JSON.stringify({hit:'IFRAME',xframe:true,closed:false,x:x,y:y,loc:location.href});}}var a=el.closest?el.closest('a[href]'):null;var href=(a&&a.href&&/^https?:/i.test(a.href)&&a.href!==location.href)?a.href:null;var ed=(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable===true);if(!href){['mousedown','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0}));});}var val=ed?String(el.value!==undefined?el.value:(el.textContent||'')).slice(0,2000):null;return JSON.stringify({hit:el.tagName,editable:ed,value:val,x:x,y:y,nav:href,loc:location.href});})(${fx},${fy})`;
     (async () => {
       const out = await browserEval(surface, js);
       let r = {}; try { r = JSON.parse(out) || {}; } catch (_) { r = { raw: String(out || '').slice(0, 300) }; }
@@ -1800,19 +1800,20 @@ function cmuxBrowserTap(req, res) {
   });
 }
 
-// POST /cmux/browser/hideframe { surface, fx, fy } — hide the cross-origin iframe at that point.
-// cmux refuses script inside a cross-origin frame ("Cross-origin iframe control is not supported"),
-// so a tap can never reach e.g. the X on Google's "Sign in with Google" popup. Hiding the frame
-// element from the TOP page is the one thing that works without keys (Tab/Enter do reach inside).
-function cmuxBrowserHideFrame(req, res) {
+// Cross-origin frames: cmux refuses script inside them ("Cross-origin iframe control is not
+// supported"), so a tap can never reach e.g. the X on Google's "Sign in with Google" popup. So a tap
+// on a FLOATING cross-origin frame (it or an ancestor is position:fixed/sticky — popups, cookie
+// banners, chat bubbles) closes it outright: the outermost floating ancestor is hidden and marked
+// data-cmr-hidden. An in-page frame (card field, video) is never hidden — it only gets focus, so the
+// ⇥ / ⏎ keys act inside it.
+// POST /cmux/browser/unhideframe { surface } — undo: show every frame the mirror hid on this page.
+function cmuxBrowserUnhideFrame(req, res) {
   cmuxReadBody(req, (b) => {
     if (!b) return send(res, 400, { error: 'bad_json' });
     const surface = String(b.surface || '');
     if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
-    const fx = clamp01(b.fx), fy = clamp01(b.fy);
-    if (fx == null || fy == null) return send(res, 400, { error: 'bad_coords' });
-    const js = `(function(fx,fy){var el=document.elementFromPoint(Math.round(fx*innerWidth),Math.round(fy*innerHeight));if(!el||el.tagName!=='IFRAME')return'nofr';el.style.setProperty('display','none','important');return'ok';})(${fx},${fy})`;
-    (async () => { const out = await browserEval(surface, js); noteAction(surface); send(res, 200, { ok: true, result: String(out || '').replace(/"/g, '') }); })();
+    const js = `(function(){var l=document.querySelectorAll('[data-cmr-hidden]');for(var i=0;i<l.length;i++){l[i].style.removeProperty('display');l[i].removeAttribute('data-cmr-hidden');}return l.length;})()`;
+    (async () => { const out = await browserEval(surface, js); noteAction(surface); send(res, 200, { ok: true, restored: Number(out) || 0 }); })();
   });
 }
 
@@ -2059,7 +2060,7 @@ function handleCmux(req, res) {
     return cmuxBrowserHits(res, s);
   }
   if (req.method === 'POST' && p === '/cmux/browser/tap') return cmuxBrowserTap(req, res);
-  if (req.method === 'POST' && p === '/cmux/browser/hideframe') return cmuxBrowserHideFrame(req, res);
+  if (req.method === 'POST' && p === '/cmux/browser/unhideframe') return cmuxBrowserUnhideFrame(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/type') return cmuxBrowserType(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/key') return cmuxBrowserKey(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/scroll') return cmuxBrowserScroll(req, res);
