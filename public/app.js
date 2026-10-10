@@ -1796,8 +1796,37 @@
   // instantly; every REAL frame that arrives resets the shift (the remote page has caught up).
   let bshotShift = 0;
   function shiftBshot(px) { bshotShift = px; elBshot.style.transform = px ? 'translateY(' + px + 'px)' : ''; }
+  // Desktop hand cursor: the mirror is an image, so the browser can't know what is a link. After each
+  // changed frame the clickable areas are fetched ONCE (only while a mouse hovers the image) and the
+  // cursor is picked locally on every move. Smallest containing area wins (the innermost element).
+  const bhits = { r: null, w: 0, h: 0, stale: true, busy: false, x: 0, y: 0 };
+  function bCursorAt(px, py) {
+    if (!bhits.r) return '';
+    const f = bshotFrac(px, py); if (!f) return '';
+    const x = f.fx * bhits.w, y = f.fy * bhits.h;
+    let best = null, area = Infinity;
+    for (const q of bhits.r) {
+      if (x >= q[0] && x < q[0] + q[2] && y >= q[1] && y < q[1] + q[3] && q[2] * q[3] < area) { best = q; area = q[2] * q[3]; }
+    }
+    return best ? (best[4] === 1 ? 'text' : 'pointer') : '';
+  }
+  function bApplyCursor() { elBshot.style.cursor = bCursorAt(bhits.x, bhits.y); }
+  function bFetchHits() {
+    if (bhits.busy || !bhits.stale || state.tabType !== 'browser' || !state.tab) return;
+    bhits.busy = true; bhits.stale = false;
+    jget('/api/cmux/browser/hits?machine=' + encodeURIComponent(state.machine) + '&surface=' + encodeURIComponent(state.tab.id))
+      .then((r) => r.json()).then((d) => { if (d && d.ok) { bhits.r = d.r; bhits.w = d.w; bhits.h = d.h; bApplyCursor(); } })
+      .catch(() => {}).finally(() => { bhits.busy = false; if (bhits.stale && bhits.hover) bFetchHits(); });
+  }
+  elBshot.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    bhits.x = e.clientX; bhits.y = e.clientY; bhits.hover = true;
+    bApplyCursor(); bFetchHits();
+  });
+  elBshot.addEventListener('pointerleave', () => { bhits.hover = false; });
   function bFrame(b64) {
     if (!b64) return;
+    bhits.stale = true; if (bhits.hover) bFetchHits();
     if (elBspin) elBspin.hidden = true;
     shiftBshot(0);
     // frames arrive as JPEG (sips-recompressed) or PNG (fallback) — sniff by base64 magic
@@ -1906,6 +1935,7 @@
   }
   function exitBrowserMode() {
     closeBrowserStream();
+    bhits.r = null; bhits.stale = true; bhits.hover = false; elBshot.style.cursor = '';
     if (state.browser.urlTimer) { clearInterval(state.browser.urlTimer); state.browser.urlTimer = null; }
     state.browser.surface = null;
     document.body.classList.remove('mode-browser');
