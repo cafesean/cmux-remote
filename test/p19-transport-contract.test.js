@@ -147,6 +147,7 @@ function cases() {
     '/api/cmux/equalize': [post('/api/cmux/equalize', { workspace: I.wsA })],
     '/api/cmux/upload': [{ kind: 'upload' }],
     '/api/cmux/browser/info': [json('GET', `/api/cmux/browser/info?surface=${I.sfA1}`)],
+    '/api/cmux/browser/hits': [json('GET', `/api/cmux/browser/hits?surface=${I.sfA1}`)],
     '/api/cmux/browser/stream': [{ kind: 'open', pq: `/api/cmux/browser/stream?surface=${I.sfA1}` }],
     '/api/cmux/browser/open': [post('/api/cmux/browser/open', { surface: I.sfA1, url: 'https://example.invalid/' })],
     '/api/cmux/browser/tap': [post('/api/cmux/browser/tap', { surface: I.sfA1, x: 0.5, y: 0.5 })],
