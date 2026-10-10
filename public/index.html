@@ -321,22 +321,27 @@
     .modeseg { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; font-size: 12px; font-family: var(--mono); }
     .modeseg button { flex: 1; text-align: center; padding: 6px 0; border-radius: 7px; color: var(--dim); background: transparent; border: none; letter-spacing: .04em; }
     .modeseg button.on { background: var(--accent); color: #fff; font-weight: 700; }
-    /* special-key dock: arrows as a d-pad (↑ sits above ↓ so rapid taps can't stray onto the other),
-       everything else in a wrapping group. Every key fires on pointerdown (see app.js) so a press
-       registers instantly; touch-action: manipulation kills the tap delay + double-tap zoom. */
-    .keys { display: flex; gap: 10px; align-items: flex-start; }
-    .keys[hidden] { display: none; }
-    .keys button { font-family: var(--mono); -webkit-user-select: none; user-select: none; touch-action: manipulation; }
-    .dpad { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3, 42px); grid-template-rows: repeat(2, 36px); gap: 5px; }
-    .dpad button { background: var(--panel2); color: var(--accent); border: 1px solid var(--accent);
-      border-radius: 8px; font-size: 17px; display: flex; align-items: center; justify-content: center; padding: 0; }
-    .dpad button:active { background: #223; }
-    .dpad .up { grid-area: 1 / 2; } .dpad .left { grid-area: 2 / 1; }
-    .dpad .down { grid-area: 2 / 2; } .dpad .right { grid-area: 2 / 3; }
-    .special { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; }
-    .special button { background: var(--panel2); color: var(--fg);
-      border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font-size: 12px; }
-    .special button:active { background: #223; }
+    /* p21 key bar: status pill + one sideways-scrolling strip of quick keys, always on, above the
+       input row. A key fires on release unless the finger moved (that was a scroll) — see app.js. */
+    .keybar { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .kstatus { flex: 0 0 auto; font-size: 11px; color: var(--ok); font-weight: 600; font-family: var(--mono);
+      max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .kstatus[hidden] { display: none; }
+    .kstatus::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+      background: var(--ok); margin-right: 5px; vertical-align: middle; box-shadow: 0 0 6px var(--ok); }
+    .kstatus.err { color: var(--warn); }
+    .kstatus.err::before { background: var(--warn); box-shadow: none; }
+    .keys { flex: 1 1 auto; min-width: 0; display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden;
+      -webkit-overflow-scrolling: touch; scrollbar-width: none; touch-action: pan-x; }
+    .keys::-webkit-scrollbar { display: none; }
+    .keys button { flex: 0 0 auto; min-width: 42px; height: 34px; padding: 0 10px; font-family: var(--mono);
+      font-size: 13px; background: var(--panel2); color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+      -webkit-user-select: none; user-select: none; touch-action: pan-x; }
+    .keys button.arrow { color: var(--accent); border-color: var(--accent); font-size: 16px; }
+    .keys button.down { background: #223; }
+    /* In terminal mode the key bar carries the status; the overlay pill stays for files/browser. */
+    body:not(.mode-browser):not(.mode-files):not(.mode-fview) #status { display: none !important; }
+    body.mode-browser #keybar { display: none; }
     .row { display: flex; gap: 8px; align-items: flex-end; }
     .row textarea { flex: 1; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
       border-radius: 9px; padding: 7px 11px; font-size: 16px; line-height: 1.25; font-family: var(--mono);
@@ -467,7 +472,7 @@
     #fvbody a { color: var(--accent); }
 
     /* footer swap: hide terminal controls, show browser controls, in browser mode */
-    body.mode-browser #modeSeg, body.mode-browser #keys, body.mode-browser .row, body.mode-browser #hint { display: none; }
+    body.mode-browser #modeSeg, body.mode-browser #keys, body.mode-browser #keybar, body.mode-browser .row, body.mode-browser #hint { display: none; }
     #bfoot { display: none; flex-direction: column; gap: 8px; }
     body.mode-browser #bfoot { display: flex; }
     #bfoot .bkeys { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -564,19 +569,20 @@
       <button id="modeCompose" class="on" type="button" role="tab" aria-selected="true">Compose</button>
       <button id="modeLive" type="button" role="tab" aria-selected="false">Live</button>
     </div>
-    <div class="keys" id="keys" hidden>
-      <div class="dpad">
-        <button class="arrow up" data-key="up" aria-label="Up">↑</button>
-        <button class="arrow left" data-key="left" aria-label="Left">←</button>
-        <button class="arrow down" data-key="down" aria-label="Down">↓</button>
-        <button class="arrow right" data-key="right" aria-label="Right">→</button>
-      </div>
-      <div class="special">
+    <!-- p21: one always-on row above the input: status pill + a sideways-scrolling strip of
+         quick keys. Keys keep the textarea focused, so the phone keyboard stays up. -->
+    <div class="keybar" id="keybar">
+      <span class="kstatus" id="kstatus" hidden></span>
+      <div class="keys" id="keys">
+        <button data-key="enter" aria-label="Enter">⏎</button>
         <button data-key="escape">Esc</button>
-        <button data-key="tab">⇥</button>
-        <button data-key="shift+tab">⇧⇥</button>
+        <button class="arrow" data-key="up" aria-label="Up">↑</button>
+        <button class="arrow" data-key="down" aria-label="Down">↓</button>
+        <button class="arrow" data-key="left" aria-label="Left">←</button>
+        <button class="arrow" data-key="right" aria-label="Right">→</button>
+        <button data-key="tab" aria-label="Tab">⇥</button>
         <button data-key="ctrl+c">^C</button>
-        <button data-key="enter">⏎</button>
+        <button data-key="shift+tab" aria-label="Shift Tab">⇧⇥</button>
         <button data-key="pageup">PgUp</button>
         <button data-key="pagedown">PgDn</button>
       </div>
@@ -585,7 +591,6 @@
       <button class="kbtoggle" id="attachBtn" type="button" aria-label="Attach a file" title="Attach a file — it lands on the Mac and its path goes in the box">📎</button>
       <input id="attachInput" type="file" multiple hidden />
       <button class="kbtoggle" id="pasteBtn" type="button" aria-label="Paste an image from the clipboard" title="Paste an image from the clipboard">📋</button>
-      <button class="kbtoggle" id="kbToggle" type="button" aria-label="Special keys" aria-pressed="false"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg></button>
       <textarea id="text" rows="1" placeholder="Type…  (Send to submit)" autocomplete="off"
              autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
       <button class="send" id="send">Send</button>
@@ -672,7 +677,7 @@
   <script src="/gitbar.js?v=v1-p8-20260802a"></script>
   <!-- p20: radar.js + inbox.js are no longer loaded (toolbar chips removed, Sean 2026-10-10). -->
   <script src="/sidebar.js?v=v1-p17-20260914a"></script>
-  <script src="/app.js?v=v24-p20alerts-20261010"></script>
-  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js?v=v24').catch(() => {});</script>
+  <script src="/app.js?v=v25-p21keys-20261010"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js?v=v25').catch(() => {});</script>
 </body>
 </html>
