@@ -1610,15 +1610,31 @@ const BROWSER_SHOT_JPEG_Q = '55';    // sips formatOptions: low|normal|high|best
 // the SSE loop BURSTS (350ms ticks) for a short window after — visual feedback lands fast exactly
 // when the user just did something, without paying a screenshot inside the action round-trip.
 const browserLastAction = new Map();   // surface -> Date.now()
-const noteAction = (surface) => browserLastAction.set(surface, Date.now());
-function browserShot(surface) {   // -> Promise<{buf:Buffer, raw:number}|null>
+// Each open stream registers a wake fn here, so an action paints its result NOW instead of after the
+// stream's next scheduled tick (that wait was up to a full cadence step of pure dead time per action).
+const browserWakers = new Map();       // surface -> Set<fn>
+const noteAction = (surface) => {
+  browserLastAction.set(surface, Date.now());
+  const ws = browserWakers.get(surface);
+  if (ws) for (const fn of ws) fn();
+};
+// Phone viewport (p28). cmux's WKWebView keeps the pane's own CSS size (a hidden workspace is 800x600),
+// so a phone got a desktop layout shrunk to ~half — unreadable text, tiny tap targets. `browser
+// viewport W H` (supported since cmux 0.64.23) makes the page lay out at the phone's CSS size, so the
+// frame is 1:1 on the phone. The Mac pane shows that layout aspect-fitted while a phone watches; the
+// last viewer leaving resets it (after a grace period, so a stream reconnect doesn't flap the layout).
+const browserViewers = new Map();      // surface -> open stream count
+const browserViewportReset = new Map(); // surface -> pending reset timer
+const VIEWPORT_RESET_GRACE_MS = 4000;
+const viewportDim = (v, lo, hi) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : null; };
+function browserShot(surface, maxDim) {   // -> Promise<{buf:Buffer, raw:number}|null>
   const out = browserShotPath(surface);
   const jpg = out.replace(/\.png$/, '.jpg');
   return new Promise((resolve) => cmux(['browser', surface, 'screenshot', '--out', out], (err) => {
     if (err) return resolve(null);
     fs.readFile(out, (e, png) => {
       if (e) return resolve(null);
-      execFile('/usr/bin/sips', ['-Z', String(BROWSER_SHOT_MAX_DIM), '-s', 'format', 'jpeg',
+      execFile('/usr/bin/sips', ['-Z', String(maxDim || BROWSER_SHOT_MAX_DIM), '-s', 'format', 'jpeg',
         '-s', 'formatOptions', BROWSER_SHOT_JPEG_Q, out, '--out', jpg], { timeout: 8000 }, (se) => {
         if (se) return resolve({ buf: png, raw: png.length });   // sips failed → raw PNG fallback
         fs.readFile(jpg, (je, jbuf) => resolve(je ? { buf: png, raw: png.length } : { buf: jbuf, raw: png.length }));
@@ -1665,28 +1681,37 @@ function cmuxBrowserInfo(res, surface) {
     .then((out) => { let info = null; try { info = JSON.parse(out); } catch (_) {} return info ? send(res, 200, { ok: true, ...info }) : send(res, 502, { error: 'cmux_failed' }); });
 }
 
-// GET /cmux/browser/stream?surface= -> SSE of base64 PNG frames, emitted only when the shot changes.
+// GET /cmux/browser/stream?surface=[&vw=&vh=] -> SSE of base64 JPEG frames, emitted only on change.
+// vw/vh = the viewer's CSS size: the page is laid out at exactly that size (see Phone viewport above).
 // ADAPTIVE cadence — a screenshot of a big Retina pane costs the cmux app real CPU every tick, and an
 // unbounded 900ms loop on a ~3MB pane starves terminal.replay for every OTHER tab (observed: terminal
-// mirrors going from instant to ~10s). So: poll fast only while the page is actually changing, back off
-// hard when it idles, and back off extra for huge panes.
-function cmuxBrowserStream(req, res, surface) {
+// mirrors going from instant to ~10s). So: shoot back-to-back only right after an action, poll
+// moderately while the page changes, back off hard when it idles, and back off extra for huge panes.
+// A phone-sized viewport frame is small (~140KB PNG, ~200ms to shoot), so its burst is cheap.
+function cmuxBrowserStream(req, res, surface, vw, vh) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   res.write(': connected\n\n');
-  let lastHash = null, alive = true, busy = false, idleTicks = 0, lastRaw = 0, timer = null;
+  let lastHash = null, alive = true, busy = false, again = false, idleTicks = 0, lastRaw = 0, timer = null;
+  const phone = !!(vw && vh);
+  browserViewers.set(surface, (browserViewers.get(surface) || 0) + 1);
+  const pending = browserViewportReset.get(surface);
+  if (pending) { clearTimeout(pending); browserViewportReset.delete(surface); }
   const delay = () => {
     const since = Date.now() - (browserLastAction.get(surface) || 0);
-    if (since < 2500) return lastRaw > 1536 * 1024 ? 500 : 350;   // just-acted burst: frames land fast
-    let d = idleTicks > 4 ? 2500 : 1000;                    // idle page → 2.5s; active page → 1s
-    if (lastRaw > 1536 * 1024) d = Math.max(d, 2000);       // huge SOURCE pane → snapshot cost on the
+    const huge = lastRaw > 1536 * 1024;
+    if (since < 3000) return huge ? 500 : 40;               // just acted: frames back-to-back
+    let d = idleTicks > 4 ? 2000 : 600;                     // idle page → 2s; changing page → 0.6s
+    if (huge) d = Math.max(d, 2000);                        // huge SOURCE pane → snapshot cost on the
     return d;                                               // cmux app itself; never faster than 2s
   };
   const schedule = () => { if (alive) timer = setTimeout(tick, delay()); };
   const tick = () => {
     if (!alive) return;
-    if (busy) return schedule();
+    timer = null;
+    if (busy) { again = true; return; }
     busy = true;
-    browserShot(surface).then((shot) => {
+    // A phone frame is already phone-sized; never shrink it (sips -Z is the longest-edge cap).
+    browserShot(surface, phone ? 4096 : 0).then((shot) => {
       busy = false;
       if (!alive) return;
       if (!shot) { res.write('event: error\ndata: cmux_failed\n\n'); return schedule(); }
@@ -1694,12 +1719,30 @@ function cmuxBrowserStream(req, res, surface) {
       const h = crypto.createHash('md5').update(shot.buf).digest('hex');
       if (h !== lastHash) { lastHash = h; idleTicks = 0; res.write('data: ' + shot.buf.toString('base64') + '\n\n'); }
       else idleTicks++;
+      if (again) { again = false; return tick(); }          // an action landed mid-shot: shoot again now
       schedule();
     });
   };
+  const wake = () => { if (!alive) return; if (timer) { clearTimeout(timer); timer = null; } tick(); };
+  if (!browserWakers.has(surface)) browserWakers.set(surface, new Set());
+  browserWakers.get(surface).add(wake);
   const hb = setInterval(() => { if (alive) res.write(': hb\n\n'); }, 15000);
-  tick();
-  const done = () => { if (!alive) return; alive = false; if (timer) clearTimeout(timer); clearInterval(hb); try { res.end(); } catch (_) {} };
+  if (phone) cmux(['browser', surface, 'viewport', String(vw), String(vh)], () => { if (alive) tick(); }, 8000);
+  else tick();
+  const done = () => {
+    if (!alive) return; alive = false; if (timer) clearTimeout(timer); clearInterval(hb);
+    const ws = browserWakers.get(surface); if (ws) { ws.delete(wake); if (!ws.size) browserWakers.delete(surface); }
+    const n = (browserViewers.get(surface) || 1) - 1;
+    if (n > 0) browserViewers.set(surface, n);
+    else {
+      browserViewers.delete(surface);
+      if (phone) browserViewportReset.set(surface, setTimeout(() => {
+        browserViewportReset.delete(surface);
+        if (!browserViewers.has(surface)) cmux(['browser', surface, 'viewport', 'reset'], () => {}, 8000);
+      }, VIEWPORT_RESET_GRACE_MS));
+    }
+    try { res.end(); } catch (_) {}
+  };
   req.on('close', done); req.on('error', done);
 }
 
@@ -1967,7 +2010,8 @@ function handleCmux(req, res) {
   if (req.method === 'GET' && p === '/cmux/browser/stream') {
     const s = surfaceParam();
     if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
-    return cmuxBrowserStream(req, res, s);
+    return cmuxBrowserStream(req, res, s, viewportDim(u.searchParams.get('vw'), 200, 2000),
+      viewportDim(u.searchParams.get('vh'), 200, 3000));
   }
   if (req.method === 'POST' && p === '/cmux/browser/tap') return cmuxBrowserTap(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/type') return cmuxBrowserType(req, res);

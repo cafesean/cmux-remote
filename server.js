@@ -768,7 +768,9 @@ async function handleApi(req, res, u) {
     req.on('close', () => ctrl.abort());
     let up;
     try {
-      up = await upstream(m, `/cmux/browser/stream?surface=${encodeURIComponent(surface)}`, {
+      const qs = new URLSearchParams({ surface });
+      for (const k of ['vw', 'vh']) { const v = u.searchParams.get(k); if (v && /^\d{1,4}$/.test(v)) qs.set(k, v); }
+      up = await upstream(m, `/cmux/browser/stream?${qs}`, {
         headers: { 'x-bridge-secret': m.secret, ...accessHeaders(m) }, signal: ctrl.signal,
       });
     } catch (_) { res.writeHead(502); return res.end(); }
