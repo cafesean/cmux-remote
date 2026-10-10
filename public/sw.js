@@ -19,7 +19,8 @@
 // v25: p21 — always-on key bar (status + quick keys) above the input; ⌨ toggle removed.
 // v26: p22 — quick keys show only while the text box has focus.
 // v27: p25 — in-app chime toggle in ⚙; push alerts explicitly not silent.
-const CACHE = 'cmux-shell-v27';
+// v28: p26 — push receipts (/__lastpush) + ⚙ Send test; p27 Chrome remote-debugging prompt banner.
+const CACHE = 'cmux-shell-v28';
 const SHELL = ['/', '/app.js', '/sidebar.js'];
 
 self.addEventListener('install', (e) => {
@@ -29,7 +30,7 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== 'cmux-push-log').map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -75,10 +76,17 @@ self.addEventListener('fetch', (e) => {
 // ---- p20 phone alerts ---------------------------------------------------------------------
 // The server sends {title, body, tag, machine, surface}. iOS revokes a subscription whose pushes
 // do not show a notification, so every push shows one — even while the app is open.
+// p26: every push is recorded on the device (Cache Storage, /__lastpush) BEFORE it is shown, and the
+// show result too, so ⚙ can say whether this phone received the last alert and whether iOS displayed
+// it — the only way to tell "never arrived" from "arrived but muted" without a Mac in hand.
+const recordPush = (rec) => caches.open('cmux-push-log')
+  .then((c) => c.put('/__lastpush', new Response(JSON.stringify(rec), { headers: { 'content-type': 'application/json' } })))
+  .catch(() => {});
 self.addEventListener('push', (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch (_) { d = { body: e.data ? e.data.text() : '' }; }
-  e.waitUntil(self.registration.showNotification(d.title || 'cmux-remote', {
+  const rec = { at: Date.now(), title: d.title || '', shown: null, error: null };
+  e.waitUntil(recordPush(rec).then(() => self.registration.showNotification(d.title || 'cmux-remote', {
     body: d.body || '',
     tag: d.tag || undefined,
     renotify: !!d.tag,
@@ -86,7 +94,10 @@ self.addEventListener('push', (e) => {
     icon: '/icon-180.png',
     badge: '/icon-180.png',
     data: { machine: d.machine || null, surface: d.surface || null },
-  }));
+  })).then(() => { rec.shown = true; }, (err) => { rec.shown = false; rec.error = String((err && err.message) || err); })
+    .then(() => recordPush(rec))
+    .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+    .then((wins) => { for (const w of wins) w.postMessage({ type: 'cmux-push', rec }); }));
 });
 
 // Tap → open (or focus) the app on that pane. An open window gets a message; a cold start gets

@@ -668,6 +668,10 @@
     </div>
     <div class="setnote" id="pushNote" hidden></div>
     <div class="setrow">
+      <span class="setlabel" id="pushLast">Last alert: —</span>
+      <div class="stepper"><button id="pushTest" type="button" style="width:auto;padding:6px 12px">Send test</button></div>
+    </div>
+    <div class="setrow">
       <span class="setlabel">Chime when open</span>
       <div class="stepper"><button id="chimeToggle" type="button" style="width:auto;padding:6px 12px">On</button></div>
     </div>
@@ -687,7 +691,7 @@
   <script src="/gitbar.js?v=v1-p8-20260802a"></script>
   <!-- p20: radar.js + inbox.js are no longer loaded (toolbar chips removed, Sean 2026-10-10). -->
   <script src="/sidebar.js?v=v1-p17-20260914a"></script>
-  <script src="/app.js?v=v27-p25chime-20261010"></script>
-  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js?v=v27').catch(() => {});</script>
+  <script src="/app.js?v=v28-p26diag-20261010"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js?v=v28').catch(() => {});</script>
 </body>
 </html>

@@ -1351,6 +1351,35 @@ function cmuxReorderTab(req, res) {
   });
 }
 
+// GET  /cmux/chrome-prompt               -> { present, app, text, buttons } | { present:false, error? }
+// POST /cmux/chrome-prompt { action }    -> presses Allow / Cancel on Chrome's "Allow remote debugging?"
+// p27: lib/chrome-prompt.js (macOS Accessibility). One osascript at a time; a GET inside 3s reuses
+// the last answer so several pollers cost one scan.
+const { chromePrompt } = require('./lib/chrome-prompt');
+let cpLast = null, cpAt = 0, cpBusy = null;
+function cpScan() {
+  if (cpBusy) return cpBusy;
+  cpBusy = chromePrompt('find').then((r) => { cpLast = r; cpAt = Date.now(); return r; }).finally(() => { cpBusy = null; });
+  return cpBusy;
+}
+function cmuxChromePrompt(req, res) {
+  // never under tests: a test must not scan, let alone press, a real dialog on the dev's Mac
+  if (process.platform !== 'darwin' || tmuxCli || process.env.NODE_ENV === 'test') return send(res, 200, { present: false, unsupported: true });
+  if (req.method === 'GET') {
+    if (cpLast && Date.now() - cpAt < 3000) return send(res, 200, cpLast);
+    return cpScan().then((r) => send(res, 200, r));
+  }
+  cmuxReadBody(req, async (b) => {
+    const action = b && (b.action === 'allow' || b.action === 'deny') ? b.action : null;
+    if (!action) return send(res, 400, { error: 'bad_action' });
+    if (cpBusy) await cpBusy.catch(() => {});
+    const r = await chromePrompt(action);
+    cpLast = null;
+    console.log(`chrome-prompt: ${action} → ${r.clicked ? 'pressed ' + r.clicked + ' (' + r.via + ')' : (r.error || 'no dialog')}`);
+    send(res, r.clicked ? 200 : (r.present === false ? 404 : 502), r);
+  });
+}
+
 // ---------- dropped files -----------------------------------------------------------------------
 // Dragging an image onto a terminal on the Mac gives the agent a PATH to read. From a phone there is
 // no path, so the file has to land on the Mac first: this writes the body to a directory and answers
@@ -1920,6 +1949,7 @@ function handleCmux(req, res) {
   if (req.method === 'POST' && p === '/cmux/split-off') return cmuxSplitOff(req, res);
   if (req.method === 'POST' && p === '/cmux/drop-surface') return cmuxDropSurface(req, res);
   if (req.method === 'POST' && p === '/cmux/reorder-tab') return cmuxReorderTab(req, res);
+  if (p === '/cmux/chrome-prompt' && (req.method === 'GET' || req.method === 'POST')) return cmuxChromePrompt(req, res);
   if (req.method === 'POST' && p === '/cmux/close-pane') return cmuxClosePane(req, res);
   if (req.method === 'POST' && p === '/cmux/upload') return cmuxUpload(req, res);
   if (req.method === 'POST' && p === '/cmux/focus-pane') return cmuxFocusPane(req, res);

@@ -575,6 +575,7 @@
   function updateSplitToggle() { if (elSplitToggle) elSplitToggle.textContent = state.splitPref === 'off' ? 'Off' : 'Auto'; }
   function openSettings() {
     closeWsMenu(); closeSplitMenu(); updateFontVal(); updateSplitToggle();
+    try { loadPushRec(); } catch (_) {}   // p26
     elSetMenu.hidden = false;
     const rc = elSettingsBtn.getBoundingClientRect();
     elSetMenu.style.left = 'auto';
@@ -681,6 +682,7 @@
     });
     renderSideBadge(snap);
     chimeOnChange(snap);   // p25
+    loadChromePrompt();    // p27
   }
   const loadTree = loadFleet;   // every existing caller keeps its name
 
@@ -3263,6 +3265,51 @@
     } catch (e) { return { ok: false, reason: (e && e.message) || 'jump failed' }; }
   }
 
+  // ---- Chrome "Allow remote debugging?" (p27) ---------------------------------
+  // Polled with the fleet beat. A banner over the app shows the dialog's text with Allow / Deny; the
+  // server presses the button on the Mac. SECURITY: Allow gives the connecting app full control of
+  // that Chrome profile — the banner says so.
+  let cpBanner = null;
+  function renderChromePrompt(list) {
+    const hit = (list || []).find((m) => m.present);
+    if (!hit) { if (cpBanner) { cpBanner.remove(); cpBanner = null; } return; }
+    if (!cpBanner) {
+      cpBanner = document.createElement('div');
+      cpBanner.id = 'chromePrompt';
+      cpBanner.style.cssText = 'position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:60;background:#2a1d0b;'
+        + 'border:1px solid var(--warn);border-radius:12px;padding:10px 12px;color:var(--fg);font-size:13px;box-shadow:0 6px 24px rgba(0,0,0,.5)';
+      document.body.appendChild(cpBanner);
+    }
+    cpBanner.replaceChildren();
+    const h = document.createElement('div'); h.style.cssText = 'font-weight:700;margin-bottom:4px';
+    h.textContent = '🔐 ' + (hit.app || 'Chrome') + ' asks: Allow remote debugging?' + (state.machines.length > 1 ? ' (' + hit.label + ')' : '');
+    const w = document.createElement('div'); w.style.cssText = 'color:var(--dim);font-size:11.5px;margin-bottom:8px';
+    w.textContent = 'Allow gives the connecting app full control of that Chrome profile (every logged-in site). Deny if you did not expect it.';
+    const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end';
+    const mk = (label, action, bg) => {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+      b.style.cssText = 'padding:8px 16px;border-radius:9px;border:1px solid var(--line);font-weight:600;color:#fff;background:' + bg;
+      b.onclick = async () => {
+        row.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+        try {
+          const r = await jpost('/api/cmux/chrome-prompt', { machine: hit.id, action });
+          const d = await r.json().catch(() => ({}));
+          setStatus(d.clicked ? 'Chrome: pressed ' + d.clicked : 'Chrome: ' + (d.error || 'no dialog'), !d.clicked, 4000);
+        } catch (_) { setStatus('Chrome: request failed', true, 4000); }
+        loadChromePrompt();
+      };
+      return b;
+    };
+    row.append(mk('Deny', 'deny', '#3a3f4b'), mk('Allow', 'allow', '#b26a00'));
+    cpBanner.append(h, w, row);
+  }
+  async function loadChromePrompt() {
+    try { const r = await jget('/api/cmux/chrome-prompt'); if (r.ok) renderChromePrompt((await r.json()).machines); } catch (_) {}
+  }
+  window.__cmuxChromePrompt = loadChromePrompt;   // for the desktop proof
+  loadChromePrompt();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) loadChromePrompt(); });
+
   // ---- In-app chime (p25) -----------------------------------------------------
   // While the app is open, a tab that turns `waiting` (amber) or `done` (blue) plays a short chime —
   // two rising notes for waiting, one soft note for done. Push alerts cover the app being closed.
@@ -3392,6 +3439,38 @@
   }
   if (elPushToggle) elPushToggle.onclick = (e) => { e.stopPropagation(); togglePush(); };
   syncPush();
+
+  // p26: push receipts. sw.js records each push it receives (and whether iOS let it show) in Cache
+  // Storage; ⚙ shows the last one. "Send test" asks the server to push THIS device.
+  const elPushLast = $('pushLast'), elPushTest = $('pushTest');
+  const fmtAgo = (ms) => { const s = Math.round((Date.now() - ms) / 1000); return s < 60 ? s + 's ago' : s < 3600 ? Math.round(s / 60) + 'm ago' : new Date(ms).toLocaleString(); };
+  function showPushRec(rec) {
+    if (!elPushLast) return;
+    if (!rec) { elPushLast.textContent = 'Last alert: none received on this device'; return; }
+    elPushLast.textContent = 'Last alert: ' + fmtAgo(rec.at) + (rec.shown === false ? ' — iOS blocked display (' + (rec.error || '?') + ')' : rec.shown ? ' — shown' : ' — received');
+  }
+  async function loadPushRec() {
+    try { const r = await caches.match('/__lastpush', { cacheName: 'cmux-push-log' }); showPushRec(r ? await r.json() : null); }
+    catch (_) { showPushRec(null); }
+  }
+  if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'cmux-push') showPushRec(e.data.rec);
+  });
+  if (elPushTest) elPushTest.onclick = async (e) => {
+    e.stopPropagation();
+    if (!pushSupported()) { pushNote('This browser cannot receive push alerts.'); return; }
+    try {
+      const { sub } = await pushSub();
+      if (!sub) { pushNote('Turn Phone alerts On first.'); return; }
+      const r = await jpost('/api/push/test', { endpoint: sub.endpoint });
+      const d = await r.json().catch(() => ({}));
+      const st = (d.results || []).map((x) => x.status).join(',') || 'none';
+      pushNote(d.ok ? 'Sent (Apple/Google said ' + st + '). If no banner within ~10s, check Settings → Notifications → cmux-remote.'
+        : 'Server could not send (' + st + '). Turn alerts Off and On.');
+      setTimeout(loadPushRec, 4000);
+    } catch (err) { pushNote('Test failed: ' + ((err && err.message) || err)); }
+  };
+  loadPushRec();
 
   // Tapped alert → that pane. A running app gets a message from sw.js; a cold start carries BOOT_JUMP
   // and waits for the first tree before jumping.
