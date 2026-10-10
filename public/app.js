@@ -2902,10 +2902,11 @@
     elBshot.addEventListener('pointerdown', (e) => {
       if (state.tabType !== 'browser') return;
       try { elBshot.setPointerCapture(e.pointerId); } catch (_) {}
-      g = { sx: e.clientX, sy: e.clientY, t: Date.now(), max: 0, base: bshotShift };
+      g = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, t: Date.now(), max: 0, base: bshotShift };
     });
     elBshot.addEventListener('pointermove', (e) => {
       if (!g) return;
+      g.lx = e.clientX; g.ly = e.clientY;
       g.max = Math.max(g.max, Math.abs(e.clientX - g.sx), Math.abs(e.clientY - g.sy));
       if (g.max >= 8) { bDragging = true; shiftBshot(g.base + (e.clientY - g.sy)); }   // image follows the finger instantly
     });
@@ -2924,7 +2925,16 @@
       }
     };
     elBshot.addEventListener('pointerup', end);
-    elBshot.addEventListener('pointercancel', () => { g = null; bDragging = false; shiftBshot(0); });
+    // iOS can CANCEL a finger drag (it decides the touch is its own gesture) — that used to drop the
+    // whole swipe, so a finger could never scroll the page. A cancelled drag now still scrolls, using
+    // the last position the finger reached; a cancelled tap does nothing.
+    elBshot.addEventListener('pointercancel', () => {
+      const gg = g;
+      if (gg && gg.max >= 8) end({ clientX: gg.lx, clientY: gg.ly });
+      else { g = null; bDragging = false; shiftBshot(0); }
+    });
+    // Belt and braces for iOS: never let the native page take a touch that starts on the mirror.
+    elBview.addEventListener('touchmove', (e) => { if (state.tabType === 'browser') e.preventDefault(); }, { passive: false });
   })();
   // Mouse wheel / trackpad scroll (desktop). Only click-drag scrolled before, so a trackpad did
   // nothing. Deltas are summed and sent every 90ms (one cmux call per batch, not per wheel event).
