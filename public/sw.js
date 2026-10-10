@@ -15,8 +15,9 @@
 // v21: the composer wraps in a narrow pane (index.html CSS only).
 // v22: Fit width / Fixed size font mode toggle in the settings popover (new index.html markup).
 // v23: pane history retries until answered, parks rows while scrolled up; cmux-version note on "live".
-const CACHE = 'cmux-shell-v23';
-const SHELL = ['/', '/app.js', '/sidebar.js', '/radar.js', '/inbox.js'];
+// v24: p20 — radar/inbox/refresh off the toolbar; push + notificationclick handlers (phone alerts).
+const CACHE = 'cmux-shell-v24';
+const SHELL = ['/', '/app.js', '/sidebar.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -37,11 +38,11 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
   const path = url.pathname === '/index.html' ? '/' : url.pathname;
 
-  // app.js + radar.js + inbox.js: network-first → the freshest code every reload; cache is only the
+  // app.js + sidebar.js: network-first → the freshest code every reload; cache is only the
   // offline fallback. Cache-first here made every deploy "one launch behind". Precaching a script
   // WITHOUT listing it here leaves the copy sitting unused in Cache Storage — this branch is the only
   // thing that ever reads it.
-  if (path === '/app.js' || path === '/sidebar.js' || path === '/radar.js' || path === '/inbox.js') {
+  if (path === '/app.js' || path === '/sidebar.js') {
     e.respondWith(
       fetch(new Request(path, { cache: 'no-store' }))
         .then((r) => putCache(path, r))
@@ -66,4 +67,36 @@ self.addEventListener('fetch', (e) => {
   const refresh = fetch(new Request('/', { cache: 'no-cache' })).then((r) => putCache('/', r)).catch(() => null);
   e.waitUntil(refresh.then(() => {}));
   e.respondWith(caches.match('/').then((hit) => hit || refresh.then((r) => r || new Response('offline', { status: 503 }))));
+});
+
+// ---- p20 phone alerts ---------------------------------------------------------------------
+// The server sends {title, body, tag, machine, surface}. iOS revokes a subscription whose pushes
+// do not show a notification, so every push shows one — even while the app is open.
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (_) { d = { body: e.data ? e.data.text() : '' }; }
+  e.waitUntil(self.registration.showNotification(d.title || 'cmux-remote', {
+    body: d.body || '',
+    tag: d.tag || undefined,
+    renotify: !!d.tag,
+    icon: '/icon-180.png',
+    badge: '/icon-180.png',
+    data: { machine: d.machine || null, surface: d.surface || null },
+  }));
+});
+
+// Tap → open (or focus) the app on that pane. An open window gets a message; a cold start gets
+// the target in the hash, which app.js reads once the tree has loaded.
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const t = (e.notification && e.notification.data) || {};
+  const hash = t.machine && t.surface ? '#jump=' + encodeURIComponent(t.machine + '|' + t.surface) : '';
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((wins) => {
+    const w = wins[0];
+    if (w) {
+      if (hash) w.postMessage({ type: 'cmux-jump', machine: t.machine, surface: t.surface });
+      return w.focus();
+    }
+    return self.clients.openWindow('/' + hash);
+  }));
 });
