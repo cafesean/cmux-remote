@@ -1748,6 +1748,18 @@ function cmuxBrowserStream(req, res, surface, vw, vh) {
   req.on('close', done); req.on('error', done);
 }
 
+// GET /cmux/browser/hits?surface= -> { w, h, r: [[x,y,w,h,kind]...] } — the visible clickable areas
+// (kind 0 = click/hand, 1 = text field), in page CSS px. The mirror is an image, so a desktop mouse
+// gets no hand cursor over links; the client fetches this once per changed frame and picks the
+// cursor locally on every move (no round-trip per mouse move). Read-only eval; capped.
+const BROWSER_HITS_JS = `(function(){var W=innerWidth,H=innerHeight,out=[],all=document.getElementsByTagName('*'),n=Math.min(all.length,8000);var TAG=/^(A|BUTTON|SELECT|SUMMARY|LABEL)$/;for(var i=0;i<n&&out.length<1500;i++){var el=all[i],t=el.tagName;var r=el.getBoundingClientRect();if(r.width<2||r.height<2||r.bottom<=0||r.right<=0||r.top>=H||r.left>=W)continue;var c=getComputedStyle(el).cursor,k=-1;if(t==='TEXTAREA'||el.isContentEditable===true||(t==='INPUT'&&!/^(button|submit|reset|checkbox|radio|image|file|range|color|hidden)$/i.test(el.type)))k=1;else if(t==='INPUT'||c==='pointer'||(TAG.test(t)&&(t!=='A'||el.hasAttribute('href')))||el.getAttribute('role')==='button'||el.getAttribute('role')==='link'||el.hasAttribute('onclick'))k=0;else if(c==='text'&&t!=='BODY'&&t!=='HTML')k=-1;if(k<0)continue;out.push([Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height),k]);}return JSON.stringify({w:W,h:H,r:out});})()`;
+function cmuxBrowserHits(res, surface) {
+  browserEval(surface, BROWSER_HITS_JS).then((out) => {
+    let d = null; try { d = JSON.parse(out); } catch (_) {}
+    return d && Array.isArray(d.r) ? send(res, 200, { ok: true, w: d.w, h: d.h, r: d.r }) : send(res, 502, { error: 'cmux_failed' });
+  });
+}
+
 // POST /cmux/browser/tap { surface, fx, fy } — click the page at a fraction of the viewport.
 function cmuxBrowserTap(req, res) {
   cmuxReadBody(req, (b) => {
@@ -2014,6 +2026,11 @@ function handleCmux(req, res) {
     if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
     return cmuxBrowserStream(req, res, s, viewportDim(u.searchParams.get('vw'), 200, 2000),
       viewportDim(u.searchParams.get('vh'), 200, 3000));
+  }
+  if (req.method === 'GET' && p === '/cmux/browser/hits') {
+    const s = surfaceParam();
+    if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
+    return cmuxBrowserHits(res, s);
   }
   if (req.method === 'POST' && p === '/cmux/browser/tap') return cmuxBrowserTap(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/type') return cmuxBrowserType(req, res);
