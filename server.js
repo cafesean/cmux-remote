@@ -794,7 +794,7 @@ async function handleApi(req, res, u) {
   // (bridge validates surface/coords/keys/url; the extra `machine` field is ignored downstream).
   if (req.method === 'POST' && p.startsWith('/api/cmux/browser/')) {
     const sub = p.slice('/api/cmux/browser/'.length);
-    if (!['open', 'tap', 'type', 'key', 'scroll', 'nav', 'zoom', 'hideframe'].includes(sub)) return sendJson(res, 404, { error: 'not_found' });
+    if (!['open', 'tap', 'type', 'key', 'scroll', 'nav', 'zoom', 'unhideframe'].includes(sub)) return sendJson(res, 404, { error: 'not_found' });
     return readBody(req, (b) => {
       if (!b) return sendJson(res, 400, { error: 'bad_json' });
       const m = findMachine(b.machine);
