@@ -53,6 +53,10 @@
     // user is looking at it right now; and looking at a done tab clears it.
     function tabState(m, t, view) {
       const st = t.status || '', k = key(m, t.id), seen = onScreen(view, m, t.id);
+      // p24: per-tab truth first. `attention` comes from the tab's own unread cmux notification;
+      // `status` is the WORKSPACE's, shared by every tab in it.
+      if (t.attention === 'waiting') { seenRunning.delete(k); unseen.delete(k); return 'waiting'; }
+      if (t.attention === 'done') { seenRunning.delete(k); unseen.delete(k); return 'done'; }
       if (NEEDS.test(st)) { seenRunning.delete(k); return 'waiting'; }
       if (RUNNING.test(st)) { seenRunning.add(k); if (seen) unseen.delete(k); return 'running'; }
       if (seenRunning.delete(k) && !seen) unseen.add(k);

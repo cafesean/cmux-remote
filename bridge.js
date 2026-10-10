@@ -100,6 +100,7 @@ function cli(args, opts, cb) {
 const UUID = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}';
 // A surface target: a surface ref (surface:N) or a raw UUID. This is what every terminal op addresses.
 const SURFACE_RE = new RegExp(`^(surface:\\d+|${UUID})$`);
+const UUID_ONLY_RE = new RegExp(`^${UUID}$`);
 // A workspace target: a workspace ref (workspace:N) or a UUID. Used when creating a tab in a workspace.
 const WORKSPACE_RE = new RegExp(`^(workspace:\\d+|${UUID})$`);
 // A pane target: a pane ref (pane:N) or a UUID. Clients send UUIDs — refs are window-relative and do
@@ -500,9 +501,71 @@ function parseStatusLine(out) {
   return lines.length && !/^needs_you_/.test(lines[0]) ? valueOf(lines[0]) : '';
 }
 async function statusOfWorkspace(ref) {
-  return parseStatusLine(await cmuxP(['list-status', '--workspace', ref], 4000));
+  const out = await cmuxP(['list-status', '--workspace', ref], 4000);
+  return { status: parseStatusLine(out), needs: needsYouNames(out) };
 }
+// p24: the NEEDS YOU hook (plugins tools/hooks/needs-you.py) writes one workspace status entry per
+// waiting session — `needs_you_<id>=⛔ NEEDS YOU · <session name>: <ask> icon=… color=… priority=100`
+// — and clears it when the user answers. The session name is the tab's title, so it pins the wait to
+// one tab. Entries for sessions that have since closed match no tab and are ignored.
+function needsYouNames(out) {
+  const names = new Set();
+  for (const line of String(out || '').split('\n')) {
+    const m = line.trim().match(/^needs_you_[^=]*=.*?NEEDS YOU\s*·\s*(.+?):\s/);
+    if (m) names.add(m[1].trim().toLowerCase());
+  }
+  return names;
+}
+const TITLE_SPINNER_RE = /^[\s⠀-⣿✳✶✻✽✢·◐◑◒◓]+/;
 const STATUS_WS_CAP = 30;
+
+// p24: PER-TAB attention. Status above is a workspace fact, so every tab in a busy workspace read the
+// same green "running". cmux's notification list is per SURFACE: the newest UNREAD one says whether
+// that tab is waiting on the user (a NEEDS YOU banner, a permission/input prompt) or finished a turn
+// nobody has looked at. One list-notifications call per tree, not one per tab.
+const WAITING_RE = /NEEDS YOU|needs (your )?input|waiting for (your )?(input|response|approval)|permission/i;
+function attentionOf(n) {
+  return WAITING_RE.test([n.title, n.subtitle, n.body].join(' ')) ? 'waiting' : 'done';
+}
+async function unreadBySurface() {
+  if (tmuxCli) return new Map();
+  const out = await cmuxP(['list-notifications', '--json'], 4000);
+  let list = [];
+  try { list = JSON.parse(out || '[]'); } catch (_) { list = []; }
+  const by = new Map();
+  for (const n of Array.isArray(list) ? list : []) {
+    if (!n || n.is_read || !n.surface_id) continue;
+    const prev = by.get(n.surface_id);
+    // a waiting notification outranks a done one; within a rank the newest wins
+    const a = attentionOf(n);
+    if (!prev || (a === 'waiting' && prev.attention !== 'waiting')
+      || (a === prev.attention && String(n.created_at) > String(prev.at))) {
+      by.set(n.surface_id, { attention: a, at: n.created_at || '', title: n.title || '' });
+    }
+  }
+  return by;
+}
+async function attachAttention(workspaces) {
+  let by;
+  try { by = await unreadBySurface(); } catch (_) { return; }
+  for (const ws of workspaces) for (const t of ws.tabs || []) {
+    const hit = t.type === 'terminal' && by.get(String(t.id).toUpperCase());
+    if (hit && t.attention !== 'waiting') t.attention = hit.attention;   // a NEEDS YOU entry already won
+  }
+}
+// Viewing a tab from the phone reads its notifications, exactly as visiting it on the Mac does —
+// otherwise a tab answered from the phone would stay "waiting" until someone opened it on the Mac.
+async function markSurfaceRead(surface) {
+  if (tmuxCli) return;
+  const out = await cmuxP(['list-notifications', '--json'], 4000);
+  let list = []; try { list = JSON.parse(out || '[]'); } catch (_) { return; }
+  const want = String(surface).toUpperCase();
+  for (const n of Array.isArray(list) ? list : []) {
+    if (n && !n.is_read && n.id && String(n.surface_id || '').toUpperCase() === want) {
+      await cmuxP(['mark-notification-read', '--id', n.id], 4000);
+    }
+  }
+}
 async function attachStatuses(workspaces) {
   const withTerminals = workspaces.filter((ws) => (ws.tabs || []).some((t) => t.type === 'terminal'));
   const capped = withTerminals.slice(0, STATUS_WS_CAP);
@@ -510,11 +573,15 @@ async function attachStatuses(workspaces) {
   // terminal.replay for the OPEN tab (same contention as the screenshot-cadence lesson)
   for (let i = 0; i < capped.length; i += 8) {
     await Promise.all(capped.slice(i, i + 8).map(async (ws) => {
-      const status = await statusOfWorkspace(ws.ref);
+      const { status, needs } = await statusOfWorkspace(ws.ref);
       ws.status = status;
-      for (const t of ws.tabs) if (t.type === 'terminal') { t.status = status; t.statusScope = 'workspace'; }
+      for (const t of ws.tabs) if (t.type === 'terminal') {
+        t.status = status; t.statusScope = 'workspace';
+        if (needs.size && needs.has(String(t.title || '').replace(TITLE_SPINNER_RE, '').trim().toLowerCase())) t.attention = 'waiting';
+      }
     }));
   }
+  await attachAttention(workspaces);
   // p5 radar coverage metadata (additive). A tab in a workspace past the cap has no status because
   // nobody ASKED, which is a different fact from "cmux reported nothing" — radar renders the first
   // as `unknown` and must never render either as a green.
@@ -1411,9 +1478,11 @@ function cmuxFocusSurface(req, res) {
     if (!b) return send(res, 400, { error: 'bad_json' });
     const surface = String(b.surface || '');
     if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
-    cmux(['rpc', 'surface.focus', JSON.stringify({ surface_id: surface })], (err, stdout, stderr) => (err
-      ? send(res, 502, { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 200) })
-      : send(res, 200, { ok: true })), 8000);
+    cmux(['rpc', 'surface.focus', JSON.stringify({ surface_id: surface })], (err, stdout, stderr) => {
+      if (err) return send(res, 502, { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 200) });
+      send(res, 200, { ok: true });
+      if (UUID_ONLY_RE.test(surface)) markSurfaceRead(surface).catch(() => {});   // p24
+    }, 8000);
   });
 }
 
