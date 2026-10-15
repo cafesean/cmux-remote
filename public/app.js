@@ -111,9 +111,10 @@
   // pane at a time (the pre-multi-pane behaviour) and the tab strip switches between them.
   const SPLIT_MIN_WIDTH = 700;
   // Ceiling on simultaneously mirrored panes: each one costs a terminal.replay per stream round, and
-  // the bridge refuses more than six surfaces on one stream. Extra panes stay reachable from the tab
-  // strip — they are just not painted at the same time.
-  const MAX_PANES = 6;
+  // the bridge refuses more surfaces than this on one stream (bridge.js MAX_STREAM_SURFACES — keep the
+  // two equal). Was 6, which left real desktop panes (8-pane worker grids, stacked splits) as blank
+  // holes; 16 covers every grid in use. Sean OK 2026-10-15, row in monorepo _context/LIMITS.md.
+  const MAX_PANES = 16;
   const canSplit = () => state.splitPref !== 'off' && window.innerWidth >= SPLIT_MIN_WIDTH;
   const layoutPanes = () => (state.layout && state.layout.panes) || [];
   const focusedView = () => (state.focusPane && state.views.get(state.focusPane)) || null;
