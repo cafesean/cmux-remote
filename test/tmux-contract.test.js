@@ -149,6 +149,25 @@ test('shape parity: every non-browser GET route', { skip }, async () => {
     const a = await call(cmuxB.base, 'GET', rf[i]);
     const b = await call(tmuxB.base, 'GET', rt[i]);
     assert.equal(a.status, 200, `${rf[i]} on cmux: ${a.text}`);
+    if (rf[i] === '/cmux/tree') {
+      // The version assessment is intentionally cmux-only; common capabilities
+      // and the rest of the tree must still have identical shapes.
+      const { cmux, ...common } = a.json.capabilities;
+      assert.deepEqual(Object.keys(cmux).sort(), ['min', 'supported', 'version']);
+      assert.equal(typeof cmux.min, 'string');
+      assert.equal(b.json.capabilities.cmux, undefined);
+      a.json = { ...a.json, capabilities: common };
+    }
+    if (rf[i].startsWith('/cmux/history?')) {
+      // `approx` is an optional flag emitted only for a count-based seam.
+      for (const response of [a, b]) {
+        if (response.json.approx !== undefined) {
+          assert.equal(response.json.approx, true);
+          assert.equal(response.json.aligned, false);
+        }
+        response.json = { approx: false, ...response.json };
+      }
+    }
     sameShape(rf[i].split('?')[0] + (rf[i].includes('lines=') ? '?lines' : ''), a, b);
   }
   // the grid really is the tmux pane, and the completion really read the tmux workspace's cwd

@@ -9,7 +9,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { builtinModules } = require('module');
-const { ansiToGrid, textWidth } = require('../lib/tmux-grid');
+const { ansiToGrid, textWidth, charWidth } = require('../lib/tmux-grid');
 const { gridToAnsi } = require('./helpers/grid-to-ansi');
 const menuparse = require('../public/menuparse.js');
 
@@ -71,6 +71,12 @@ test("wide-emoji: 'X' sits at tmux's own column and cell widths agree with tmux'
   const end = Math.max(...row1.map((s) => s.column + s.cell_width));
   assert.equal(end, meta.cursor.column);
   assert.equal(meta.cursor.row, 1);
+});
+
+test('tmux 3.8 emoji additions occupy two cells', () => {
+  const additions = [0x1F1AE, 0x1F6D9, 0x1F7DA, 0x1FA8B, 0x1FA8C, 0x1FA8D,
+    0x1FACC, 0x1FADD, 0x1FAEB, 0x1FAF9, 0x1FAFA];
+  for (const cp of additions) assert.equal(charWidth(cp), 2, cp.toString(16));
 });
 
 test('sgr-basic: flags and 16-colour palette', () => {
