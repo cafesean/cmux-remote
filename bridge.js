@@ -107,7 +107,7 @@ const WORKSPACE_RE = new RegExp(`^(workspace:\\d+|${UUID})$`);
 // not resolve from this detached process (same trap as surface refs).
 const PANE_RE = new RegExp(`^(pane:\\d+|${UUID})$`);
 const SPLIT_DIRS = new Set(['left', 'right', 'up', 'down']);
-const MAX_STREAM_SURFACES = 6;   // panes mirrored at once — each costs one terminal.replay per round
+const MAX_STREAM_SURFACES = 16;  // panes mirrored at once — each costs one terminal.replay per round; = app.js MAX_PANES (LIMITS.md row)
 const CMUX_KEYS = new Set(['enter', 'escape', 'tab', 'shift+tab', 'up', 'down', 'left', 'right',
   'ctrl+c', 'ctrl+d', 'ctrl+l', 'ctrl+r', 'backspace', 'space', 'pageup', 'pagedown', 'home', 'end']);
 // Browser-surface keys: client token -> Playwright/W3C name for `cmux browser <sf> press <key>`.
