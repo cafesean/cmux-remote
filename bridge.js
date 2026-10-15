@@ -1402,18 +1402,28 @@ function safeName(raw) {
   }
   return n || 'file';
 }
-// day folders keep the drop directory from turning into one flat pile
-function uploadTarget(name) {
+// day folders keep the drop directory from turning into one flat pile.
+// All filesystem work stays asynchronous: a stalled upload volume must not stop
+// terminal streaming, unrelated HTTP requests, or child-process timeout callbacks.
+async function writeUpload(name, body) {
   const day = new Date().toISOString().slice(0, 10);
   const dir = `${UPLOAD_DIR}/${day}`;
-  fs.mkdirSync(dir, { recursive: true });
+  await fs.promises.mkdir(dir, { recursive: true });
   const base = safeName(name);
   const dot = base.lastIndexOf('.');
   const stem = dot > 0 ? base.slice(0, dot) : base;
   const ext = dot > 0 ? base.slice(dot) : '';
-  let p = `${dir}/${base}`;
-  for (let i = 1; fs.existsSync(p); i++) p = `${dir}/${stem}-${i}${ext}`;   // never clobber
-  return p;
+  for (let i = 0; ; i++) {
+    const target = `${dir}/${i ? `${stem}-${i}${ext}` : base}`;
+    try {
+      // Atomic no-clobber creation also refuses pre-existing symlinks/FIFOs;
+      // exists-then-write had a race between checking and opening the path.
+      await fs.promises.writeFile(target, body, { mode: 0o644, flag: 'wx' });
+      return target;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+    }
+  }
 }
 // POST /cmux/upload  (raw body, name in the x-file-name header) -> { path, name, bytes }
 function cmuxUpload(req, res) {
@@ -1429,15 +1439,14 @@ function cmuxUpload(req, res) {
     }
     chunks.push(c);
   });
-  req.on('end', () => {
+  req.on('end', async () => {
     if (aborted) return;
     if (!size) return send(res, 400, { error: 'empty' });
     try {
       // the client percent-encodes the name (a header is latin-1 only, a photo can be named anything)
       let name = String(req.headers['x-file-name'] || 'file');
       try { name = decodeURIComponent(name); } catch (_) { /* keep the raw form; safeName still runs */ }
-      const target = uploadTarget(name);
-      fs.writeFileSync(target, Buffer.concat(chunks), { mode: 0o644 });
+      const target = await writeUpload(name, Buffer.concat(chunks));
       send(res, 200, { ok: true, path: target, name: target.split('/').pop(), bytes: size });
     } catch (e) {
       send(res, 500, { error: 'write_failed', detail: String((e && e.message) || e).slice(0, 200) });
