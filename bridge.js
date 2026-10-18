@@ -26,6 +26,7 @@ const { emptyShadowed } = require('./loadenv');
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { createFsBrowse, parseRange, contentDisposition } = require('./fsbrowse');
@@ -892,8 +893,50 @@ function spliceByCount(lines, styled) {
   return Math.max(0, lines.length - (styled.length - trailing));
 }
 
+// ---------- tmux-hosted surfaces: the history lives in tmux, not in the cmux pane -----------------
+// A cmux pane that runs `tmux attach` (chief-of-staff workers since 2026-10-18) shows only tmux's
+// current screen. tmux drew it on the ALTERNATE screen, which cmux reports with zero scrollback, so
+// the pane had one screen of history while tmux held thousands of lines (measured: m-cad-onboard-3,
+// cmux 68 lines, tmux history_size 3046). Even with the alternate screen switched off, the cmux
+// scrollback only starts at the last attach. So for these surfaces the plain text comes from
+// `tmux capture-pane` instead of read-screen; the content seam and the splice below are unchanged.
+//
+// WHICH SURFACE IS WHICH SESSION: the workers' tmux.conf lists CMUX_SURFACE_ID in update-environment,
+// so every attach writes the attaching pane's surface id into that session's environment. A session
+// whose id matches the asked surface is the one on screen. Read-only: list-sessions,
+// show-environment and capture-pane never touch a pane. No socket, no match, or any tmux error =
+// the surface is treated as a plain cmux surface, exactly as before.
+// The socket is the cmux-remote headless tmux layout; TMUX_SOCKET overrides it.
+const HOSTED_TMUX_SOCKET = process.env.TMUX_SOCKET
+  || path.join(os.homedir(), '.local', 'state', 'cmux-remote', `tmux-${process.getuid()}`, 'default');
+const hostedTmux = !tmuxCli ? require('./lib/tmux-cli').createTmuxCli({
+  tmuxBin: process.env.TMUX_BIN || '', socket: HOSTED_TMUX_SOCKET, log: () => {},
+}) : null;
+// surface uuid -> tmux session name, or null when no session on the hosted socket shows it.
+async function hostedTmuxSession(surface) {
+  if (!hostedTmux || !new RegExp(`^${UUID}$`).test(surface) || !fs.existsSync(HOSTED_TMUX_SOCKET)) return null;
+  const ls = await hostedTmux._run(['list-sessions', '-F', '#{session_name}']);
+  if (ls.code !== 0) return null;
+  const want = surface.toLowerCase();
+  for (const name of ls.stdout.split('\n').filter(Boolean)) {
+    const env = await hostedTmux._run(['show-environment', '-t', `=${name}`, 'CMUX_SURFACE_ID']);
+    const id = env.code === 0 ? env.stdout.trim().replace(/^CMUX_SURFACE_ID=/, '') : '';
+    if (id.toLowerCase() === want) return name;
+  }
+  return null;
+}
+// The last `want` rows of the session's history plus its visible screen, as read-screen would print
+// them: plain text, trailing blank rows trimmed (read-screen trims them; spliceByCount relies on it).
+async function hostedTmuxText(name, want) {
+  const r = await hostedTmux._run(['capture-pane', '-p', '-t', `=${name}:`, '-S', `-${want}`]);
+  if (r.code !== 0) return null;
+  const lines = r.stdout.replace(/\n$/, '').split('\n');
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return lines;
+}
+
 // GET /cmux/history?surface=&rows=
-//   -> { rows: [text…], aligned, approx?, complete?, altScreen?, styledRows, scrollbackRows, bufferRows? }
+//   -> { rows: [text…], aligned, approx?, complete?, altScreen?, tmux?, styledRows, scrollbackRows, bufferRows? }
 // `complete: true` = nothing exists above the styled window (the client stops asking).
 function cmuxHistory(res, surface, rowsParam) {
   const asked = parseInt(rowsParam, 10);
@@ -906,32 +949,40 @@ function cmuxHistory(res, surface, rowsParam) {
     const sbRows = rg.scrollback_rows || 0;
     const styledRows = sbRows + (rg.rows || 0);
     const base = { styledRows, scrollbackRows: sbRows };
-    if (rg.active_screen && rg.active_screen !== 'primary') {
+    hostedTmuxSession(surface).catch(() => null).then((tmuxName) => {
+    if (!tmuxName && rg.active_screen && rg.active_screen !== 'primary') {
       return send(res, 200, { rows: [], aligned: false, altScreen: true, ...base });
     }
     // The replay window provably reaches the top of the buffer (see the learned cap above), so there
-    // is nothing above it — and no reason to pay for a 2000-line read to prove it.
-    if (replayReachesTop(replayCap, sbRows)) return send(res, 200, { rows: [], aligned: true, complete: true, ...base });
+    // is nothing above it — and no reason to pay for a 2000-line read to prove it. Not for tmux: the
+    // cmux buffer's top is the last attach, not the top of tmux's history.
+    if (!tmuxName && replayReachesTop(replayCap, sbRows)) return send(res, 200, { rows: [], aligned: true, complete: true, ...base });
     const sbText = spansToText(rg.scrollback_spans);
     const vpText = spansToText(rg.row_spans);
     const styled = [];
     for (let r = 0; r < sbRows; r++) styled.push(sbText.get(r) || '');
     for (let r = 0; r < (rg.rows || 0); r++) styled.push(vpText.get(r) || '');
-    cmux(['read-screen', '--surface', surface, '--scrollback', '--lines', String(want)], (e2, txt) => {
-      if (e2) return send(res, 502, { error: 'cmux_failed' });
+    const readText = (cb) => {
+      if (!tmuxName) return cmux(['read-screen', '--surface', surface, '--scrollback', '--lines', String(want)], cb, 15000);
+      hostedTmuxText(tmuxName, want).then((l) => cb(l ? null : new Error('tmux_failed'), l ? l.join('\n') : ''), (e) => cb(e, ''));
+    };
+    readText((e2, txt) => {
+      if (e2) return send(res, 502, { error: tmuxName ? 'tmux_failed' : 'cmux_failed' });
       const lines = String(txt || '').replace(/\n$/, '').split('\n');
       const bufferRows = lines.length;
+      const tmuxTag = tmuxName ? { tmux: tmuxName } : {};
       let start = alignHistory(lines, styled);
       const aligned = start >= 0;
       if (!aligned) start = spliceByCount(lines, styled);
       const approx = aligned ? {} : { approx: true };
-      if (start <= 0) return send(res, 200, { rows: [], aligned, ...approx, complete: true, ...base, bufferRows });
+      if (start <= 0) return send(res, 200, { rows: [], aligned, ...approx, complete: true, ...tmuxTag, ...base, bufferRows });
       // Rows exist above this replay window, so its scrollback_rows IS the cap. Only a content-proved
-      // seam teaches it — a count-based guess is not evidence.
-      if (aligned) learnReplayCap(replayCap, sbRows);
+      // seam teaches it — a count-based guess is not evidence. tmux text says nothing about cmux's cap.
+      if (aligned && !tmuxName) learnReplayCap(replayCap, sbRows);
       const room = Math.max(0, want - styledRows);
-      send(res, 200, { rows: lines.slice(Math.max(0, start - room), start), aligned, ...approx, ...base, bufferRows });
-    }, 15000);
+      send(res, 200, { rows: lines.slice(Math.max(0, start - room), start), aligned, ...approx, ...tmuxTag, ...base, bufferRows });
+    });
+    });
   }, 10000);
 }
 
