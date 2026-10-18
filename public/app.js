@@ -331,6 +331,14 @@
     el.scrollTop = target;
     requestAnimationFrame(() => { v.autoScrolling = false; });
   }
+  // scrollToTail for callers outside a frame render, which have no line metrics to hand.
+  function pinTail(v) {
+    const el = v.screenEl;
+    const cs = getComputedStyle(el);
+    const lh = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) || 13) * 1.32;
+    const padY = parseFloat(cs.paddingTop || '0') + parseFloat(cs.paddingBottom || '0');
+    scrollToTail(v, el, lh, padY);
+  }
 
   // "At the tail" means the last row WITH CONTENT is on screen — not that the scrollbar has reached
   // the bottom of the blank padding cmux sends after it. Scrolling to the real bottom is something
@@ -519,7 +527,8 @@
   function refitFonts() {
     updateFontVal();
     fitAllFonts();
-    for (const v of state.views.values()) if (v.followTail) v.screenEl.scrollTop = v.screenEl.scrollHeight;
+    // To the last row with content, not scrollHeight — that bottom is cmux's trailing blank rows.
+    for (const v of state.views.values()) if (v.followTail) pinTail(v);
     updateJump();
   }
   function applyZoom() {
@@ -1016,6 +1025,21 @@
       if (v === focusedView()) updateJump();
       closeWsMenu();
     }, { passive: true });
+    // Re-pin the tail whenever this pane's screen changes size. The composer moving in or out of the
+    // pane, the textarea auto-growing, a split drag and a window resize all resize the screen without
+    // a grid frame — and an idle pane gets no frame to re-scroll it. Losing the composer then grew the
+    // screen under a scrollTop measured for the shorter box, exposing cmux's trailing blank rows as a
+    // dead strip above the footer bar; gaining it hid the prompt behind the composer.
+    if (typeof ResizeObserver === 'function') {
+      let lastH = -1;
+      v.resizeObs = new ResizeObserver(() => {
+        const h = screen.clientHeight;
+        if (h === lastH) return;
+        lastH = h;
+        if (v.followTail !== false) pinTail(v);
+      });
+      v.resizeObs.observe(screen);
+    }
     wirePaneTaps(v);
     wirePaneDrag(v);
     state.views.set(p.id, v);
@@ -1024,6 +1048,7 @@
   function destroyView(id) {
     const v = state.views.get(id);
     if (!v) return;
+    if (v.resizeObs) v.resizeObs.disconnect();
     v.el.remove();
     state.views.delete(id);
   }
