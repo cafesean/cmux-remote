@@ -113,7 +113,10 @@ test('pickLandingTab prefers waiting, then done, then running, then the tab in f
   assert.equal(pickLandingTab(tabs, { 3: 'running', 4: 'done' }).id, '4');
   assert.equal(pickLandingTab(tabs, { 3: 'running' }).id, '3');
   assert.equal(pickLandingTab(tabs, {}).id, '2');
-  assert.equal(pickLandingTab([{ id: 'b', type: 'browser' }], {}), null);
+  // a browser-only workspace lands on its browser in front, else the first (was null → empty mirror)
+  assert.equal(pickLandingTab([{ id: 'b', type: 'browser' }], {}).id, 'b');
+  assert.equal(pickLandingTab([{ id: 'b', type: 'browser' }, { id: 'c', type: 'browser', inPane: true }], {}).id, 'c');
+  assert.equal(pickLandingTab([], {}), null);
 });
 
 test('titles lose the Claude Code spinner cmux copies in; a bare glyph keeps the raw title', () => {

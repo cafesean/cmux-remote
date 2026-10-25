@@ -141,10 +141,18 @@
 
   // Which tab a workspace opens on: waiting → done → running → the one cmux has in front → first.
   // `tabs` is the raw tree list; `states` maps surface id → state for that machine.
+  // A workspace of browser tabs only (the owner's BROWSERS) lands on its browser in front: returning
+  // null there left the mirror on "Pick a workspace" and every tree beat tore the panes down again.
   function pickLandingTab(tabs, states) {
     const term = (tabs || []).filter((t) => t.type !== 'browser');
     const by = (st) => term.find((t) => states && states[t.id] === st);
-    return by('waiting') || by('done') || by('running') || term.find((t) => t.inPane || t.selected) || term[0] || null;
+    return by('waiting') || by('done') || by('running') || term.find((t) => t.inPane || t.selected) || term[0]
+      || frontBrowser(tabs);
+  }
+  // The browser tab cmux has in front, else the first one; null when there is none.
+  function frontBrowser(tabs) {
+    const br = (tabs || []).filter((t) => t.type === 'browser');
+    return br.find((t) => t.inPane || t.selected) || br[0] || null;
   }
 
   // The stale-shell reload guard is NOT here. A launch that pairs the old cached `/` with the new
