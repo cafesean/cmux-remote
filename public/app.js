@@ -142,8 +142,15 @@
   const pickLandingTab = (tabs, states) => {
     if (window.cmuxSidebar && window.cmuxSidebar.pickLandingTab) return window.cmuxSidebar.pickLandingTab(tabs, states);
     const term = (tabs || []).filter((t) => t.type !== 'browser');
-    return term.find((t) => /run|need/i.test(t.status || '')) || term.find((t) => t.inPane || t.selected) || term[0] || null;
+    return term.find((t) => /run|need/i.test(t.status || '')) || term.find((t) => t.inPane || t.selected) || term[0]
+      || frontBrowser(tabs);
   };
+  // A browser-only workspace (BROWSERS) has no terminal to land on: open the browser cmux has in
+  // front, else the first. Without it the tree beat cleared the mirror to "Pick a workspace".
+  function frontBrowser(tabs) {
+    const br = (tabs || []).filter((t) => t.type === 'browser');
+    return br.find((t) => t.inPane || t.selected) || br[0] || null;
+  }
   let sidebar = null;        // the view, mounted later; null = feature absent, badge still works
   let lastFleet = [];        // last /fleet machines array — switchMachine seeds the tree from it
   const elSideBadge = $('sideBadge');
@@ -640,7 +647,8 @@
     let keep = state.tab && tabs.find((t) => t.id === state.tab.id);
     if (!keep) {
       const term = tabs.filter((t) => t.type !== 'browser');
-      keep = term.find((t) => /run|need/i.test(t.status || '')) || term.find((t) => t.inPane || t.selected) || term[0] || null;
+      keep = term.find((t) => /run|need/i.test(t.status || '')) || term.find((t) => t.inPane || t.selected) || term[0]
+        || frontBrowser(tabs);
     }
     if (keep) {
       // A tree refresh must not steal the screen from a full-bleed pane the user deliberately
@@ -2166,7 +2174,7 @@
         if (state.tabType === 'browser') { exitBrowserMode(); state.tabType = 'terminal'; }
         state.tab = null;
         const term = ntabs.filter((x) => x.type !== 'browser');
-        const fallback = term[Math.max(0, Math.min(idx, term.length - 1))] || term[0];
+        const fallback = term[Math.max(0, Math.min(idx, term.length - 1))] || term[0] || frontBrowser(ntabs);
         renderTabs();
         if (fallback) selectTab(fallback.id);
         else { teardownPanes(); elEmpty.style.display = 'flex'; elText.disabled = true; elSend.disabled = true; }
