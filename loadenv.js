@@ -9,6 +9,20 @@ const path = require('path');
 // environment, which would otherwise hide the .env socket path and start silently on TCP. Names only.
 const emptyShadowed = [];
 const setBefore = new Set(Object.keys(process.env));
+// Secrets: single source of truth is ~/.secrets/.secrets.local.yaml -> cmux_remote.env (SECRET keys only;
+// ports/paths/labels stay in .env). Precedence: real environment > yaml > .env (fallback when the yaml key
+// is missing). Skipped under tests (NODE_ENV=test) or CMUX_REMOTE_NO_YAML=1 so fixtures stay hermetic.
+const YAML_SECRET_KEYS = ['BRIDGE_SECRET', 'CMUX_SOCKET_PASSWORD', 'SERVER_TOKEN', 'CMUX_MACHINE_SECRET'];
+if (process.env.NODE_ENV !== 'test' && !process.env.CMUX_REMOTE_NO_YAML) {
+  try {
+    const yamlPath = process.env.SECRETS_YAML || path.join(require('os').homedir(), '.secrets', '.secrets.local.yaml');
+    const py = 'import sys,yaml,json\nd=yaml.safe_load(open(sys.argv[1]))["cmux_remote"]["env"]\nprint(json.dumps(d))';
+    const env = JSON.parse(require('child_process').execFileSync('python3', ['-c', py, yamlPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+    for (const k of YAML_SECRET_KEYS) {
+      if (typeof env[k] === 'string' && env[k] !== '' && !(k in process.env)) process.env[k] = env[k];
+    }
+  } catch (_) { /* yaml/python/section missing → fall back to .env below */ }
+}
 try {
   const text = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf8');
   for (const raw of text.split('\n')) {
