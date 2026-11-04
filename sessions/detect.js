@@ -119,10 +119,10 @@ async function readAllEvents(readEvents, since) {
   return all;
 }
 
-// Claude Code is "live" on a surface when the newest hook event naming it is recent and not a
-// SessionEnd. Match on the uuid; a short ref (`surface:12`) is reused after a cmux restart, so it is
-// used only when the surface has no uuid.
-async function eventsForeground(surface, deps) {
+// The newest hook event naming the surface that `accept` takes (default: any), within EVENT_LIVE_MS.
+// Match on the uuid; a short ref (`surface:12`) is reused after a cmux restart, so it is used only when
+// the surface has no uuid. Shared with sessions/join.js, which asks the same question for a transcript.
+async function latestSurfaceEvent(surface, deps, accept) {
   const id = surface.id || surface.ref;
   if (!id) return null;
   const now = (deps.now || Date.now)();
@@ -130,9 +130,15 @@ async function eventsForeground(surface, deps) {
   try { events = await readAllEvents(deps.readEvents || eventlog.readEvents, now - EVENT_LIVE_MS); } catch (_) { return null; }
   let last = null;
   for (const ev of events) {
-    if (ev.surfaceId !== id || now - ev.ts > EVENT_LIVE_MS) continue;
+    if (ev.surfaceId !== id || now - ev.ts > EVENT_LIVE_MS || (accept && !accept(ev))) continue;
     if (!last || ev.ts >= last.ts) last = ev;
   }
+  return last;
+}
+
+// Claude Code is "live" on a surface when its newest hook event is recent and not a SessionEnd.
+async function eventsForeground(surface, deps) {
+  const last = await latestSurfaceEvent(surface, deps);
   return last && last.event !== 'SessionEnd' ? 'claude' : null;
 }
 
@@ -158,4 +164,4 @@ async function foregroundCommand(surface, backend, deps) {
   return eventsForeground(s, d);
 }
 
-module.exports = { detectKind, foregroundCommand, kindOfCommand };
+module.exports = { detectKind, foregroundCommand, kindOfCommand, latestSurfaceEvent };
