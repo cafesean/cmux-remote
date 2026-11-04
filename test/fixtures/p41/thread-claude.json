@@ -1,0 +1,67 @@
+{
+  "title": "p41 native app: wire contract",
+  "cursor": "c1",
+  "messages": [
+    { "id": "c1", "ts": 1793699000000, "kind": "user", "text": "Add the wire contract for the native app, with fixtures." },
+    { "id": "c2", "ts": 1793699004000, "kind": "assistant", "text": "I will read the brief and the existing validator first, then write the test before any fixture." },
+    {
+      "id": "c3", "ts": 1793699006000, "kind": "tools",
+      "items": [
+        { "id": "tu_01", "name": "Read", "target": "radar/schema-lite.js", "status": "ok", "lines": 96, "output": "'use strict';\n// A ~140-line JSON Schema subset validator.\n..." },
+        { "id": "tu_02", "name": "Grep", "target": "validate( test/", "status": "ok", "lines": 4, "output": "test/radar-state-schema.test.js:12\ntest/radar-snapshots.test.js:30\n..." },
+        { "id": "tu_03", "name": "Bash", "target": "ls test/fixtures", "status": "ok", "lines": 4, "output": "codex-envelope.jsonl\ngrids\ninbox-corpus.json\ntmux" }
+      ]
+    },
+    { "id": "c4", "ts": 1793699030000, "kind": "assistant", "text": "The validator supports `oneOf`, `enum` and `const`, which is enough. Writing the failing test now." },
+    {
+      "id": "c5", "ts": 1793699040000, "kind": "todo",
+      "todos": [
+        { "text": "Write test/p41-contract.test.js", "done": true },
+        { "text": "Run it and see it fail", "done": true },
+        { "text": "Write the four fixtures", "done": false },
+        { "text": "Write sessions/CONTRACT.md", "done": false },
+        { "text": "Run the test and commit", "done": false }
+      ]
+    },
+    {
+      "id": "c6", "ts": 1793699060000, "kind": "tools",
+      "items": [
+        { "id": "tu_04", "name": "Write", "target": "test/p41-contract.test.js", "status": "ok", "lines": 140 },
+        { "id": "tu_05", "name": "Bash", "target": "node --test test/p41-contract.test.js", "status": "error", "lines": 6, "output": "not ok 1 - fixtures validate against the contract\n  ENOENT: no such file or directory, open 'test/fixtures/p41/sessions.json'\n# pass 0\n# fail 6" }
+      ]
+    },
+    { "id": "c7", "ts": 1793699090000, "kind": "assistant", "text": "Red, as expected: the fixtures do not exist yet.\n\nA note on the callout format. Agents mark moments like this inside a code fence, and the bridge must not treat it as an alert:\n\n```\n> [!needs-you] Example only\n> This sits inside a fence, so it is sample text.\n```\n\nOnly a callout outside a fence counts." },
+    { "id": "c8", "ts": 1793699120000, "kind": "user", "text": "Here is how the status strip should look. Keep it one line." },
+    { "id": "c9", "ts": 1793699121000, "kind": "attachment", "attachment": { "mime": "image/png", "name": "status-strip.png", "url": "/api/sessions/mini:surface:12/attachments/status-strip.png" } },
+    { "id": "c10", "ts": 1793699150000, "kind": "assistant", "text": "Got it: one line, status first, then model, context and machine." },
+    {
+      "id": "c11", "ts": 1793699160000, "kind": "question",
+      "question": {
+        "header": "Cursor",
+        "text": "How should the thread cursor page backwards?",
+        "multi": false,
+        "options": [
+          { "label": "Oldest message id", "description": "Pass the id of the oldest loaded message as `before`." },
+          { "label": "Byte offset", "description": "Pass the file offset the reader stopped at." }
+        ]
+      }
+    },
+    { "id": "c12", "ts": 1793699200000, "kind": "user", "text": "Oldest message id. It survives a file rewrite." },
+    {
+      "id": "c13", "ts": 1793699210000, "kind": "tools",
+      "items": [
+        { "id": "tu_06", "name": "Edit", "target": "sessions/CONTRACT.md +22 -9", "status": "ok", "lines": 31 },
+        { "id": "tu_07", "name": "Bash", "target": "node --test test/p41-contract.test.js", "status": "running" }
+      ]
+    },
+    {
+      "id": "c14", "ts": 1793699300000, "kind": "callout",
+      "callout": {
+        "type": "needs-you",
+        "title": "Answer captain a1",
+        "body": "Full cut tonight or Monday?",
+        "options": ["Tonight", "Monday"]
+      }
+    }
+  ]
+}

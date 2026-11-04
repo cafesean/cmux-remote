@@ -1,0 +1,8 @@
+{"type":"status","session":"mini:surface:15","status":"working"}
+{"type":"msg","session":"mini:surface:15","msg":{"id":"s1","ts":1793700500000,"kind":"assistant","text":"Reading the transcript tail, last 64 KB only."}}
+{"type":"msg","session":"mini:surface:15","msg":{"id":"s2","ts":1793700510000,"kind":"tools","items":[{"id":"tu_90","name":"Bash","target":"node --test test/p41-transcripts.test.js","status":"running"}]}}
+{"type":"msg","session":"mini:surface:15","msg":{"id":"s2","ts":1793700510000,"kind":"tools","items":[{"id":"tu_90","name":"Bash","target":"node --test test/p41-transcripts.test.js","status":"ok","lines":3,"output":"# pass 7\n# fail 0"}]}}
+{"type":"reset","session":"mini:surface:15"}
+{"type":"msg","session":"mini:surface:15","msg":{"id":"s3","ts":1793700560000,"kind":"callout","callout":{"type":"needs-you","title":"Context at 81%","body":"Compact or continue?","options":["Compact","Continue"]}}}
+{"type":"status","session":"mini:surface:15","status":"needs-you"}
+{"type":"status","session":"mini:surface:21","status":"finished"}
