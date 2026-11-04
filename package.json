@@ -10,6 +10,7 @@
   "bin": {
     "cmux-remote-bridge": "bridge.js",
     "cmux-remote-server": "server.js",
+    "cmux-remote-pair": "bin/cmux-remote-pair.js",
     "radar": "radar/radar-cli.js"
   },
   "scripts": {

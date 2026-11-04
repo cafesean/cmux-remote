@@ -84,6 +84,7 @@ test('package.json: test:sockets exactly as specified, and nothing else changed'
   const base = JSON.parse(git(['show', `${BASE}:package.json`]).stdout);
   const now = JSON.parse(JSON.stringify(pkg));
   delete now.scripts['test:sockets'];
+  delete now.bin['cmux-remote-pair'];      // p41 B2 adds this bin; it is not a p19 change
   assert.deepEqual(now, base, 'package.json differs from the base only by test:sockets');
 });
 

@@ -287,6 +287,8 @@ trusted LAN. Both processes print a warning at startup when a secret is missing.
 | `FS_PAGE_MAX` | `500` | ceiling on the per-page entry count a client may request |
 | `RADAR_ENABLED` | unset (**off**) | set to `1` to mount the radar collector and its `/api/radar/*` routes — see [Radar](#radar-p5) |
 | `RADAR_DIR` | `~/.radar` | radar's own directory: config, snapshot, aliases, decisions |
+| `PUBLIC_URL` | request `Host` | the address the native app pairs with, put in the pairing QR (e.g. `https://cmux-max.cafesean.com`); run `cmux-remote-pair` on the host to show the QR |
+| `DEVICES_FILE` | `~/.config/cmux-remote/devices.json` | paired native-app devices: sha256 of each device key, never the key (0600) |
 
 ### Multiple machines
 

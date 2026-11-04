@@ -9,6 +9,8 @@
 //   SERVER_SOCKET  absolute path of a UNIX socket to listen on INSTEAD of a TCP port (p19, shared Macs):
 //                  its directory must be 0700 and ours; PORT/HOST/SERVER_HOST are then ignored
 //   SERVER_TOKEN   token the browser must present on /api/* (empty = open; trusted LAN only)
+//   PUBLIC_URL     the address the native app should pair with (e.g. https://cmux-max.cafesean.com); unset = the request Host
+//   DEVICES_FILE   paired-device store, default ~/.config/cmux-remote/devices.json (hashed keys only, 0600)
 //
 //   Machine registry (any of these, merged by id — nothing is committed to the repo):
 //     CMUX_MACHINE_URL / CMUX_MACHINE_SECRET / CMUX_MACHINE_LABEL      — a single default machine
@@ -32,6 +34,8 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // can bind the endpoint first and collect SERVER_TOKEN from the tunnel. A bad value refuses to start
 // here, before anything is bound — never a silent fall back to TCP. Unset = TCP exactly as before.
 const unixListen = require('./lib/unix-listen');
+// p41: QR pairing. Device keys are an equal credential to SERVER_TOKEN (see authed below).
+const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '' });
 const { parseUnixBaseUrl, unixFetch } = require('./lib/unix-fetch');
 let SERVER_SOCKET = '';
 try { SERVER_SOCKET = unixListen.socketSetting('SERVER_SOCKET', process.env, emptyShadowed); }
@@ -296,7 +300,8 @@ function authed(req, u) {
   const bearer = h.startsWith('Bearer ') ? h.slice(7) : '';
   const alt = req.headers['x-app-token'] || '';
   const q = u.searchParams.get('token') || '';   // for EventSource, which can't set headers
-  return bearer === SERVER_TOKEN || alt === SERVER_TOKEN || q === SERVER_TOKEN;
+  return bearer === SERVER_TOKEN || alt === SERVER_TOKEN || q === SERVER_TOKEN
+    || !!(pairing.verifyKey(bearer) || pairing.verifyKey(alt) || pairing.verifyKey(q));   // p41 device key
 }
 
 const CT = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -326,6 +331,9 @@ async function handleApi(req, res, u) {
   // THE ONE ROUTE THAT IS NOT SERVER_TOKEN-GATED, because it is reached by navigation rather than
   // by fetch: it carries its own credential, a ticket minted below for a single path.
   if (req.method === 'GET' && p === '/api/cmux/fs/download') return relayDownload(req, res, u);
+  // p41 pairing: each route has its own rule (start: SERVER_TOKEN or local-only; claim: the one-time
+  // code is the credential), so it is dispatched before the SERVER_TOKEN gate and checks for itself.
+  if (p.startsWith('/api/pair/')) return pairing.handle(req, res, u);
   if (!authed(req, u)) return sendJson(res, 401, { error: 'unauthorized' });
 
   // ----- radar (p5) — mounted only when RADAR_ENABLED is set; `radar &&` is the whole switch -----
