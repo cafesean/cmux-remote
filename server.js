@@ -150,6 +150,9 @@ function upstream(m, pathAndQuery, init) {
   return m.socketPath ? unixFetch(m.socketPath, pathAndQuery, init) : fetch(`${m.baseUrl}${pathAndQuery}`, init);
 }
 
+// p41 B1: /api/sessions* pass-through (mounted in handleApi next to the completions relay).
+const sessionsProxy = require('./lib/sessions-proxy').createSessionsProxy({ machines: MACHINES, upstream, accessHeaders, findMachine });
+
 // Fetch a bridge endpoint with its secret (+ CF Access token if set) and a hard timeout.
 async function bridge(m, pathAndQuery, opt = {}) {
   const ctrl = new AbortController();
@@ -550,6 +553,9 @@ async function handleApi(req, res, u) {
     }
     return sendJson(res, 404, { error: 'not_found' });
   }
+
+  // p41 B1: /api/sessions* pass-through to the bridges' /cmux/sessions* (lib/sessions-proxy.js).
+  if (await sessionsProxy.handle(req, res, u)) return;
 
   // Compose-box completions (p7). Re-serialised, like the fs relay: the client cannot smuggle extra
   // parameters through to the bridge, and the caret text is length-capped on both sides.
