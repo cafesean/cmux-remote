@@ -9,7 +9,7 @@
 //   cmux  the tree's per-surface `tty` -> `ps -t <tty>`, foreground process group only. Current cmux
 //         builds report `tty: null` for every surface (bridge.js loadTree does not even carry the
 //         field), so without a tty the radar hook-event log is the signal: a surface that has a Claude
-//         Code hook event in the retention window, and no SessionEnd after it, is running claude.
+//         Code hook event under 6 h old (matched on the uuid), and no SessionEnd after it, is running claude.
 //         Codex fires no hooks, so on cmux it is only seen when a tty is present.
 //   tmux  `#{pane_current_command}`; when that is a runtime (node, bun...) the pane tty is read too
 //         and `ps` widens it to the full command line, so `node .../claude` is still claude.
@@ -33,7 +33,10 @@ const CODEX_TRANSCRIPT = /[\\/]\.codex[\\/]sessions[\\/]/;
 
 const PS_TIMEOUT = 3000;
 const TMUX_TIMEOUT = 3000;
-const EVENT_WINDOW_MS = eventlog.RETENTION_MS;   // the log holds no more than this anyway
+// A pane whose newest hook event is older than this is treated as not running claude: a crash or kill
+// leaves no SessionEnd, so without a bound a dead pane would read as claude for the whole retention.
+const EVENT_LIVE_MS = 6 * 60 * 60 * 1000;
+const MAX_EVENT_PAGES = 20;
 
 const base = (tok) => path.basename(String(tok).replace(/^-+(?=[a-z])/i, ''));
 
@@ -84,31 +87,50 @@ const defaultTmux = (args) => run(tmuxCli.resolveTmuxBin(process.env.TMUX_BIN ||
   ['-S', process.env.TMUX_SOCKET || tmuxCli.defaultSocket(), ...args], TMUX_TIMEOUT);
 
 // `ps -t <tty> -o stat=,args=`: the foreground process group is the rows whose stat carries '+'.
-// Returns the command line of the last such row (the newest child in a pipeline), or null.
+// Claude Code shares that group with its MCP children (uv, python...), so no row position is safe:
+// any row that is claude/codex wins, else the first row.
 async function psForeground(ps, tty) {
   const dev = String(tty || '').replace(/^\/dev\//, '');
   if (!dev) return null;
   let out;
   try { out = await ps(['-t', dev, '-o', 'stat=,args=']); } catch (_) { return null; }
-  let found = null;
+  const rows = [];
   for (const line of String(out || '').split('\n')) {
     const m = /^\s*(\S+)\s+(.*\S)\s*$/.exec(line);
-    if (m && m[1].includes('+')) found = m[2];
+    if (m && m[1].includes('+')) rows.push(m[2]);
   }
-  return found;
+  return rows.find((r) => { const k = kindOfCommand(r); return k === 'claude' || k === 'codex'; }) || rows[0] || null;
 }
 
-// Hook events name the surface by uuid or by ref depending on the cmux build, so match either.
-// Claude Code is "live" there when the newest event for the surface is not a SessionEnd.
+// Every event from `since` on. readEvents pages ascending (MAX_PAGE rows) and flags `more`; stopping at
+// the first page would drop the NEWEST events of a busy log, so follow it with since = last ts.
+async function readAllEvents(readEvents, since) {
+  const all = [];
+  let from = since;
+  for (let page = 0; page < MAX_EVENT_PAGES; page++) {
+    const r = await readEvents({ since: from });
+    const evs = (r && r.events) || [];
+    all.push(...evs);
+    if (!r || !r.more || !evs.length) break;
+    const next = evs[evs.length - 1].ts;
+    if (!(next > from)) break;                      // no progress: do not spin
+    from = next;
+  }
+  return all;
+}
+
+// Claude Code is "live" on a surface when the newest hook event naming it is recent and not a
+// SessionEnd. Match on the uuid; a short ref (`surface:12`) is reused after a cmux restart, so it is
+// used only when the surface has no uuid.
 async function eventsForeground(surface, deps) {
-  const ids = new Set([surface.id, surface.ref].filter(Boolean));
-  if (!ids.size) return null;
+  const id = surface.id || surface.ref;
+  if (!id) return null;
   const now = (deps.now || Date.now)();
   let events;
-  try { events = (await (deps.readEvents || eventlog.readEvents)({ since: now - EVENT_WINDOW_MS })).events; } catch (_) { return null; }
+  try { events = await readAllEvents(deps.readEvents || eventlog.readEvents, now - EVENT_LIVE_MS); } catch (_) { return null; }
   let last = null;
-  for (const ev of events || []) {
-    if (!ids.has(ev.surfaceId) || now - ev.ts > EVENT_WINDOW_MS) continue;
+  for (const ev of events) {
+    if (ev.surfaceId !== id || now - ev.ts > EVENT_LIVE_MS) continue;
     if (!last || ev.ts >= last.ts) last = ev;
   }
   return last && last.event !== 'SessionEnd' ? 'claude' : null;

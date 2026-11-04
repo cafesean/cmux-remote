@@ -65,16 +65,31 @@ test('cmux: tty from the tree, foreground process group only', async () => {
   assert.deepStrictEqual(calls, [['-t', 'ttys004', '-o', 'stat=,args=']]);
 });
 
+test('claude with MCP children in the same foreground group -> claude', async () => {
+  const ps = psOut([
+    'Ss   -zsh',
+    'S+   claude --resume',
+    'S+   uv run --directory /x/mcp server.py',
+    'S+   /usr/bin/python3 /x/mcp/server.py',
+  ]);
+  const cmd = await foregroundCommand({ ref: 'surface:1', tty: 'ttys020' }, 'cmux', { ps });
+  assert.strictEqual(cmd, 'claude --resume');
+  assert.strictEqual(detectKind({ surfaceType: 'terminal', foregroundCmd: cmd }), 'claude');
+  // no agent row: first foreground row
+  assert.strictEqual(await foregroundCommand({ ref: 'surface:1', tty: 'ttys020' }, 'cmux',
+    { ps: psOut(['S+   uv run x', 'S+   python3 y']) }), 'uv run x');
+});
+
 test('cmux: shell only in the foreground returns the shell', async () => {
   const cmd = await foregroundCommand({ ref: 'surface:1', tty: 'ttys001' }, 'cmux', { ps: psOut(['Ss+  -zsh']) });
   assert.strictEqual(cmd, '-zsh');
 });
 
-test('cmux: no tty -> falls back to the hook events (live claude session on that surface)', async () => {
+test('cmux: no tty -> falls back to the hook events (live claude session on that surface, by uuid)', async () => {
   const events = [
-    { ts: 1, sessionId: 's1', event: 'SessionStart', surfaceId: 'surface:12' },
-    { ts: 2, sessionId: 's1', event: 'Stop', surfaceId: 'surface:12' },
-    { ts: 3, sessionId: 's2', event: 'Stop', surfaceId: 'surface:99' },
+    { ts: 1, sessionId: 's1', event: 'SessionStart', surfaceId: 'U12' },
+    { ts: 2, sessionId: 's1', event: 'Stop', surfaceId: 'U12' },
+    { ts: 3, sessionId: 's2', event: 'Stop', surfaceId: 'U99' },
   ];
   const readEvents = async () => ({ events });
   const ps = async () => { throw new Error('ps must not run without a tty'); };
@@ -82,7 +97,12 @@ test('cmux: no tty -> falls back to the hook events (live claude session on that
   assert.strictEqual(await foregroundCommand({ id: 'U7', ref: 'surface:7', tty: null }, 'cmux', { ps, readEvents, now: () => 10 }), null);
 });
 
-test('cmux: events match by uuid too, and a SessionEnd means claude is gone', async () => {
+test('cmux: a surface with no uuid falls back to its short ref', async () => {
+  const readEvents = async () => ({ events: [{ ts: 2, sessionId: 's', event: 'Stop', surfaceId: 'surface:12' }] });
+  assert.strictEqual(await foregroundCommand({ ref: 'surface:12', tty: null }, 'cmux', { ps: async () => '', readEvents, now: () => 10 }), 'claude');
+});
+
+test('cmux: a SessionEnd means claude is gone', async () => {
   const ps = async () => { throw new Error('no ps'); };
   const live = async () => ({ events: [{ ts: 2, sessionId: 's', event: 'Stop', surfaceId: 'U12' }] });
   const ended = async () => ({ events: [
@@ -92,11 +112,33 @@ test('cmux: events match by uuid too, and a SessionEnd means claude is gone', as
   assert.strictEqual(await foregroundCommand(s, 'cmux', { ps, readEvents: ended, now: () => 10 }), null);
 });
 
-test('cmux: events older than the retention window are ignored', async () => {
-  const readEvents = async () => ({ events: [{ ts: 1, sessionId: 's', event: 'Stop', surfaceId: 'surface:12' }] });
-  const cmd = await foregroundCommand({ ref: 'surface:12', tty: null }, 'cmux',
-    { ps: async () => '', readEvents, now: () => 1 + 49 * 3600 * 1000 });
-  assert.strictEqual(cmd, null);
+test('cmux: event older than 6h -> not claude', async () => {
+  const H = 3600 * 1000;
+  const readEvents = async () => ({ events: [{ ts: 1, sessionId: 's', event: 'Stop', surfaceId: 'U12' }] });
+  const s = { id: 'U12', ref: 'surface:12', tty: null };
+  assert.strictEqual(await foregroundCommand(s, 'cmux', { ps: async () => '', readEvents, now: () => 1 + 7 * H }), null);
+  assert.strictEqual(await foregroundCommand(s, 'cmux', { ps: async () => '', readEvents, now: () => 1 + 5 * H }), 'claude');
+});
+
+test('cmux: short ref reused after restart does not match uuid-keyed events', async () => {
+  const readEvents = async () => ({ events: [{ ts: 5, sessionId: 's', event: 'Stop', surfaceId: 'surface:12' }] });
+  // the pane now behind surface:12 has a new uuid; the old event named the ref, not this uuid
+  const s = { id: 'U-NEW', ref: 'surface:12', tty: null };
+  assert.strictEqual(await foregroundCommand(s, 'cmux', { ps: async () => '', readEvents, now: () => 10 }), null);
+});
+
+test('cmux: follows readEvents pages (more:true then false) so the newest events are seen', async () => {
+  const calls = [];
+  const readEvents = async (o) => {
+    calls.push(o.since);
+    return o.since < 100
+      ? { events: [{ ts: 100, sessionId: 's', event: 'Stop', surfaceId: 'U1' }], more: true }
+      : { events: [{ ts: 200, sessionId: 's', event: 'SessionEnd', surfaceId: 'U1' }], more: false };
+  };
+  const cmd = await foregroundCommand({ id: 'U1', tty: null }, 'cmux', { ps: async () => '', readEvents, now: () => 300 });
+  assert.strictEqual(cmd, null);                      // the SessionEnd on page 2 decides
+  assert.strictEqual(calls.length, 2);
+  assert.ok(calls[1] >= 100);
 });
 
 test('cmux: ps failing or empty -> null, never throws', async () => {
