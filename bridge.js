@@ -188,6 +188,18 @@ async function cmuxWorkspaceCwds() {
 
 const fsBrowse = createFsBrowse({ workspaceCwds: cmuxWorkspaceCwds });
 
+// ---------- p41 sessions (native app) ---------------------------------------
+// /cmux/sessions* and POST /cmux/notify (sessions/routes.js). Additive: no existing route changes.
+// P41_JOIN_POLL_MS is a test knob (default sessions/join.js WATCH_POLL_MS).
+const sessionRoutes = require('./sessions/routes').createSessionRoutes({
+  machineId: MACHINE_ID,
+  backend: BACKEND,
+  loadTree: () => loadTree(),
+  unreadBySurface: () => (tmuxCli ? Promise.resolve(null) : unreadBySurface()),
+  sseHead: (res) => sseHead(res),
+  joinPollMs: Number(process.env.P41_JOIN_POLL_MS) || undefined,
+});
+
 // ---------- compose-box completions (p7 §6.2) --------------------------------
 // Off unless switched on, and off means off: no module required, no route registered.
 const COMPLETIONS_ENABLED = !/^(0|false|no|off)$/i.test(String(process.env.COMPLETIONS_ENABLED ?? '1').trim());
@@ -2036,6 +2048,7 @@ function handleCmux(req, res) {
   if (p.startsWith('/cmux/gitread/')) return cmuxGitRead(req, res, u, p.slice('/cmux/gitread/'.length));
   if (req.method === 'GET' && p === '/cmux/session-events') return cmuxSessionEvents(res, u);
   if (req.method === 'GET' && p === '/cmux/notifications') return cmuxNotifications(res);
+  if ((p === '/cmux/notify' || p === '/cmux/sessions' || p.startsWith('/cmux/sessions/')) && sessionRoutes.handle(req, res, u)) return;
 
   // ----- pane layout (multi-pane mirror) -----
   if (req.method === 'GET' && (p === '/cmux/layout' || p === '/cmux/layout-stream')) {

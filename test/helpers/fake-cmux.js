@@ -26,13 +26,15 @@ const IDS = {
   sfA1: 'aaaaaaa1-3333-4333-8333-333333333331',
   sfA2: 'aaaaaaa1-3333-4333-8333-333333333332',
   sfB1: 'bbbbbbb1-3333-4333-8333-333333333331',
+  paneB2: 'bbbbbbb1-2222-4222-8222-222222222222',   // only with opts.browser (p41)
+  sfB2: 'bbbbbbb1-3333-4333-8333-333333333332',
 };
 
 function writeFakeCmux(dir, opts) {
   const o = opts || {};
   const cwd = o.cwd || dir;
   const grid = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'grids', 'claude-slash-2.json'), 'utf8')).grid;
-  const data = { IDS, cwd, replay: { seq: 7, render_grid: grid } };
+  const data = { IDS, cwd, browser: !!o.browser, replay: { seq: 7, render_grid: grid } };
   const file = path.join(dir, 'fake-cmux');
   const src = '#!' + process.execPath + '\n' + String.raw`'use strict';
 const D = ${JSON.stringify(data)};
@@ -45,7 +47,8 @@ function answer(op) {
   if (op === 'tree') return { windows: [{ id: I.window, ref: 'window:1', workspaces: [
     { id: I.wsA, ref: 'workspace:1', title: 'alpha', selected: true, panes: [
       pane(I.paneA1, 'pane:1', 0, sf(I.sfA1, 'surface:1')), pane(I.paneA2, 'pane:2', 1, sf(I.sfA2, 'surface:2')) ] },
-    { id: I.wsB, ref: 'workspace:2', title: 'beta', selected: false, panes: [ pane(I.paneB1, 'pane:3', 0, sf(I.sfB1, 'surface:3')) ] },
+    { id: I.wsB, ref: 'workspace:2', title: 'beta', selected: false, panes: [ pane(I.paneB1, 'pane:3', 0, sf(I.sfB1, 'surface:3')) ]
+      .concat(D.browser ? [pane(I.paneB2, 'pane:4', 1, { ...sf(I.sfB2, 'surface:4'), type: 'browser' })] : []) },
   ] }] };
   if (op === 'list-windows') return [{ id: I.window, ref: 'window:1' }];
   if (op === 'workspace' && args[1] === 'list') return { workspaces: [
