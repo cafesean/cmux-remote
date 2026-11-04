@@ -35,7 +35,8 @@ const LIMITS = {
   attachmentMaxBytes: 20 * 1024 * 1024,
   eventWindowMs: 6 * 60 * 60 * 1000,  // hook events read for a session's status (= detect.js EVENT_LIVE_MS)
   eventMaxPages: 20,                  // event-log pages followed per read (= detect.js MAX_EVENT_PAGES)
-  markerIdMax: 128,                   // longest session id used as a ~/.claude/needs-you/<id> file name
+  markerIdMax: 128,
+  attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n                   // longest session id used as a ~/.claude/needs-you/<id> file name
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 
@@ -223,7 +224,7 @@ function createSessionRoutes(deps) {
   }
 
   async function attachment(res, entry, nRaw) {
-    if (!/^\d{1,6}$/.test(nRaw)) return send(res, 400, { error: 'bad_index' });
+    if (!/^\d+$/.test(nRaw) || nRaw.length > LIMITS.attachmentIndexDigits) return send(res, 400, { error: 'bad_index' });
     const { session, join } = await describe(entry, requestDeps(), null);
     const o = join && session.kind === 'claude' && await safeOpen(join.path);
     if (!o) return send(res, 404, { error: 'not_found' });
@@ -247,6 +248,7 @@ function createSessionRoutes(deps) {
     let path0 = null;
     let lastStatus = null;
     let stopJoin = () => {};
+    let sentUnsupported = false;
     let st = null;
     const emit = (ev) => { if (!closed) res.write(`data: ${JSON.stringify({ ...ev, session: id })}\n\n`); };
     const done = () => {
@@ -285,6 +287,12 @@ function createSessionRoutes(deps) {
       if (closed) return;
       if (path0 != null && j.path !== path0) emit({ type: 'reset' });
       path0 = j.path;
+      // The join moved to a Codex rollout: never tail it with the Claude reader.
+      if (j.kind === 'codex') {
+        if (tailAbort) { tailAbort.abort(); tailAbort = null; }
+        if (!sentUnsupported) { sentUnsupported = true; emit({ type: 'unsupported', unsupported: 'codex' }); }
+        return;
+      }
       startTail(j.path);
     }, { ...liveDeps(), setInterval: every });
     const statusTick = async () => {

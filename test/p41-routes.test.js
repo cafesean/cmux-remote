@@ -287,3 +287,28 @@ test('attachment route: bytes and mime of image n; 404 past the end; 400 bad ind
     assert.equal((await call(b.socketPath, 'GET', base + 'x', { secret: SECRET })).status, 400);
   } finally { await b.stop(); }
 });
+
+// ---- fix round 2 ---------------------------------------------------------------------------------
+
+test('stream on a claude pane whose join moves to a Codex rollout: reset + unsupported, no Claude-parsed msgs', async () => {
+  const { h, a } = home([user(1, 'go'), asst(2, 'first')]);
+  const b = await boot(h);
+  const s = sse(b.socketPath, `/cmux/sessions/${idOf(IDS.sfA1)}/thread-stream`);
+  try {
+    await s.opened;
+    await new Promise((r) => setTimeout(r, 600));
+    const dir = path.join(h, '.codex', 'sessions', '2026', '11', '04');
+    fs.mkdirSync(dir, { recursive: true });
+    const x = path.join(dir, 'rollout-2026-11-04T10-00-00-cx.jsonl');
+    fs.writeFileSync(x, jsonl([{ type: 'session_meta', payload: { id: 'cx', cwd: '/work/alpha' } }]));
+    eventlog.appendEventSync(path.join(h, '.radar'), { sessionId: 'cx', event: 'SessionStart', transcriptPath: x, surfaceId: IDS.sfA1 }, Date.now());
+    const ev = await s.waitFor((f) => f.type === 'unsupported');
+    assert.equal(ev.unsupported, 'codex');
+    await new Promise((r) => setTimeout(r, 600));
+    fs.appendFileSync(x, jsonl([asst(20, 'CODEX-AS-CLAUDE')]));
+    fs.appendFileSync(a, jsonl([asst(21, 'OLD-FILE')]));
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.ok(!s.frames.some((f) => f.type === 'msg'), JSON.stringify(s.frames));
+    assert.equal(s.frames.filter((f) => f.type === 'unsupported').length, 1);
+  } finally { s.close(); await b.stop(); }
+});
