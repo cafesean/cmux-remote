@@ -3,7 +3,8 @@
 // test can boot a REAL bridge.js on the cmux backend with no cmux app (pattern: test/close-scope.test.js).
 //
 // It answers every argv form the non-browser routes build, in cmux's own shapes:
-//   tree            2 workspaces, 3 single-surface panes (ws 1: two panes side by side), UUID ids
+//   tree            (opts.hideFile exists -> workspace beta is gone; opts.browser adds a browser surface)
+//                   2 workspaces, 3 single-surface panes (ws 1: two panes side by side), UUID ids
 //   list-windows / workspace list   current_directory = a real temp dir (fs roots, completions)
 //   list-status     'claude_code=Running icon=bolt.fill'
 //   rpc pane.list   two side-by-side pixel frames
@@ -34,7 +35,7 @@ function writeFakeCmux(dir, opts) {
   const o = opts || {};
   const cwd = o.cwd || dir;
   const grid = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'grids', 'claude-slash-2.json'), 'utf8')).grid;
-  const data = { IDS, cwd, browser: !!o.browser, replay: { seq: 7, render_grid: grid } };
+  const data = { IDS, cwd, browser: !!o.browser, hideFile: o.hideFile || '', replay: { seq: 7, render_grid: grid } };
   const file = path.join(dir, 'fake-cmux');
   const src = '#!' + process.execPath + '\n' + String.raw`'use strict';
 const D = ${JSON.stringify(data)};
@@ -43,13 +44,14 @@ const args = process.argv.slice(2);
 const has = (a) => args.includes(a);
 const sf = (id, ref) => ({ id, ref, title: ref, type: 'terminal', selected: true, selected_in_pane: true });
 const pane = (id, ref, index, s) => ({ id, ref, index, focused: index === 0, selected_surface_id: s.id, selected_surface_ref: s.ref, surfaces: [s] });
+const hidden = () => { try { return !!D.hideFile && require('fs').existsSync(D.hideFile); } catch (_) { return false; } };
 function answer(op) {
   if (op === 'tree') return { windows: [{ id: I.window, ref: 'window:1', workspaces: [
     { id: I.wsA, ref: 'workspace:1', title: 'alpha', selected: true, panes: [
       pane(I.paneA1, 'pane:1', 0, sf(I.sfA1, 'surface:1')), pane(I.paneA2, 'pane:2', 1, sf(I.sfA2, 'surface:2')) ] },
     { id: I.wsB, ref: 'workspace:2', title: 'beta', selected: false, panes: [ pane(I.paneB1, 'pane:3', 0, sf(I.sfB1, 'surface:3')) ]
       .concat(D.browser ? [pane(I.paneB2, 'pane:4', 1, { ...sf(I.sfB2, 'surface:4'), type: 'browser' })] : []) },
-  ] }] };
+  ].filter((w) => !(hidden() && w.ref === 'workspace:2')) }] };
   if (op === 'list-windows') return [{ id: I.window, ref: 'window:1' }];
   if (op === 'workspace' && args[1] === 'list') return { workspaces: [
     { id: I.wsA, ref: 'workspace:1', title: 'alpha', custom_title: 'alpha', current_directory: D.cwd },

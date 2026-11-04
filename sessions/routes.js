@@ -5,7 +5,6 @@
 //   GET  /cmux/sessions/:id/thread?before=&limit= -> {title, messages, cursor}
 //   GET  /cmux/sessions/:id/thread-stream        -> SSE of Stream events (msg | status | reset)
 //   GET  /cmux/sessions/:id/attachment/:n        -> image bytes
-//   POST /cmux/notify  {kind, title, body?, surface?} -> appends a normalized event to the radar log
 //
 // createSessionRoutes(deps).handle(req, res, url) returns true when it answered. bridge.js calls it
 // AFTER its own secret check, so every route here is auth-gated exactly like the rest of /cmux/*.
@@ -34,9 +33,9 @@ const LIMITS = {
   streamStatusMs: WATCH_POLL_MS,      // how often a stream re-derives status
   streamHeartbeatMs: 25000,           // SSE comment keep-alive
   attachmentMaxBytes: 20 * 1024 * 1024,
-  notifyKindMax: 64,
-  notifyTitleMax: 200,
-  notifyBodyMax: 2000,
+  eventWindowMs: 6 * 60 * 60 * 1000,  // hook events read for a session's status (= detect.js EVENT_LIVE_MS)
+  eventMaxPages: 20,                  // event-log pages followed per read (= detect.js MAX_EVENT_PAGES)
+  markerIdMax: 128,                   // longest session id used as a ~/.claude/needs-you/<id> file name
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 
@@ -53,6 +52,7 @@ function createSessionRoutes(deps) {
   const unreadBySurface = deps.unreadBySurface || (async () => null);
   const sseHead = deps.sseHead;
   const joinPollMs = deps.joinPollMs || WATCH_POLL_MS;
+  const statusPollMs = deps.statusPollMs || LIMITS.streamStatusMs;
   const readEventsRaw = deps.readEvents || eventlog.readEvents;
   let streams = 0;
 
@@ -128,8 +128,8 @@ function createSessionRoutes(deps) {
   async function sessionEvents(d, sessionId) {
     if (!sessionId) return [];
     const all = [];
-    let since = d.now() - 6 * 60 * 60 * 1000;
-    for (let i = 0; i < 20; i++) {
+    let since = d.now() - LIMITS.eventWindowMs;
+    for (let i = 0; i < LIMITS.eventMaxPages; i++) {
       let r;
       try { r = await d.readEvents({ since }); } catch (_) { break; }
       const evs = (r && r.events) || [];
@@ -140,7 +140,7 @@ function createSessionRoutes(deps) {
     return all.filter((e) => e.sessionId === sessionId);
   }
   async function readMarker(sessionId) {
-    if (!sessionId || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) return null;
+    if (!sessionId || sessionId.length > LIMITS.markerIdMax || !/^[A-Za-z0-9_-]+$/.test(sessionId)) return null;
     try { return JSON.parse(await fsp.readFile(path.join(home, '.claude', 'needs-you', sessionId), 'utf8')); } catch (_) { return null; }
   }
 
@@ -157,7 +157,9 @@ function createSessionRoutes(deps) {
     let fg = null;
     try { fg = await foregroundCommand(js, backend, d); } catch (_) { fg = null; }
     s.kind = detectKind({ surfaceType: tab.type, foregroundCmd: fg, transcriptPath: join && join.path });
-    if ((s.kind !== 'claude' && s.kind !== 'codex') || !join) return { session: s, join: null };
+    // A Codex transcript is never parsed with the Claude reader (no Codex normaliser yet): kind only.
+    if (s.kind !== 'terminal' && join && join.kind === 'codex') s.kind = 'codex';
+    if (s.kind !== 'claude' || !join) return { session: s, join: s.kind === 'codex' ? join : null };
     const o = await safeOpen(join.path);
     if (!o) return { session: s, join: null };
     s.lastActivity = Math.floor(o.st.mtimeMs);
@@ -205,6 +207,7 @@ function createSessionRoutes(deps) {
   async function thread(res, entry, u) {
     const d = requestDeps();
     const { session, join } = await describe(entry, d, await unreadFor(entry.tab));
+    if (session.kind === 'codex') return send(res, 200, { title: session.title, messages: [], cursor: null, unsupported: 'codex' });
     const o = join && await safeOpen(join.path);
     if (!o) return send(res, 200, { title: session.title, messages: [], cursor: null });
     const before = u.searchParams.get('before');
@@ -221,8 +224,8 @@ function createSessionRoutes(deps) {
 
   async function attachment(res, entry, nRaw) {
     if (!/^\d{1,6}$/.test(nRaw)) return send(res, 400, { error: 'bad_index' });
-    const { join } = await describe(entry, requestDeps(), null);
-    const o = join && await safeOpen(join.path);
+    const { session, join } = await describe(entry, requestDeps(), null);
+    const o = join && session.kind === 'claude' && await safeOpen(join.path);
     if (!o) return send(res, 404, { error: 'not_found' });
     let a = null;
     try { a = await readAttachment(join.path, Number(nRaw), { fs: shim(o.fh) }); } catch (_) { a = null; }
@@ -233,16 +236,37 @@ function createSessionRoutes(deps) {
     res.end(a.data);
   }
 
-  function stream(req, res, entry) {
+  // Kind is read once at open: a codex pane gets one `unsupported` event and heartbeats only. Every
+  // status poll re-reads the tree; a pane that is gone gets a `gone` event and the response ends.
+  async function stream(req, res, entry) {
     if (streams >= LIMITS.maxStreams) return send(res, 429, { error: 'too_many_streams' });
     streams++;
     const id = `${machineId}:${entry.tab.id}`;
-    sseHead(res);
     let closed = false;
     let tailAbort = null;
     let path0 = null;
     let lastStatus = null;
+    let stopJoin = () => {};
+    let st = null;
     const emit = (ev) => { if (!closed) res.write(`data: ${JSON.stringify({ ...ev, session: id })}\n\n`); };
+    const done = () => {
+      if (closed) return;
+      closed = true;
+      streams--;
+      stopJoin();
+      if (tailAbort) tailAbort.abort();
+      if (st) clearInterval(st);
+      clearInterval(hb);
+    };
+    req.on('close', done);
+    res.on('close', done);
+    sseHead(res);
+    const hb = setInterval(() => { if (!closed) res.write(': hb\n\n'); }, LIMITS.streamHeartbeatMs);
+    let first;
+    try { first = await describe(entry, requestDeps(), await unreadFor(entry.tab)); } catch (_) { first = null; }
+    if (closed) return;
+    if (first && first.session.kind === 'codex') { emit({ type: 'unsupported', unsupported: 'codex' }); return; }
+    if (first) lastStatus = first.session.status;
     const startTail = (p) => {
       if (tailAbort) tailAbort.abort();
       const ac = new AbortController();
@@ -257,7 +281,7 @@ function createSessionRoutes(deps) {
       })();
     };
     const every = (fn) => setInterval(fn, joinPollMs);
-    const stopJoin = watchJoin(joinSurface(entry.tab), (j) => {
+    stopJoin = watchJoin(joinSurface(entry.tab), (j) => {
       if (closed) return;
       if (path0 != null && j.path !== path0) emit({ type: 'reset' });
       path0 = j.path;
@@ -265,54 +289,22 @@ function createSessionRoutes(deps) {
     }, { ...liveDeps(), setInterval: every });
     const statusTick = async () => {
       try {
-        const { session } = await describe(entry, requestDeps(), await unreadFor(entry.tab));
+        const now = await findTab(id);
+        if (closed || now === null) return;            // tree read failed: try again next poll
+        if (!now) { emit({ type: 'gone' }); res.end(); done(); return; }
+        const { session } = await describe(now, requestDeps(), await unreadFor(now.tab));
         if (!closed && session.status !== lastStatus) {
-          if (lastStatus != null) emit({ type: 'status', status: session.status });
+          emit({ type: 'status', status: session.status });
           lastStatus = session.status;
         }
       } catch (_) { /* next tick */ }
     };
-    const st = setInterval(statusTick, LIMITS.streamStatusMs);
-    const hb = setInterval(() => { if (!closed) res.write(': hb\n\n'); }, LIMITS.streamHeartbeatMs);
-    statusTick();
-    const done = () => {
-      if (closed) return;
-      closed = true;
-      streams--;
-      stopJoin();
-      if (tailAbort) tailAbort.abort();
-      clearInterval(st);
-      clearInterval(hb);
-    };
-    req.on('close', done);
-    res.on('close', done);
-  }
-
-  function notify(req, res) {
-    let body = '';
-    req.on('data', (c) => { body += c; if (body.length > 16 * 1024) req.destroy(); });
-    req.on('end', () => {
-      let b;
-      try { b = JSON.parse(body || '{}'); } catch (_) { return send(res, 400, { error: 'bad_json' }); }
-      const str = (v, n) => (typeof v === 'string' && v.trim() && v.length <= n ? v.trim() : null);
-      const kind = str(b && b.kind, LIMITS.notifyKindMax);
-      const title = str(b && b.title, LIMITS.notifyTitleMax);
-      if (!kind || !title) return send(res, 400, { error: 'bad_notify' });
-      if (b.body != null && !str(b.body, LIMITS.notifyBodyMax)) return send(res, 400, { error: 'bad_notify' });
-      const surface = b.surface != null ? str(b.surface, 128) : null;
-      const ev = eventlog.appendEventSync(undefined, {
-        sessionId: `notify:${machineId}`, event: 'Notify', notificationType: kind,
-        ...(surface ? { surfaceId: surface } : {}),
-      });
-      if (!ev) return send(res, 500, { error: 'notify_failed' });
-      send(res, 200, { ok: true, event: { ...ev, title, ...(b.body ? { body: b.body } : {}) } });
-    });
+    st = setInterval(statusTick, statusPollMs);
   }
 
   // true when answered. `u` is the parsed URL.
   function handle(req, res, u) {
     const p = u.pathname;
-    if (req.method === 'POST' && p === '/cmux/notify') { notify(req, res); return true; }
     if (p === '/cmux/sessions') {
       if (req.method !== 'GET') return false;
       list(res).catch(() => send(res, 500, { error: 'sessions_failed' }));

@@ -203,3 +203,87 @@ test('tmux backend → sessions work, browser kind absent', { skip: tmuxBinary()
     assert.ok(r.json.sessions.every((s) => s.kind === 'terminal'), JSON.stringify(r.json.sessions));
   } finally { await b.stop(); await srv.stop(); }
 });
+
+// ---- fix round 1 ---------------------------------------------------------------------------------
+
+test('codex session: thread is empty + unsupported, stream sends one unsupported event', async () => {
+  const h = tmp();
+  const dir = path.join(h, '.codex', 'sessions', '2026', '11', '04');
+  fs.mkdirSync(dir, { recursive: true });
+  const x = path.join(dir, 'rollout-2026-11-04T10-00-00-cx.jsonl');
+  fs.writeFileSync(x, jsonl([{ type: 'session_meta', payload: { id: 'cx', cwd: '/work/beta' } }, user(1, 'claude-shaped row the Claude reader would show')]));
+  eventlog.appendEventSync(path.join(h, '.radar'), { sessionId: 'cx', event: 'Stop', transcriptPath: x, surfaceId: IDS.sfB1 }, Date.now());
+  const b = await boot(h);
+  const s = sse(b.socketPath, `/cmux/sessions/${idOf(IDS.sfB1)}/thread-stream`);
+  try {
+    const list = await call(b.socketPath, 'GET', '/cmux/sessions', { secret: SECRET });
+    assert.equal(list.json.sessions.find((v) => v.surface === IDS.sfB1).kind, 'codex');
+    const t = await call(b.socketPath, 'GET', `/cmux/sessions/${idOf(IDS.sfB1)}/thread`, { secret: SECRET });
+    assert.equal(t.status, 200, t.text);
+    assert.equal(typeof t.json.title, 'string');
+    assert.deepEqual({ ...t.json, title: '' }, { title: '', messages: [], cursor: null, unsupported: 'codex' });
+    const ev = await s.waitFor((f) => f.type === 'unsupported');
+    assert.equal(ev.unsupported, 'codex');
+    await new Promise((r) => setTimeout(r, 800));
+    assert.equal(s.frames.length, 1, JSON.stringify(s.frames));
+  } finally { s.close(); await b.stop(); }
+});
+
+test('stream on a pane that closes: `gone` then the response ends', async () => {
+  const { h } = home([user(1, 'go')]);
+  const hideFile = path.join(h, 'hide-beta');
+  const b = await boot(h, {}, { hideFile });
+  const s = sse(b.socketPath, `/cmux/sessions/${idOf(IDS.sfB1)}/thread-stream`);
+  try {
+    const res = await s.opened;
+    const ended = new Promise((r) => res.on('end', r));
+    await new Promise((r) => setTimeout(r, 400));
+    fs.writeFileSync(hideFile, '1');
+    await s.waitFor((f) => f.type === 'gone');
+    await ended;
+  } finally { s.close(); await b.stop(); }
+});
+
+test('refused path: a transcript outside the allowed roots, or a symlink out of them, is never served', async () => {
+  const h = tmp();
+  const out = path.join(h, 'elsewhere');
+  fs.mkdirSync(out, { recursive: true });
+  const secret = path.join(out, 'secret.jsonl');
+  fs.writeFileSync(secret, jsonl([user(1, 'SECRET-TEXT')]));
+  const dir = path.join(h, '.claude', 'projects', '-work');
+  fs.mkdirSync(dir, { recursive: true });
+  const link = path.join(dir, 'link.jsonl');
+  fs.symlinkSync(secret, link);
+  eventlog.appendEventSync(path.join(h, '.radar'), { sessionId: 's1', event: 'Stop', transcriptPath: secret, surfaceId: IDS.sfA1 }, Date.now() - 2000);
+  eventlog.appendEventSync(path.join(h, '.radar'), { sessionId: 's2', event: 'Stop', transcriptPath: link, surfaceId: IDS.sfA2 }, Date.now() - 1000);
+  const b = await boot(h);
+  try {
+    for (const sf of [IDS.sfA1, IDS.sfA2]) {
+      const t = await call(b.socketPath, 'GET', `/cmux/sessions/${idOf(sf)}/thread`, { secret: SECRET });
+      assert.equal(t.status, 200, t.text);
+      assert.deepEqual(t.json.messages, []);
+      assert.ok(!t.text.includes('SECRET-TEXT'));
+      const a = await call(b.socketPath, 'GET', `/cmux/sessions/${idOf(sf)}/attachment/0`, { secret: SECRET });
+      assert.equal(a.status, 404);
+    }
+    const l = await call(b.socketPath, 'GET', '/cmux/sessions', { secret: SECRET });
+    assert.ok(!l.text.includes('SECRET-TEXT'));
+  } finally { await b.stop(); }
+});
+
+test('attachment route: bytes and mime of image n; 404 past the end; 400 bad index; 415 non-image', async () => {
+  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  const img = (mime, data) => ({ type: 'image', source: { type: 'base64', media_type: mime, data: data.toString('base64') } });
+  const { h } = home([user(1, [{ type: 'text', text: 'look' }, img('image/png', PNG), img('text/html', Buffer.from('<b>x</b>'))]), asst(2, 'seen')]);
+  const b = await boot(h);
+  try {
+    const base = `/cmux/sessions/${idOf(IDS.sfA1)}/attachment/`;
+    const ok = await call(b.socketPath, 'GET', base + '0', { secret: SECRET });
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.headers['content-type'], 'image/png');
+    assert.ok(ok.body.equals(PNG));
+    assert.equal((await call(b.socketPath, 'GET', base + '1', { secret: SECRET })).status, 415);
+    assert.equal((await call(b.socketPath, 'GET', base + '2', { secret: SECRET })).status, 404);
+    assert.equal((await call(b.socketPath, 'GET', base + 'x', { secret: SECRET })).status, 400);
+  } finally { await b.stop(); }
+});
