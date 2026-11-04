@@ -22,9 +22,11 @@
 // url counts images from the start of the file, so a page that holds an image scans the bytes before it
 // (only lines that mention an image are parsed).
 //
-// Sean's █ banner (rows of █ plus `██  N. ask`) is lifted into a needs-you `callout` while `bannerPreset`
-// is on (the default). A4 owns callout parsing and will take over this switch.
+// Assistant text runs through parseCallouts (callouts.js): each callout becomes a `callout` message after
+// the assistant text that is left. Sean's █ banner is lifted as a needs-you callout while `bannerPreset` is
+// on (the default).
 const fs = require('fs');
+const { splitCallouts } = require('./callouts.js');
 
 const CHUNK = 256 * 1024;
 const SCAN_CHUNK = 1024 * 1024;
@@ -82,15 +84,6 @@ function imagesIn(rec) {
 
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
 const attachmentUrl = (sessionId, n) => `/api/sessions/${encodeURIComponent(sessionId)}/attachment/${n}`;
-
-// Banner rows -> {text without the rows, asks}. No numbered ask, no callout: the text stays as written.
-function liftBanner(text) {
-  const rows = text.split('\n');
-  if (!rows.some((r) => r.startsWith('█'))) return { text, asks: [] };
-  const asks = rows.filter((r) => /^█+\s+\d+\.\s/.test(r)).map((r) => r.replace(/^█+\s+\d+\.\s*/, '').trim());
-  if (!asks.length) return { text, asks: [] };
-  return { text: rows.filter((r) => !r.startsWith('█')).join('\n').trim(), asks };
-}
 
 // Records in file order in, messages out. `push` returns the messages that are new or changed by that
 // record (a tools group that gained a tool or a result), which is exactly what a live stream sends.
@@ -159,12 +152,9 @@ class Normaliser {
 
   assistantText(id, ts, raw, off, changed) {
     if (!raw.trim()) return;
-    const { text, asks } = this.bannerPreset ? liftBanner(raw) : { text: raw, asks: [] };
+    const { text, callouts } = splitCallouts(raw, { seanBanner: this.bannerPreset });
     if (text.trim()) this.add({ id, ts, kind: 'assistant', text: text.trim() }, off, changed);
-    if (asks.length) {
-      this.add({ id: `${id}:callout`, ts, kind: 'callout',
-        callout: { type: 'needs-you', title: 'Needs you', body: asks.join('\n'), options: [] } }, off, changed);
-    }
+    callouts.forEach((callout, i) => this.add({ id: `${id}:callout:${i}`, ts, kind: 'callout', callout }, off, changed));
   }
 
   toolUse(id, ts, b, off, changed) {

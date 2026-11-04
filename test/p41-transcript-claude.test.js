@@ -190,6 +190,15 @@ test('bannerPreset false leaves the text unchanged', async () => {
   assert.strictEqual(messages[0].text, text);
 });
 
+test('A2 thread with banner still yields needs-you callout', async () => {
+  const p = file('banner2', [asst(1, ['Intro', ...BANNER, '', '> [!done] Shipped', '> options: Ok | Redo'].join('\n'))]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => m.kind), ['assistant', 'callout', 'callout']);
+  assert.strictEqual(messages[1].callout.type, 'needs-you');
+  assert.deepStrictEqual(messages[2].callout, { type: 'done', title: 'Shipped', body: '', options: ['Ok', 'Redo'] });
+  assert.strictEqual(new Set(messages.map((m) => m.id)).size, 3);
+});
+
 test('a banner with no numbered asks is not a callout', async () => {
   const p = file('bar', [asst(1, ['x', '████', 'y'].join('\n'))]);
   const { messages } = await readThread(p);
