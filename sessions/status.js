@@ -14,12 +14,12 @@
 //   unread      false once the person has opened the finished thread (finished falls back to your-turn)
 //
 // Precedence, first match wins:
-//   needs-you  a Notification newer than the last UserPromptSubmit and the last Stop, an unanswered
+//   needs-you  a permission_prompt / elicitation_dialog Notification newer than the last UserPromptSubmit and Stop (idle_prompt never), an unanswered
 //              question (the last message), a needs-you callout in the last assistant message, or a fresh
 //              marker. A marker counts only when its cmux surface is this pane AND it is newer than the
 //              newest user prompt (hook event or thread message). The hook clears a marker only on the next
 //              prompt or Stop, so old markers pile up (48 on one Mac): they must never raise an alert.
-//   working    a tool is running, or the latest of UserPromptSubmit/Stop is a UserPromptSubmit.
+//   working    (idle once nothing happened for LIMITS.workingMaxMs) a tool is running, or the latest of UserPromptSubmit/Stop is a UserPromptSubmit.
 //   finished   a done callout or a line starting `DONE` / `status: DONE` in the last assistant message, a
 //              Stop after it, and the thread unread.
 //   your-turn  the latest of UserPromptSubmit/Stop is a Stop and nothing runs.
@@ -29,11 +29,21 @@ const fs = require('fs');
 const PREVIEW_MAX = 120;
 const USAGE_TAIL = 256 * 1024;
 
+// Limits (LIMITS.md row needed for workingMaxMs).
+const LIMITS = {
+  workingMaxMs: 30 * 60 * 1000,   // working with no Stop and no activity for this long -> idle
+  baseWindow: 200000,             // transcript model ids never carry [1m]: above this, infer the 1M window
+  bigWindow: 1000000,
+};
+// Only these Notification types need the person. idle_prompt fires ~60 s after every Stop: never needs-you.
+const NEEDS_YOU_NOTES = { permission_prompt: 'permission needed', elicitation_dialog: 'input needed' };
+
 // First match wins, so the [1m] variants come before the plain names.
 const CONTEXT_WINDOWS = [
   { re: /\[1m\]/i, tokens: 1000000 },
   { re: /opus/i, tokens: 200000 },
   { re: /sonnet/i, tokens: 200000 },
+  { re: /haiku/i, tokens: 200000 },
 ];
 
 const DONE_LINE = /^\s*(?:[Ss]tatus:\s*)?DONE\b/m;
@@ -44,7 +54,8 @@ function contextPct(usage, model) {
   if (!win) return undefined;
   const used = ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']
     .reduce((n, k) => n + (Number(usage[k]) || 0), 0);
-  return Math.max(0, Math.min(100, Math.round((used / win.tokens) * 100)));
+  const tokens = used > LIMITS.baseWindow && win.tokens === LIMITS.baseWindow ? LIMITS.bigWindow : win.tokens;
+  return Math.max(0, Math.min(100, Math.round((used / tokens) * 100)));
 }
 
 // The newest assistant row with usage in the last 256 KB of the transcript. A half-written last line and
@@ -63,7 +74,8 @@ async function contextUsage(file, deps) {
     for (let i = lines.length - 1; i >= 0; i--) {
       let row;
       try { row = JSON.parse(lines[i]); } catch (_) { continue; }
-      if (row && row.type === 'assistant' && !row.isSidechain && row.message && row.message.usage) {
+      if (row && row.type === 'assistant' && !row.isSidechain && row.message && row.message.usage
+          && row.message.model !== '<synthetic>') {
         return { usage: row.message.usage, model: row.message.model || '' };
       }
     }
@@ -150,14 +162,16 @@ function statusFor(input) {
     reasons.push({ text: oneLine(generic && c.body ? c.body.split('\n')[0] : c.title, PREVIEW_MAX) });
   }
   if (markerFresh(marker, surfaceId, Math.max(lastPrompt, lastUserMsg))) reasons.push({ text: markerAsk(marker) });
-  const note = events.filter((e) => e.event === 'Notification' && e.ts > lastPrompt && e.ts > lastStop).pop();
-  if (note) {
-    const t = note.notificationType;
-    reasons.push({ text: t === 'permission_prompt' ? 'permission needed' : t === 'idle_prompt' ? 'waiting for input' : '' });
-  }
+  const note = events.filter((e) => e.event === 'Notification' && NEEDS_YOU_NOTES[e.notificationType]
+    && e.ts > lastPrompt && e.ts > lastStop).pop();
+  if (note) reasons.push({ text: NEEDS_YOU_NOTES[note.notificationType] });
   if (reasons.length) return out('needs-you', needsYouPreview(reasons));
 
   const lastTurn = Math.max(lastPrompt, lastStop);
+  const now = Number.isFinite(input && input.now) ? input.now : Date.now();
+  const lastActivity = Math.max(lastEvent, lastUserMsg, ...lastMsgs.map((m) => Number(m.ts) || -Infinity));
+  const stale = now - lastActivity > LIMITS.workingMaxMs;      // no Stop ever came: crash / kill -9
+  if (stale && (toolRunning || lastPrompt > lastStop)) return out('idle', idlePreview);
   if (toolRunning) {
     let running = toolRunning && typeof toolRunning === 'object' ? toolRunning : null;
     for (let i = lastMsgs.length - 1; !running && i >= 0; i--) {
@@ -175,4 +189,4 @@ function statusFor(input) {
   return out('idle', idlePreview);
 }
 
-module.exports = { statusFor, contextPct, contextUsage, CONTEXT_WINDOWS, PREVIEW_MAX };
+module.exports = { statusFor, contextPct, contextUsage, CONTEXT_WINDOWS, LIMITS, PREVIEW_MAX };
