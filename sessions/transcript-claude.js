@@ -1,0 +1,482 @@
+'use strict';
+// p41 A2 — a Claude Code transcript (.jsonl) as the chat-thread messages the native app shows.
+//
+//   readThread(path, {before, limit = 80, sessionId, bannerPreset, fs}) -> Promise<{title, messages, cursor}>
+//   tailThread(path, fromOffset, {signal, onReset, sessionId, bannerPreset, pollMs}) -> AsyncIterable<Msg>
+//   readAttachment(path, n, {fs}) -> Promise<{mime, data: Buffer} | null>
+//
+// Msg, Tool and the page cursor are described in sessions/CONTRACT.md. How a record becomes messages
+// (rules from the render spike):
+//   - a user row that is meta, a sidechain row, or text that starts with `<` (a system tag) or with
+//     `Base directory for this skill` is not shown; tool_result rows only complete a tool.
+//   - tool_use and tool_result pair by id into one Tool; consecutive tools are one `tools` message whose
+//     id is the first tool's id, so a running tool that finishes is sent again under the same id.
+//   - AskUserQuestion is a `question`, TodoWrite a `todo`, a base64 image an `attachment`.
+//   - ids are `<record uuid>:<content index>`, so reading the file again gives the same ids.
+//
+// Pages are read backwards from the end of the file in 256 KB chunks; the whole file is never read. A
+// page ends on a whole message: reading goes on until one more message than the page is in hand, so a
+// `tools` group is never cut by the page edge. The one cost of that is the attachment number: `n` in the
+// url counts images from the start of the file, so a page that holds an image scans the bytes before it
+// (only lines that mention an image are parsed).
+//
+// Sean's █ banner (rows of █ plus `██  N. ask`) is lifted into a needs-you `callout` while `bannerPreset`
+// is on (the default). A4 owns callout parsing and will take over this switch.
+const fs = require('fs');
+
+const CHUNK = 256 * 1024;
+const SCAN_CHUNK = 1024 * 1024;
+const DEFAULT_LIMIT = 80;
+const MAX_LIMIT = 500;
+const OUTPUT_MAX = 2000;
+const TARGET_MAX = 300;
+const CURSOR_CACHE_MAX = 1000;
+const POLL_MS = 1000;
+const IMAGE_MARK = Buffer.from('"type":"image"');
+const NL = 10;
+
+const REAL_FS = { open: (...a) => fs.promises.open(...a) };
+
+// cursor id -> byte offset of its record, per file: a page far from the end resumes there instead of
+// reading back from the end again.
+const cursorCache = new Map();
+const cacheKey = (p, id) => `${p}\0${id}`;
+function cacheCursor(p, id, off) {
+  const k = cacheKey(p, id);
+  cursorCache.delete(k);
+  cursorCache.set(k, off);
+  if (cursorCache.size > CURSOR_CACHE_MAX) cursorCache.delete(cursorCache.keys().next().value);
+}
+
+const short = (s, n) => {
+  s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+};
+
+function toolTarget(name, input) {
+  const i = input && typeof input === 'object' ? input : {};
+  if (i.pattern) return short(i.pattern + (i.path ? ` ${i.path}` : ''), TARGET_MAX);
+  const v = i.file_path || i.notebook_path || i.path || i.command || i.url || i.query || i.skill || i.description || i.prompt || '';
+  return short(v, TARGET_MAX);
+}
+
+function resultText(content) {
+  if (Array.isArray(content)) return content.map((x) => (x && typeof x.text === 'string' ? x.text : '')).join('\n');
+  return String(content == null ? '' : content);
+}
+
+const isSkippedText = (t) => !t.trim() || t.startsWith('<') || t.startsWith('Base directory for this skill');
+
+// Image blocks that count as attachments, in order. One rule for the reader, the tail and the scans.
+function imagesIn(rec) {
+  if (!rec || rec.type !== 'user' || rec.isMeta || rec.isSidechain) return [];
+  const c = rec.message && rec.message.content;
+  if (!Array.isArray(c)) return [];
+  return c.filter((b) => b && b.type === 'image' && b.source && b.source.type === 'base64' && typeof b.source.data === 'string');
+}
+
+const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+const attachmentUrl = (sessionId, n) => `/api/sessions/${encodeURIComponent(sessionId)}/attachment/${n}`;
+
+// Banner rows -> {text without the rows, asks}. No numbered ask, no callout: the text stays as written.
+function liftBanner(text) {
+  const rows = text.split('\n');
+  if (!rows.some((r) => r.startsWith('█'))) return { text, asks: [] };
+  const asks = rows.filter((r) => /^█+\s+\d+\.\s/.test(r)).map((r) => r.replace(/^█+\s+\d+\.\s*/, '').trim());
+  if (!asks.length) return { text, asks: [] };
+  return { text: rows.filter((r) => !r.startsWith('█')).join('\n').trim(), asks };
+}
+
+// Records in file order in, messages out. `push` returns the messages that are new or changed by that
+// record (a tools group that gained a tool or a result), which is exactly what a live stream sends.
+class Normaliser {
+  constructor({ bannerPreset = true } = {}) {
+    this.bannerPreset = bannerPreset;
+    this.out = [];
+    this.offs = new Map();   // message id -> byte offset of its record
+    this.rels = new Map();   // attachment message id -> index among the images this normaliser saw
+    this.tools = new Map();  // tool id -> {tool, group}
+    this.group = null;
+    this.rel = 0;
+    this.title = '';
+    this.lastTs = 0;
+  }
+
+  add(msg, off, changed) {
+    this.out.push(msg);
+    this.offs.set(msg.id, off);
+    this.group = null;
+    changed.push(msg);
+  }
+
+  text(kind, id, ts, raw, off, changed) {
+    if (isSkippedText(raw)) return;
+    this.add({ id, ts, kind, text: raw.trim() }, off, changed);
+  }
+
+  push({ off, rec }) {
+    const changed = [];
+    if (rec.type === 'custom-title') {
+      if (typeof rec.customTitle === 'string') this.title = rec.customTitle;
+      return changed;
+    }
+    if (rec.isSidechain || (rec.type !== 'user' && rec.type !== 'assistant')) return changed;
+    const parsed = Date.parse(rec.timestamp);
+    const ts = Number.isNaN(parsed) ? this.lastTs : parsed;
+    this.lastTs = ts;
+    const uuid = rec.uuid || `@${off}`;
+    let content = rec.message && rec.message.content;
+    if (typeof content === 'string') content = [{ type: 'text', text: content }];
+    if (!Array.isArray(content)) return changed;
+    if (rec.type === 'user' && rec.isMeta) return changed;
+
+    content.forEach((b, i) => {
+      if (!b || typeof b !== 'object') return;
+      const id = `${uuid}:${i}`;
+      if (rec.type === 'assistant') {
+        if (b.type === 'text' && typeof b.text === 'string') this.assistantText(id, ts, b.text, off, changed);
+        else if (b.type === 'tool_use') this.toolUse(id, ts, b, off, changed);
+      } else if (b.type === 'text' && typeof b.text === 'string') {
+        if (!b.text.startsWith('<')) this.text('user', id, ts, b.text, off, changed);
+      } else if (b.type === 'image') {
+        if (imagesIn({ type: 'user', message: { content: [b] } }).length) {
+          const mime = b.source.media_type || 'image/png';
+          const msg = { id, ts, kind: 'attachment', attachment: { mime, name: `image.${EXT[mime] || 'bin'}`, url: '' } };
+          this.rels.set(id, this.rel++);
+          this.add(msg, off, changed);
+        }
+      } else if (b.type === 'tool_result') {
+        this.toolResult(b, changed);
+      }
+    });
+    return changed;
+  }
+
+  assistantText(id, ts, raw, off, changed) {
+    if (!raw.trim()) return;
+    const { text, asks } = this.bannerPreset ? liftBanner(raw) : { text: raw, asks: [] };
+    if (text.trim()) this.add({ id, ts, kind: 'assistant', text: text.trim() }, off, changed);
+    if (asks.length) {
+      this.add({ id: `${id}:callout`, ts, kind: 'callout',
+        callout: { type: 'needs-you', title: 'Needs you', body: asks.join('\n'), options: [] } }, off, changed);
+    }
+  }
+
+  toolUse(id, ts, b, off, changed) {
+    const input = b.input && typeof b.input === 'object' ? b.input : {};
+    if (b.name === 'TodoWrite') {
+      const todos = (Array.isArray(input.todos) ? input.todos : [])
+        .map((t) => ({ text: String(t.content || t.activeForm || ''), done: t.status === 'completed' }));
+      this.add({ id, ts, kind: 'todo', todos }, off, changed);
+      return;
+    }
+    if (b.name === 'AskUserQuestion') {
+      (Array.isArray(input.questions) ? input.questions : []).forEach((q, k) => {
+        this.add({ id: k ? `${id}:${k}` : id, ts, kind: 'question', question: {
+          header: String(q.header || ''), text: String(q.question || ''), multi: !!q.multiSelect,
+          options: (Array.isArray(q.options) ? q.options : []).map((o) => ({ label: String(o.label || ''), description: String(o.description || '') })),
+        } }, off, changed);
+      });
+      return;
+    }
+    if (!this.group) {
+      this.group = { id, ts, kind: 'tools', items: [] };
+      this.out.push(this.group);
+      this.offs.set(id, off);
+    }
+    const tool = { id: b.id || id, name: String(b.name || ''), target: toolTarget(b.name, input), status: 'running' };
+    this.group.items.push(tool);
+    this.tools.set(tool.id, { tool, group: this.group });
+    if (!changed.includes(this.group)) changed.push(this.group);
+  }
+
+  toolResult(b, changed) {
+    const hit = this.tools.get(b.tool_use_id);
+    if (!hit) return;
+    const body = resultText(b.content);
+    hit.tool.status = b.is_error ? 'error' : 'ok';
+    hit.tool.lines = body ? body.split('\n').length : 0;
+    if (body) hit.tool.output = body.slice(0, OUTPUT_MAX);
+    if (!changed.includes(hit.group)) changed.push(hit.group);
+  }
+
+  // Number and name an attachment once the count of images before this window is known.
+  numberAttachment(msg, base, sessionId) {
+    const n = base + this.rels.get(msg.id);
+    msg.attachment.url = attachmentUrl(sessionId, n);
+    msg.attachment.name = `image-${n + 1}.${EXT[msg.attachment.mime] || 'bin'}`;
+  }
+}
+
+// Complete lines of buf (bytes starting at file offset base) as {off, rec}. Lines that are not JSON, and
+// record types the thread never uses, are dropped. The text after the last newline counts as a line: a
+// torn one fails to parse and is skipped.
+function parseLines(buf, base) {
+  const entries = [];
+  let s = 0;
+  while (s < buf.length) {
+    let e = buf.indexOf(NL, s);
+    if (e < 0) e = buf.length;
+    if (e > s) {
+      try {
+        const rec = JSON.parse(buf.toString('utf8', s, e));
+        if (rec && (rec.type === 'user' || rec.type === 'assistant' || rec.type === 'custom-title')) entries.push({ off: base + s, rec });
+      } catch { /* half-written or foreign line */ }
+    }
+    s = e + 1;
+  }
+  return entries;
+}
+
+async function readAt(h, pos, len) {
+  const buf = Buffer.alloc(len);
+  let got = 0;
+  while (got < len) {
+    const { bytesRead } = await h.read(buf, got, len - got, pos + got);
+    if (!bytesRead) break;
+    got += bytesRead;
+  }
+  return got < len ? buf.subarray(0, got) : buf;
+}
+
+// Reads a file backwards, one chunk per `older()`; `entries` is always whole records in file order.
+class BackReader {
+  constructor(h, end, chunkSize) {
+    this.h = h;
+    this.pos = end;
+    this.chunkSize = chunkSize;
+    this.carry = Buffer.alloc(0);   // the partial line at the front of what has been read
+    this.entries = [];
+    this.completeEnd = null;        // end of the last whole line, known after the first chunk
+  }
+
+  async older() {
+    if (this.pos <= 0) return false;
+    const start = Math.max(0, this.pos - this.chunkSize);
+    const chunk = await readAt(this.h, start, this.pos - start);
+    if (this.completeEnd == null) {
+      const nl = chunk.lastIndexOf(NL);
+      if (nl >= 0) this.completeEnd = start + nl + 1;
+    }
+    const buf = Buffer.concat([chunk, this.carry]);
+    let cut = 0;
+    if (start > 0) {
+      cut = buf.indexOf(NL);
+      if (cut < 0) { this.carry = buf; this.pos = start; return true; }
+      cut += 1;
+    }
+    this.entries = parseLines(buf.subarray(cut), start + cut).concat(this.entries);
+    this.carry = buf.subarray(0, cut);
+    this.pos = start;
+    return true;
+  }
+}
+
+// Calls fn(line Buffer, offset) for every whole line in [0, end) of the file, front to back.
+async function eachLine(h, end, fn) {
+  let carry = Buffer.alloc(0);
+  let pos = 0;
+  while (pos < end) {
+    const chunk = await readAt(h, pos, Math.min(SCAN_CHUNK, end - pos));
+    if (!chunk.length) break;
+    const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+    const base = pos - carry.length;
+    pos += chunk.length;
+    let s = 0;
+    for (;;) {
+      const e = buf.indexOf(NL, s);
+      if (e < 0) break;
+      if (fn(buf.subarray(s, e), base + s) === false) return;
+      s = e + 1;
+    }
+    carry = buf.subarray(s);
+  }
+  if (carry.length && fn(carry, pos - carry.length) === false) return;
+}
+
+// Only lines that mention an image are parsed.
+async function eachImage(h, end, fn) {
+  await eachLine(h, end, (line) => {
+    if (line.indexOf(IMAGE_MARK) < 0) return true;
+    let rec;
+    try { rec = JSON.parse(line.toString('utf8')); } catch { return true; }
+    for (const b of imagesIn(rec)) if (fn(b) === false) return false;
+    return true;
+  });
+}
+
+async function countImages(h, end) {
+  let n = 0;
+  await eachImage(h, end, () => { n++; });
+  return n;
+}
+
+async function readAttachment(p, n, opts = {}) {
+  const h = await (opts.fs || REAL_FS).open(p, 'r');
+  try {
+    const { size } = await h.stat();
+    let i = 0;
+    let found = null;
+    await eachImage(h, size, (b) => {
+      if (i++ === n) { found = { mime: b.source.media_type || 'image/png', data: Buffer.from(b.source.data, 'base64') }; return false; }
+      return true;
+    });
+    return found;
+  } finally {
+    await h.close();
+  }
+}
+
+// The last custom-title in the first chunk: used when the pages read from the end held none.
+async function headTitle(h, size, chunkSize) {
+  const buf = await readAt(h, 0, Math.min(size, chunkSize));
+  const end = buf.length < size ? buf.lastIndexOf(NL) + 1 : buf.length;
+  let title = '';
+  for (const { rec } of parseLines(buf.subarray(0, end), 0)) if (rec.type === 'custom-title' && typeof rec.customTitle === 'string') title = rec.customTitle;
+  return title;
+}
+
+const clampLimit = (n) => Math.min(MAX_LIMIT, Math.max(1, Math.floor(Number(n)) || DEFAULT_LIMIT));
+
+async function readThread(p, opts = {}) {
+  const { before, sessionId = '', bannerPreset = true, chunkSize = CHUNK } = opts;
+  const limit = clampLimit(opts.limit == null ? DEFAULT_LIMIT : opts.limit);
+  const h = await (opts.fs || REAL_FS).open(p, 'r');
+  try {
+    const { size } = await h.stat();
+    let end = size;
+    let fromCache = false;
+    if (before != null) {
+      const off = cursorCache.get(cacheKey(p, before));
+      if (off != null && off > 0 && off <= size && (await readAt(h, off - 1, 1))[0] === NL) { end = off; fromCache = true; }
+    }
+    const br = new BackReader(h, end, chunkSize);
+    let norm;
+    let older;   // the messages older than the page edge
+    for (;;) {
+      const more = await br.older();
+      norm = new Normaliser({ bannerPreset });
+      for (const e of br.entries) norm.push(e);
+      const edge = fromCache || before == null ? norm.out.length : norm.out.findIndex((m) => m.id === before);
+      older = edge < 0 ? [] : norm.out.slice(0, edge);
+      if (!more || (edge >= 0 && older.length > limit)) break;
+    }
+    const finished = br.pos <= 0;
+    if (before != null && !fromCache && !norm.out.some((m) => m.id === before)) return withEnd({ title: norm.title, messages: [], cursor: null }, br, size);
+    const messages = older.slice(-limit);
+    const hasOlder = older.length > limit;
+
+    if (messages.some((m) => m.kind === 'attachment')) {
+      const base = await countImages(h, br.entries.length ? br.entries[0].off : end);
+      for (const m of messages) if (m.kind === 'attachment') norm.numberAttachment(m, base, sessionId);
+    }
+    let title = norm.title;
+    if (!title && !finished) title = await headTitle(h, size, chunkSize);
+    if (hasOlder) cacheCursor(p, messages[0].id, norm.offs.get(messages[0].id));
+    return withEnd({ title, messages, cursor: hasOlder ? messages[0].id : null }, br, size);
+  } finally {
+    await h.close();
+  }
+}
+
+// Where a tail should pick up: the end of the last whole line read. Not part of the JSON reply.
+function withEnd(thread, br, size) {
+  Object.defineProperty(thread, 'endOffset', { value: br.completeEnd == null ? size : br.completeEnd, enumerable: false });
+  return thread;
+}
+
+function waiter(p, signal, pollMs) {
+  let dirty = false;
+  let wake = null;
+  let watcher = null;
+  try {
+    watcher = fs.watch(p, () => { dirty = true; if (wake) wake(); });
+    watcher.on('error', () => {});
+  } catch { /* poll only */ }
+  return {
+    wait() {
+      if (dirty || (signal && signal.aborted)) { dirty = false; return Promise.resolve(); }
+      return new Promise((resolve) => {
+        const done = () => { clearTimeout(timer); if (signal) signal.removeEventListener('abort', done); wake = null; dirty = false; resolve(); };
+        const timer = setTimeout(done, pollMs);
+        wake = done;
+        if (signal) signal.addEventListener('abort', done, { once: true });
+      });
+    },
+    close() { if (watcher) watcher.close(); },
+  };
+}
+
+async function* tailThread(p, fromOffset, opts = {}) {
+  const { signal, onReset, sessionId = '', bannerPreset = true, pollMs = POLL_MS } = opts;
+  const fsx = opts.fs || REAL_FS;
+  const w = waiter(p, signal, pollMs);
+  let norm = null;
+  let base = null;        // images before the first record this normaliser saw
+  let windowStart = 0;
+  let offset = fromOffset;
+  let ino = null;
+  let carry = Buffer.alloc(0);
+
+  // Feed the 256 KB before `at` without yielding, so a result that arrives now finds its tool.
+  const warm = async (h, at) => {
+    norm = new Normaliser({ bannerPreset });
+    base = null;
+    carry = Buffer.alloc(0);
+    if (at <= 0) { windowStart = 0; base = 0; return; }
+    const br = new BackReader(h, at, CHUNK);
+    await br.older();
+    for (const e of br.entries) norm.push(e);
+    windowStart = br.entries.length ? br.entries[0].off : at;
+  };
+
+  try {
+    while (!(signal && signal.aborted)) {
+      let h = null;
+      try {
+        try { h = await fsx.open(p, 'r'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+        if (h) {
+          const st = await h.stat();
+          if (offset == null) offset = st.size;
+          const rotated = ino != null && st.ino !== ino;
+          ino = st.ino;
+          if (!norm) await warm(h, Math.min(offset, st.size));
+          if (rotated || st.size < offset) {
+            offset = 0;
+            await warm(h, 0);
+            if (onReset) onReset();
+          }
+          while (offset < st.size) {
+            const chunk = await readAt(h, offset, Math.min(SCAN_CHUNK, st.size - offset));
+            if (!chunk.length) break;
+            const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+            const lineBase = offset - carry.length;
+            offset += chunk.length;
+            const lastNl = buf.lastIndexOf(NL);
+            if (lastNl < 0) { carry = buf; continue; }
+            carry = buf.subarray(lastNl + 1);
+            const changed = [];
+            for (const e of parseLines(buf.subarray(0, lastNl + 1), lineBase)) {
+              for (const m of norm.push(e)) if (!changed.includes(m)) changed.push(m);
+            }
+            if (changed.some((m) => m.kind === 'attachment') && base == null) base = await countImages(h, windowStart);
+            for (const m of changed) {
+              if (m.kind === 'attachment') norm.numberAttachment(m, base, sessionId);
+              yield JSON.parse(JSON.stringify(m));
+            }
+          }
+          // The partial last line is read again once it has its newline.
+          offset -= carry.length;
+          carry = Buffer.alloc(0);
+        }
+      } finally {
+        if (h) await h.close();
+      }
+      await w.wait();
+    }
+  } finally {
+    w.close();
+  }
+}
+
+module.exports = { readThread, tailThread, readAttachment };
