@@ -16,6 +16,18 @@ const { bootServer, call } = require('./helpers/server-boot');
 
 const TOKEN = 'srv-token-for-tests';
 const TEN_MIN = 10 * 60 * 1000;
+// http.request, not fetch: a test has to set Host and Origin freely, which fetch will not.
+function raw(base, method, pathAndQuery, headers) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(base);
+    const r = http.request({ host: u.hostname, port: u.port, method, path: pathAndQuery, headers: headers || {} }, (res) => {
+      let text = ''; res.setEncoding('utf8');
+      res.on('data', (d) => { text += d; });
+      res.on('end', () => { let json = null; try { json = JSON.parse(text); } catch (_) {} resolve({ status: res.statusCode, json, text }); });
+    });
+    r.on('error', reject); r.end();
+  });
+}
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pair-'));
 
 async function mount(opts) {
@@ -24,7 +36,7 @@ async function mount(opts) {
   const file = path.join(dir, 'devices.json');
   const clock = { t: 1_700_000_000_000 };
   const pairing = createPairing({ file, serverToken: o.serverToken === undefined ? TOKEN : o.serverToken,
-    publicUrl: o.publicUrl, now: () => clock.t, log: { error() {} } });
+    publicUrl: o.publicUrl, now: () => clock.t, write: o.write, log: o.log || { error() {} } });
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     if (u.pathname.startsWith('/api/pair/')) return pairing.handle(req, res, u);
@@ -147,14 +159,64 @@ test('devices survive a restart (a new instance reads the same file)', async () 
   } finally { await m.close(); }
 });
 
-test('start: SERVER_TOKEN works from anywhere, a local request works without it', async () => {
+test('start: SERVER_TOKEN works from anywhere in any header form', async () => {
   const m = await mount();
   try {
     assert.strictEqual((await call(m.base, 'POST', '/api/pair/start', { token: TOKEN, headers: { 'x-forwarded-for': '203.0.113.9' } })).status, 200);
     assert.strictEqual((await call(m.base, 'POST', '/api/pair/start', { headers: { 'x-app-token': TOKEN, 'x-forwarded-for': '203.0.113.9' } })).status, 200);
-    assert.strictEqual((await call(m.base, 'POST', '/api/pair/start')).status, 200, 'loopback, no forwarding header');
-    const wrong = await call(m.base, 'POST', '/api/pair/start', { token: 'nope', headers: { 'x-forwarded-for': '203.0.113.9' } });
-    assert.strictEqual(wrong.status, 401);
+    assert.strictEqual((await call(m.base, 'POST', `/api/pair/start?token=${TOKEN}`)).status, 200);
+    assert.strictEqual((await call(m.base, 'POST', '/api/pair/start', { token: 'nope', headers: { 'x-forwarded-for': '203.0.113.9' } })).status, 401);
+  } finally { await m.close(); }
+});
+
+test('token-configured server refuses tokenless loopback start', async () => {
+  const m = await mount();
+  try {
+    const r = await call(m.base, 'POST', '/api/pair/start');
+    assert.strictEqual(r.status, 401, 'loopback peer, loopback Host, no forwarding header: still needs the token');
+    assert.strictEqual(m.pairing.list().length, 0);
+    assert.strictEqual((await raw(m.base, 'POST', '/api/pair/start', { host: 'localhost' })).status, 401);
+  } finally { await m.close(); }
+});
+
+test('open server: a plain local request may start', async () => {
+  const m = await mount({ serverToken: '' });
+  try {
+    assert.strictEqual((await call(m.base, 'POST', '/api/pair/start')).status, 200);
+    assert.strictEqual((await raw(m.base, 'POST', '/api/pair/start', { host: 'localhost:8080' })).status, 200);
+    assert.strictEqual((await raw(m.base, 'POST', '/api/pair/start', { host: '[::1]:8080' })).status, 200);
+    assert.strictEqual((await raw(m.base, 'POST', '/api/pair/start', { host: '127.0.0.1' })).status, 200);
+  } finally { await m.close(); }
+});
+
+test('rebinding: loopback start with foreign Host refused', async () => {
+  const open = await mount({ serverToken: '' });
+  const locked = await mount();
+  try {
+    // The page's own hostname now resolves to 127.0.0.1: loopback peer, nothing forwarded, foreign Host.
+    for (const host of ['evil.example', `evil.example:${new URL(open.base).port}`, 'localhost.evil.example', '127.0.0.1.evil.example']) {
+      const r = await raw(open.base, 'POST', '/api/pair/start', { host });
+      assert.strictEqual(r.status, 403, `open server, Host "${host}"`);
+      assert.strictEqual(r.json.error, 'local_only');
+    }
+    assert.strictEqual((await raw(locked.base, 'POST', '/api/pair/start', { host: 'evil.example' })).status, 401);
+    const { localOnly } = require('../lib/pairing');
+    const fake = (headers) => ({ socket: { remoteAddress: '127.0.0.1' }, headers });
+    assert.strictEqual(localOnly(fake({})), false, 'no Host at all');
+    assert.strictEqual(localOnly(fake({ host: '127.0.0.1:8080' })), true);
+    assert.strictEqual(open.pairing.list().length + locked.pairing.list().length, 0);
+  } finally { await open.close(); await locked.close(); }
+});
+
+test('start with Origin header refused on tokenless path', async () => {
+  const m = await mount({ serverToken: '' });
+  try {
+    for (const h of [{ origin: 'http://evil.example' }, { origin: 'http://127.0.0.1:8080' }, { origin: 'null' },
+      { 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-site': 'same-site' }]) {
+      const r = await raw(m.base, 'POST', '/api/pair/start', Object.assign({ host: '127.0.0.1:8080' }, h));
+      assert.strictEqual(r.status, 403, JSON.stringify(h));
+    }
+    assert.strictEqual((await raw(m.base, 'POST', '/api/pair/start', { host: '127.0.0.1:8080', 'sec-fetch-site': 'none' })).status, 200);
   } finally { await m.close(); }
 });
 
@@ -172,13 +234,14 @@ test('start refused from a forwarded (tunnel) request without SERVER_TOKEN', asy
   } finally { await open.close(); await locked.close(); }
 });
 
-test('a device key cannot mint more pairing codes', async () => {
+test('an existing device key may start pairing for another device', async () => {
   const m = await mount();
   try {
     const { json } = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
     const { json: c } = await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: 'phone' } });
     const r = await call(m.base, 'POST', '/api/pair/start', { token: c.deviceKey, headers: { 'x-forwarded-for': '203.0.113.9' } });
-    assert.strictEqual(r.status, 401);
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual((await call(m.base, 'POST', '/api/pair/start', { token: c.deviceKey + 'x' })).status, 401);
   } finally { await m.close(); }
 });
 
@@ -236,38 +299,127 @@ test('revoked key refused', async () => {
   } finally { await s.stop(); }
 });
 
-test('real server: local start needs no token, a tunnelled one does; claim is open', async () => {
+test('real server: start needs the token even from loopback; claim is open', async () => {
   const { s } = await boot();
   try {
-    const local = await call(s.base, 'POST', '/api/pair/start');
-    assert.strictEqual(local.status, 200);
-    assert.ok(local.json.qr.startsWith('cmuxremote://pair?u=https%3A%2F%2Fcmux-max.cafesean.com&c='));
-    const tunnel = await call(s.base, 'POST', '/api/pair/start', { headers: { 'x-forwarded-for': '203.0.113.9' } });
-    assert.strictEqual(tunnel.status, 401);
-    const claim = await call(s.base, 'POST', '/api/pair/claim', { body: { code: local.json.code, deviceName: 'phone' }, headers: { 'x-forwarded-for': '203.0.113.9' } });
+    assert.strictEqual((await call(s.base, 'POST', '/api/pair/start')).status, 401);
+    assert.strictEqual((await raw(s.base, 'POST', '/api/pair/start', { host: 'evil.example' })).status, 401);
+    const ok = await call(s.base, 'POST', '/api/pair/start', { token: TOKEN });
+    assert.strictEqual(ok.status, 200);
+    assert.ok(ok.json.qr.startsWith('cmuxremote://pair?u=https%3A%2F%2Fcmux-max.cafesean.com&c='));
+    const claim = await call(s.base, 'POST', '/api/pair/claim', { body: { code: ok.json.code, deviceName: 'phone' }, headers: { 'x-forwarded-for': '203.0.113.9' } });
     assert.strictEqual(claim.status, 200, 'the app claims through the tunnel without any credential');
   } finally { await s.stop(); }
 });
 
-test('bin/cmux-remote-pair.js prints a QR and the raw link against the real server', async () => {
+const flakyWriter = (state) => (file, text) => { if (state.failing) throw new Error('disk full'); fs.writeFileSync(file, text); };
+
+test('storage: a failed write on claim is a single 500, logged once, and the code is not burned', async () => {
+  const logged = [];
+  const state = { failing: true };
+  const m = await mount({ log: { error: (l) => logged.push(l) }, write: flakyWriter(state) });
+  try {
+    const { json } = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
+    const a = await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: 'phone' } });
+    assert.strictEqual(a.status, 500);
+    assert.strictEqual(a.json.error, 'storage_failed');
+    assert.ok(!a.text.includes('deviceKey'));
+    assert.strictEqual(logged.length, 1, logged.join('\n'));
+    assert.match(logged[0], /disk full/);
+    assert.strictEqual(m.pairing.list().length, 0, 'no half-made device');
+    state.failing = false;
+    const b = await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: 'phone' } });
+    assert.strictEqual(b.status, 200, 'the same code still works once the disk is back');
+    assert.strictEqual(m.pairing.list().length, 1);
+    assert.strictEqual((await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: 'phone' } })).status, 404);
+  } finally { await m.close(); }
+});
+
+test('storage: a failed write on revoke keeps the revocation and persists it on the next write', async () => {
+  const state = { failing: false };
+  const logged = [];
+  const m = await mount({ log: { error: (l) => logged.push(l) }, write: flakyWriter(state) });
+  const pairNew = async (name) => {
+    const { json } = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
+    return (await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: name } })).json;
+  };
+  const fresh = () => createPairing({ file: m.file, serverToken: TOKEN, log: { error() {} } });
+  try {
+    const a = await pairNew('a');
+    const b = await pairNew('b');
+    state.failing = true;
+    const r = await call(m.base, 'DELETE', `/api/pair/devices/${a.id}`, { token: TOKEN });
+    assert.strictEqual(r.status, 500);
+    assert.strictEqual(r.json.error, 'storage_failed');
+    assert.strictEqual(logged.length, 1);
+    assert.strictEqual(m.pairing.verifyKey(a.deviceKey), null, 'revoked in memory at once');
+    assert.ok(m.pairing.verifyKey(b.deviceKey));
+    assert.ok(fresh().verifyKey(a.deviceKey), 'the file still lists it, so a restart now would resurrect it');
+    state.failing = false;
+    const c = await pairNew('c');                                  // any successful write carries the revoke
+    assert.strictEqual(fresh().verifyKey(a.deviceKey), null);
+    assert.ok(fresh().verifyKey(b.deviceKey) && fresh().verifyKey(c.deviceKey));
+  } finally { await m.close(); }
+});
+
+test('storage: a retried DELETE settles a revoke that failed to persist', async () => {
+  const state = { failing: false };
+  const m = await mount({ write: flakyWriter(state) });
+  try {
+    const { json } = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
+    const a = (await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: 'a' } })).json;
+    state.failing = true;
+    assert.strictEqual((await call(m.base, 'DELETE', `/api/pair/devices/${a.id}`, { token: TOKEN })).status, 500);
+    state.failing = false;
+    assert.strictEqual((await call(m.base, 'DELETE', `/api/pair/devices/${a.id}`, { token: TOKEN })).status, 404);
+    assert.strictEqual(createPairing({ file: m.file, serverToken: TOKEN, log: { error() {} } }).verifyKey(a.deviceKey), null);
+  } finally { await m.close(); }
+});
+
+test('a malformed %-escape in a device id is a 404, not a 500', async () => {
+  const m = await mount();
+  try {
+    assert.strictEqual((await call(m.base, 'DELETE', '/api/pair/devices/%E0%A4%A', { token: TOKEN })).status, 404);
+  } finally { await m.close(); }
+});
+
+test('CLI sends SERVER_TOKEN', async () => {
   const { s } = await boot();
   try {
     const cli = path.join(__dirname, '..', 'bin', 'cmux-remote-pair.js');
-    const run = (args) => new Promise((resolve) => {
-      const c = spawn(process.execPath, [cli, ...args], { cwd: s.cwd, env: { PATH: process.env.PATH, PORT: String(s.port) } });
+    const run = (args, env) => new Promise((resolve) => {
+      const c = spawn(process.execPath, [cli, ...args], { cwd: s.cwd, env: Object.assign({ PATH: process.env.PATH, PORT: String(s.port) }, env) });
       let stdout = ''; let stderr = '';
       c.stdout.on('data', (d) => { stdout += d; }); c.stderr.on('data', (d) => { stderr += d; });
       c.on('close', (code) => resolve({ code, stdout, stderr }));
     });
-    const full = await run([]);
+    const full = await run([], { SERVER_TOKEN: TOKEN });
     assert.strictEqual(full.code, 0, full.stderr);
-    const lines = full.stdout.split('\n');
-    const link = lines.find((l) => l.startsWith('cmuxremote://pair?'));
+    const link = full.stdout.split('\n').find((l) => l.startsWith('cmuxremote://pair?'));
     assert.ok(link && link.includes('u=https%3A%2F%2Fcmux-max.cafesean.com&c='), 'the raw link sits on its own line');
     assert.ok(/[█▀▄]/.test(full.stdout), 'a QR is drawn');
-    const only = await run(['--link']);
+    assert.ok(!full.stdout.includes(TOKEN) && !full.stderr.includes(TOKEN), 'the token is never printed');
+    const only = await run(['--link'], { SERVER_TOKEN: TOKEN });
     assert.match(only.stdout, /^cmuxremote:\/\/pair\?u=[^\n]+&c=[A-Z2-9]{8}\n$/);
-    const dead = spawnSync(process.execPath, [cli], { env: { PATH: process.env.PATH, PORT: '1' }, cwd: s.cwd, encoding: 'utf8' });
+
+    // No token anywhere: the server says 401 and the CLI says what to do, without a stack or the token.
+    const bare = await run([], {});
+    assert.strictEqual(bare.code, 1);
+    assert.match(bare.stderr, /refused \(401 unauthorized\).*SERVER_TOKEN/);
+
+    // Token only in the dotenv file next to server.js: read for SERVER_TOKEN and nothing else.
+    const serverDir = tmp();
+    const dotenv = path.join(serverDir, '.env');
+    fs.writeFileSync(dotenv, `PORT=1\nOTHER_SECRET=zzz\nSERVER_TOKEN="${TOKEN}"\n`);
+    const { main, tokenFromEnvFile } = require('../bin/cmux-remote-pair');
+    assert.strictEqual(tokenFromEnvFile(dotenv), TOKEN);
+    assert.strictEqual(tokenFromEnvFile(path.join(serverDir, 'missing')), '');
+    const out = []; const errs = [];
+    const code = await main(['--link'], { PORT: String(s.port) }, (l) => out.push(l), (l) => errs.push(l), serverDir);
+    assert.strictEqual(code, 0, errs.join('\n'));
+    assert.match(out[0], /^cmuxremote:\/\/pair\?/);
+
+    const dead = spawnSync(process.execPath, [cli], { env: { PATH: process.env.PATH, PORT: '1', SERVER_TOKEN: TOKEN }, cwd: s.cwd, encoding: 'utf8' });
     assert.strictEqual(dead.status, 1);
     assert.match(dead.stderr, /no server on 127\.0\.0\.1:1/);
   } finally { await s.stop(); }
