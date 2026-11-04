@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { transcriptFor, watchJoin } = require('../sessions/join.js');
+const { transcriptFor, watchJoin, isAllowedTranscriptPath } = require('../sessions/join.js');
 
 const NOW = Date.UTC(2026, 10, 4, 12, 0, 0);
 const HOME = '/home/u';
@@ -15,7 +15,7 @@ const ev = (o) => ({ ts: NOW - 60_000, sessionId: 's1', transcriptPath: `${HOME}
 const events = (list) => async () => ({ events: list, more: false });
 
 // A fake disk: { path: { mtime, first? } }. Directories are implied by the paths.
-function fakeFs(files) {
+function fakeFs(files, links) {
   const names = Object.keys(files);
   return {
     async readdir(dir) {
@@ -25,6 +25,7 @@ function fakeFs(files) {
       if (!out.size) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
       return [...out];
     },
+    async realpath(p) { return (links && links[p]) || p; },   // links: { symlink: real target }
     async stat(p) {
       if (files[p]) return { mtimeMs: files[p].mtime };
       return { mtimeMs: 0 };
@@ -130,4 +131,76 @@ test('watchJoin fires onChange when path changes', async () => {
   log.push(ev({ ts: NOW - 100, sessionId: 'c', transcriptPath: `${HOME}/.claude/projects/-w/c.jsonl` }));
   await tick();
   assert.deepStrictEqual(seen, ['a', 'b']);                // stopped: no more calls
+});
+
+// ---- hook-supplied paths are untrusted (the phone is later served whatever they name) ----------------
+
+const withPath = (transcriptPath, fs) => base({ readEvents: events([ev({ transcriptPath })]), fs: fs || fakeFs({}),
+  cwdFor: async () => null });
+
+test('allowed path accepted', async () => {
+  for (const [p, kind] of [[`${HOME}/.claude/projects/-w/s1.jsonl`, 'claude'], [`${HOME}/.codex/sessions/2026/11/04/rollout-x-s1.jsonl`, 'codex']]) {
+    const j = await transcriptFor(SURFACE, withPath(p));
+    assert.deepStrictEqual(j, { kind, path: p, sessionId: 's1' });
+    assert.strictEqual(await isAllowedTranscriptPath(p, base({ fs: fakeFs({}) })), true);
+  }
+});
+
+test('event path outside roots is ignored', async () => {
+  for (const p of ['/etc/passwd', '/etc/x.jsonl', `${HOME}/.ssh/id.jsonl`, `${HOME}/.claude/projects-evil/x.jsonl`, `${HOME}/.claude/projects`]) {
+    assert.strictEqual(await transcriptFor(SURFACE, withPath(p)), null, p);
+    assert.strictEqual(await isAllowedTranscriptPath(p, base({ fs: fakeFs({}) })), false, p);
+  }
+  for (const p of [null, 42, { a: 1 }, 'relative/x.jsonl']) assert.strictEqual(await transcriptFor(SURFACE, withPath(p)), null);
+});
+
+test('../ traversal ignored', async () => {
+  const p = `${HOME}/.claude/projects/../../.ssh/x.jsonl`;
+  assert.strictEqual(await transcriptFor(SURFACE, withPath(p)), null);
+  assert.strictEqual(await isAllowedTranscriptPath(p, base({ fs: fakeFs({}) })), false);
+});
+
+test('symlink pointing outside roots ignored', async () => {
+  const link = `${HOME}/.claude/projects/-w/s1.jsonl`;
+  const fs = fakeFs({}, { [link]: `${HOME}/.ssh/secret.jsonl` });
+  assert.strictEqual(await transcriptFor(SURFACE, withPath(link, fs)), null);
+  assert.strictEqual(await isAllowedTranscriptPath(link, base({ fs })), false);
+  // a symlink that stays inside a root is fine and resolves to its target
+  const inside = fakeFs({}, { [link]: `${HOME}/.claude/projects/-w/real.jsonl` });
+  assert.strictEqual((await transcriptFor(SURFACE, withPath(link, inside))).path, `${HOME}/.claude/projects/-w/real.jsonl`);
+});
+
+test('non-.jsonl ignored', async () => {
+  for (const p of [`${HOME}/.claude/projects/-w/s1.json`, `${HOME}/.claude/projects/-w/s1.jsonl.txt`, `${HOME}/.claude/projects/-w/notes`]) {
+    assert.strictEqual(await transcriptFor(SURFACE, withPath(p)), null, p);
+  }
+});
+
+test('a bad newest event falls through to the next good event, then to the cwd fallback', async () => {
+  const good = `${HOME}/.claude/projects/-w/good.jsonl`;
+  const log = [ev({ ts: NOW - 20_000, sessionId: 'good', transcriptPath: good }),
+    ev({ ts: NOW - 1_000, sessionId: 'evil', transcriptPath: '/etc/passwd' })];
+  assert.strictEqual((await transcriptFor(SURFACE, base({ readEvents: events(log), fs: fakeFs({}) }))).sessionId, 'good');
+  const dir = `${HOME}/.claude/projects/-w`;
+  const link = `${dir}/s1.jsonl`;
+  const deps = base({ readEvents: events([ev({ transcriptPath: link })]), cwdFor: async () => '/w', startedAt: async () => NOW - 5_000,
+    fs: fakeFs({ [link]: { mtime: NOW }, [`${dir}/fresh.jsonl`]: { mtime: NOW - 10 } }, { [link]: '/etc/passwd' }) });
+  // the event's file is a symlink out; the fallback's newest file is that same symlink, so it is refused too
+  assert.strictEqual(await transcriptFor(SURFACE, deps), null);
+  const ok = base({ readEvents: events([ev({ transcriptPath: link })]), cwdFor: async () => '/w', startedAt: async () => NOW - 5_000,
+    fs: fakeFs({ [link]: { mtime: NOW - 4_000 }, [`${dir}/fresh.jsonl`]: { mtime: NOW - 10 } }, { [link]: '/etc/passwd' }) });
+  assert.strictEqual((await transcriptFor(SURFACE, ok)).sessionId, 'fresh');
+});
+
+test('watchJoin retries a change the consumer threw on', async () => {
+  const log = [ev({ sessionId: 'a', transcriptPath: `${HOME}/.claude/projects/-w/a.jsonl` })];
+  let tick = null;
+  const deps = base({ readEvents: async () => ({ events: log, more: false }), fs: fakeFs({}),
+    setInterval: (fn) => { tick = fn; return { unref() {} }; }, clearInterval() {} });
+  let calls = 0;
+  const stop = watchJoin(SURFACE, () => { if (++calls === 1) throw new Error('boom'); }, deps);
+  await new Promise((r) => setImmediate(r));
+  await tick();
+  assert.strictEqual(calls, 2);
+  stop();
 });

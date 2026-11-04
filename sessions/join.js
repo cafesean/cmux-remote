@@ -35,10 +35,45 @@ const TMUX_TIMEOUT = 3000;
 const slugOf = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
 const isCodexPath = (p) => /[\\/]\.codex[\\/]sessions[\\/]/.test(String(p));
 
+// ---- path containment ----------------------------------------------------------------------------
+// A transcript path is served to the phone later, and a hook event is just a line in a log any local
+// writer can append to. So a path is used only when it is a `.jsonl` file that, once symlinks and
+// `..` are resolved, sits inside the agents' own transcript roots.
+const rootsOf = (home) => [path.join(home, '.claude', 'projects'), path.join(home, '.codex', 'sessions')];
+const within = (root, p) => p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+
+// Cheap lexical screen (no disk): string, absolute, `.jsonl`, inside a root after `..` is collapsed.
+function lexicallyAllowed(p, home) {
+  if (typeof p !== 'string' || !path.isAbsolute(p) || !p.endsWith('.jsonl')) return false;
+  const r = path.resolve(p);
+  return rootsOf(home).some((root) => within(root, r));
+}
+
+// The real, symlink-free path when `p` is allowed, else null. A missing file or root is not allowed.
+async function allowedRealPath(p, deps) {
+  const d = deps || {};
+  const home = d.home || os.homedir();
+  const fs = d.fs || defaultFs;
+  if (!lexicallyAllowed(p, home)) return null;
+  try {
+    const real = await fs.realpath(path.resolve(p));
+    if (!real.endsWith('.jsonl')) return null;
+    for (const root of rootsOf(home)) {
+      let realRoot;
+      try { realRoot = await fs.realpath(root); } catch (_) { continue; }
+      if (within(realRoot, real)) return real;
+    }
+  } catch (_) { /* unresolvable: not allowed */ }
+  return null;
+}
+
+const isAllowedTranscriptPath = async (p, deps) => (await allowedRealPath(p, deps)) !== null;
+
 // ---- default injected pieces -------------------------------------------------------------------
 
 const defaultFs = {
   readdir: (dir) => fsp.readdir(dir),
+  realpath: (p) => fsp.realpath(p),
   stat: (p) => fsp.stat(p),
   async firstLine(p) {
     let fh;
@@ -123,8 +158,14 @@ async function transcriptFor(surface, deps) {
   const id = s.id || s.ref;
   if (!id) return null;
 
-  const ev = await latestSurfaceEvent(s, d, (e) => e.transcriptPath);
-  if (ev) return { kind: isCodexPath(ev.transcriptPath) ? 'codex' : 'claude', path: ev.transcriptPath, sessionId: ev.sessionId };
+  // The lexical screen runs inside the event lookup, so a bad newest event falls back to the next
+  // good one; the realpath check then decides on the winner, and a failure falls to the cwd path.
+  const home = d.home || os.homedir();
+  const ev = await latestSurfaceEvent(s, d, (e) => lexicallyAllowed(e.transcriptPath, home));
+  if (ev) {
+    const real = await allowedRealPath(ev.transcriptPath, d);
+    if (real) return { kind: isCodexPath(real) ? 'codex' : 'claude', path: real, sessionId: ev.sessionId };
+  }
 
   let cwd = null;
   let since = 0;
@@ -135,7 +176,8 @@ async function transcriptFor(surface, deps) {
   if (!cwd) return null;
   const [c, x] = await Promise.all([claudeByCwd(cwd, since, d), codexByCwd(cwd, since, d)]);
   const best = c && x ? (x.mtime > c.mtime ? x : c) : (c || x);
-  return best ? { kind: best.kind, path: best.path, sessionId: best.sessionId } : null;
+  const real = best && await allowedRealPath(best.path, d);   // a symlinked file in a root can point out
+  return real ? { kind: best.kind, path: real, sessionId: best.sessionId } : null;
 }
 
 // Re-resolve the join every WATCH_POLL_MS and call onChange(join) when the transcript path differs
@@ -153,7 +195,7 @@ function watchJoin(surface, onChange, deps) {
     busy = true;
     try {
       const j = await transcriptFor(surface, d);
-      if (!stopped && j && j.path !== last) { last = j.path; onChange(j); }
+      if (!stopped && j && j.path !== last) { onChange(j); last = j.path; }   // a throwing consumer sees it again
     } catch (_) { /* a failed resolve keeps the last join; the next tick retries */ } finally { busy = false; }
   }
   const timer = every(tick, WATCH_POLL_MS);
@@ -162,4 +204,4 @@ function watchJoin(surface, onChange, deps) {
   return function stop() { stopped = true; stopTimer(timer); };
 }
 
-module.exports = { transcriptFor, watchJoin, WATCH_POLL_MS };
+module.exports = { transcriptFor, watchJoin, isAllowedTranscriptPath, WATCH_POLL_MS };
