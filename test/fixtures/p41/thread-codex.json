@@ -19,7 +19,7 @@
       ]
     },
     { "id": "x6", "ts": 1793698060000, "kind": "user", "text": "Here is the CI failure for comparison." },
-    { "id": "x7", "ts": 1793698061000, "kind": "attachment", "attachment": { "mime": "image/png", "name": "ci-failure.png", "url": "/api/sessions/max:surface:3/attachments/ci-failure.png" } },
+    { "id": "x7", "ts": 1793698061000, "kind": "attachment", "attachment": { "mime": "image/png", "name": "ci-failure.png", "url": "/api/sessions/mini:surface:3/attachment/0" } },
     {
       "id": "x8", "ts": 1793698100000, "kind": "todo",
       "todos": [

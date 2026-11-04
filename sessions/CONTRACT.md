@@ -25,6 +25,13 @@ One terminal, agent or browser surface on one machine.
 - `model`: string, optional. The model name, for chat kinds.
 - `contextPct`: number 0 to 100, optional. How full the model context is.
 
+## Session list
+
+The reply to a list read from one bridge.
+
+- `machineId`: string. The machine this bridge runs on. Equals `machine` on every session below.
+- `sessions`: Session[]. Every session on that machine.
+
 ## Msg
 
 One item in a thread. Every message has `id`, `ts` and `kind`; the kind decides which other field is set.
@@ -43,7 +50,7 @@ a running tool call becomes a finished one).
 - `question`: set for `question`. `{header, text, options, multi}`. `options` is a list of
   `{label, description}`. `multi` is true when more than one option may be chosen.
 - `todos`: set for `todo`. A list of `{text, done}`. The newest `todo` message is the current list.
-- `attachment`: set for `attachment`. `{mime, name, url}`. `url` is relative to the server base URL.
+- `attachment`: set for `attachment`. `{mime, name, url}`. `url` is `/api/sessions/:id/attachment/:n`, where `n` is the 0-based index of this attachment among the attachments of the thread, oldest first. It is relative to the server base URL.
 
 ## Tool
 
@@ -84,17 +91,30 @@ passes requests through to the right bridge. The session `id` goes in the path, 
 | What | Bridge path | Server path |
 |---|---|---|
 | List sessions | `GET /cmux/sessions` | `GET /api/sessions` |
-| Read a thread page | `GET /cmux/sessions/:id/thread?before=<cursor>` | `GET /api/sessions/:id/thread?before=<cursor>` |
+| Read a thread page | `GET /cmux/sessions/:id/thread?before=<cursor>&limit=<n>` | `GET /api/sessions/:id/thread?before=<cursor>&limit=<n>` |
 | Live stream | `GET /cmux/sessions/:id/thread-stream` | `GET /api/sessions/:id/thread-stream` |
-| Send text and keys | `POST /cmux/sessions/:id/input` | `POST /api/sessions/:id/input` |
+| Attachment bytes | `GET /cmux/sessions/:id/attachment/:n` | `GET /api/sessions/:id/attachment/:n` |
+| Send text and keys | `WS /cmux/sessions/:id/input` | `WS /api/sessions/:id/input` |
 
-The list returns Session[]. The thread read returns a Thread. The stream returns Stream events. The input
-route is unchanged from today: text plus keys sent to the pane. New routes are additive; no existing
-bridge route changes shape.
+The list returns a Session list, `{machineId, sessions: Session[]}`, where `machineId` is the bridge's own
+machine and every session in it has that `machine`. The thread read returns a Thread; `limit` is the page
+size in messages and defaults to 80. The stream returns Stream events. The attachment route returns the
+image bytes. New routes are additive; no existing bridge route changes shape.
+
+### Input WebSocket
+
+Input is one WebSocket per open session (spec section 2.7, which supersedes the POST in section 4.1). The
+app sends one JSON frame per action:
+
+- `{t:'text', v:string}`: text typed into the pane. The bridge keeps its existing delay before the Enter
+  that follows text.
+- `{t:'key', v:...}`: one named key. `v` is one of `enter`, `escape`, `tab`, `up`, `down`, `left`,
+  `right`, `backspace`, `ctrl+c`, `ctrl+d`, `ctrl+l`, `ctrl+r`.
+- `{t:'combo', v:string}`: a key combination not in the key list, for example `shift+tab`.
 
 ## Fixtures
 
-- `sessions.json`: a Session[] with every kind and every status.
+- `sessions.json`: a Session list (`{machineId, sessions}`) with every kind and every status, all on one machine.
 - `thread-claude.json`: a Thread built from real Claude Code transcript shapes (user string, assistant
   text, tool_use and tool_result pairs, an AskUserQuestion, a TodoWrite, a pasted image, a callout,
   a callout inside a code fence). The text is generic; nothing private is kept.

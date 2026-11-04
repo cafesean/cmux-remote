@@ -83,6 +83,12 @@ const Msg = {
   ],
 };
 
+const SessionList = {
+  type: 'object',
+  required: ['machineId', 'sessions'],
+  properties: { machineId: str, sessions: { type: 'array', minItems: 1, items: Session } },
+};
+
 const Thread = {
   type: 'object',
   required: ['title', 'messages', 'cursor'],
@@ -103,9 +109,7 @@ function assertValid(schema, data, label) {
 }
 
 test('fixtures validate against the contract', () => {
-  const sessions = readJson('sessions.json');
-  assert.ok(Array.isArray(sessions) && sessions.length > 0, 'sessions.json is a non-empty array');
-  sessions.forEach((s, i) => assertValid(Session, s, `sessions[${i}]`));
+  assertValid(SessionList, readJson('sessions.json'), 'sessions.json');
 
   for (const name of ['thread-claude.json', 'thread-codex.json']) assertValid(Thread, readJson(name), name);
 
@@ -115,7 +119,8 @@ test('fixtures validate against the contract', () => {
 });
 
 test('the validator rejects off-contract data', () => {
-  const good = readJson('sessions.json')[0];
+  const good = readJson('sessions.json').sessions[0];
+  assert.ok(!validate(SessionList, readJson('sessions.json').sessions).valid, 'a bare Session[] is not a list reply');
   assert.ok(!validate(Session, { ...good, kind: 'vim' }).valid, 'unknown kind');
   assert.ok(!validate(Session, { ...good, status: 'busy' }).valid, 'unknown status');
   assert.ok(!validate(Session, { ...good, id: 'no-colon' }).valid, 'id without machine prefix');
@@ -124,13 +129,14 @@ test('the validator rejects off-contract data', () => {
 });
 
 test('session ids are <machine>:<surface> and unique', () => {
-  const sessions = readJson('sessions.json');
+  const { machineId, sessions } = readJson('sessions.json');
   for (const s of sessions) assert.strictEqual(s.id, `${s.machine}:${s.surface}`);
+  for (const s of sessions) assert.strictEqual(s.machine, machineId, 'one bridge lists only its own machine');
   assert.strictEqual(new Set(sessions.map((s) => s.id)).size, sessions.length);
 });
 
 test('the fixtures cover every session kind, status and message kind', () => {
-  const sessions = readJson('sessions.json');
+  const { sessions } = readJson('sessions.json');
   for (const k of KINDS) assert.ok(sessions.some((s) => s.kind === k), `a ${k} session`);
   for (const st of STATUSES) assert.ok(sessions.some((s) => s.status === st), `a ${st} session`);
 
@@ -151,6 +157,11 @@ test('fixtures stay small, bounded and free of secrets', () => {
   for (const m of [...claude.messages, ...codex.messages]) {
     for (const t of m.items || []) assert.ok((t.output || '').length <= 2000, `tool ${t.id} output over 2000 chars`);
   }
+  for (const [id, thread] of [['mini:surface:12', claude], ['mini:surface:3', codex]]) {
+    thread.messages.filter((m) => m.kind === 'attachment').forEach((m, n) => {
+      assert.strictEqual(m.attachment.url, `/api/sessions/${id}/attachment/${n}`, 'attachment url is by 0-based index in the thread');
+    });
+  }
   const ids = claude.messages.map((m) => m.id);
   assert.strictEqual(new Set(ids).size, ids.length, 'message ids are unique within a thread');
 
@@ -165,5 +176,6 @@ test('fixtures stay small, bounded and free of secrets', () => {
 test('CONTRACT.md documents every type and both route families', () => {
   const doc = fs.readFileSync(path.join(__dirname, '..', 'sessions', 'CONTRACT.md'), 'utf8');
   for (const word of ['Session', 'Msg', 'Tool', 'Stream event', 'cursor']) assert.ok(doc.includes(word), `mentions ${word}`);
-  for (const route of ['/cmux/sessions', '/api/sessions', 'thread-stream', '/input']) assert.ok(doc.includes(route), `mentions ${route}`);
+  assert.ok(!/POST \/(cmux|api)\/sessions\/:id\/input/.test(doc), 'input is a WebSocket, not a POST');
+  for (const route of ['/cmux/sessions', '/api/sessions', 'thread-stream', 'WS /cmux/sessions/:id/input', '/attachment/:n', 'limit=', 'machineId']) assert.ok(doc.includes(route), `mentions ${route}`);
 });

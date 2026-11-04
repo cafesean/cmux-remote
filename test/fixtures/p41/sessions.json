@@ -1,75 +1,78 @@
-[
-  {
-    "id": "mini:surface:12",
-    "machine": "mini",
-    "workspace": "WORKERS",
-    "surface": "surface:12",
-    "kind": "claude",
-    "title": "p41 native app: wire contract",
-    "status": "needs-you",
-    "preview": "Full cut tonight or Monday?",
-    "lastActivity": 1793700600000,
-    "model": "opus",
-    "contextPct": 42
-  },
-  {
-    "id": "mini:surface:15",
-    "machine": "mini",
-    "workspace": "WORKERS",
-    "surface": "surface:15",
-    "kind": "claude",
-    "title": "bridge transcript reader",
-    "status": "working",
-    "preview": "Running node --test test/p41-transcripts.test.js",
-    "lastActivity": 1793700540000,
-    "model": "sonnet",
-    "contextPct": 81
-  },
-  {
-    "id": "mini:surface:21",
-    "machine": "mini",
-    "workspace": "RESEARCH",
-    "surface": "surface:21",
-    "kind": "claude",
-    "title": "spec review notes",
-    "status": "finished",
-    "preview": "Spec updated, nothing left open.",
-    "lastActivity": 1793696400000,
-    "model": "opus",
-    "contextPct": 23
-  },
-  {
-    "id": "max:surface:3",
-    "machine": "max",
-    "workspace": "CODEX",
-    "surface": "surface:3",
-    "kind": "codex",
-    "title": "fix flaky timer test",
-    "status": "your-turn",
-    "preview": "Patch applied. Want me to run the full suite?",
-    "lastActivity": 1793699100000,
-    "model": "gpt-5-codex"
-  },
-  {
-    "id": "max:surface:4",
-    "machine": "max",
-    "workspace": "CODEX",
-    "surface": "surface:4",
-    "kind": "terminal",
-    "title": "zsh",
-    "status": "idle",
-    "preview": "$ git status",
-    "lastActivity": 1793690000000
-  },
-  {
-    "id": "mini:surface:30",
-    "machine": "mini",
-    "workspace": "BROWSER",
-    "surface": "surface:30",
-    "kind": "browser",
-    "title": "Staging dashboard",
-    "status": "idle",
-    "preview": "https://staging.example.com/dashboard",
-    "lastActivity": 1793688000000
-  }
-]
+{
+  "machineId": "mini",
+  "sessions": [
+    {
+      "id": "mini:surface:12",
+      "machine": "mini",
+      "workspace": "WORKERS",
+      "surface": "surface:12",
+      "kind": "claude",
+      "title": "p41 native app: wire contract",
+      "status": "needs-you",
+      "preview": "Full cut tonight or Monday?",
+      "lastActivity": 1793700600000,
+      "model": "opus",
+      "contextPct": 42
+    },
+    {
+      "id": "mini:surface:15",
+      "machine": "mini",
+      "workspace": "WORKERS",
+      "surface": "surface:15",
+      "kind": "claude",
+      "title": "bridge transcript reader",
+      "status": "working",
+      "preview": "Running node --test test/p41-transcripts.test.js",
+      "lastActivity": 1793700540000,
+      "model": "sonnet",
+      "contextPct": 81
+    },
+    {
+      "id": "mini:surface:21",
+      "machine": "mini",
+      "workspace": "RESEARCH",
+      "surface": "surface:21",
+      "kind": "claude",
+      "title": "spec review notes",
+      "status": "finished",
+      "preview": "Spec updated, nothing left open.",
+      "lastActivity": 1793696400000,
+      "model": "opus",
+      "contextPct": 23
+    },
+    {
+      "id": "mini:surface:3",
+      "machine": "mini",
+      "workspace": "CODEX",
+      "surface": "surface:3",
+      "kind": "codex",
+      "title": "fix flaky timer test",
+      "status": "your-turn",
+      "preview": "Patch applied. Want me to run the full suite?",
+      "lastActivity": 1793699100000,
+      "model": "gpt-5-codex"
+    },
+    {
+      "id": "mini:surface:4",
+      "machine": "mini",
+      "workspace": "CODEX",
+      "surface": "surface:4",
+      "kind": "terminal",
+      "title": "zsh",
+      "status": "idle",
+      "preview": "$ git status",
+      "lastActivity": 1793690000000
+    },
+    {
+      "id": "mini:surface:30",
+      "machine": "mini",
+      "workspace": "BROWSER",
+      "surface": "surface:30",
+      "kind": "browser",
+      "title": "Staging dashboard",
+      "status": "idle",
+      "preview": "https://staging.example.com/dashboard",
+      "lastActivity": 1793688000000
+    }
+  ]
+}

@@ -32,7 +32,7 @@
     },
     { "id": "c7", "ts": 1793699090000, "kind": "assistant", "text": "Red, as expected: the fixtures do not exist yet.\n\nA note on the callout format. Agents mark moments like this inside a code fence, and the bridge must not treat it as an alert:\n\n```\n> [!needs-you] Example only\n> This sits inside a fence, so it is sample text.\n```\n\nOnly a callout outside a fence counts." },
     { "id": "c8", "ts": 1793699120000, "kind": "user", "text": "Here is how the status strip should look. Keep it one line." },
-    { "id": "c9", "ts": 1793699121000, "kind": "attachment", "attachment": { "mime": "image/png", "name": "status-strip.png", "url": "/api/sessions/mini:surface:12/attachments/status-strip.png" } },
+    { "id": "c9", "ts": 1793699121000, "kind": "attachment", "attachment": { "mime": "image/png", "name": "status-strip.png", "url": "/api/sessions/mini:surface:12/attachment/0" } },
     { "id": "c10", "ts": 1793699150000, "kind": "assistant", "text": "Got it: one line, status first, then model, context and machine." },
     {
       "id": "c11", "ts": 1793699160000, "kind": "question",
