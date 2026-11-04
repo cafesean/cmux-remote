@@ -69,8 +69,10 @@ The reply to a thread read.
 
 - `title`: string. The session title.
 - `messages`: Msg[]. Oldest first. A page of the thread, not the whole file.
-- `cursor`: string or null. Pass it as `before` to get the next older page. It is the id of the oldest
-  message in this page. It is null when there is nothing older.
+- `cursor`: string or null. An opaque string: pass it back as `before` to get the next older page, and do
+  not parse it. It points at the oldest message in this page. It is null when there is nothing older. A
+  `before` that the bridge cannot read, or that does not match the file, is answered with 400
+  `{error:'bad_cursor'}`; the app drops it and reads the newest page again.
 
 ## Stream event
 

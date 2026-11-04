@@ -1,6 +1,6 @@
 {
   "title": "p41 native app: wire contract",
-  "cursor": "c1",
+  "cursor": "YzF8MA",
   "messages": [
     { "id": "c1", "ts": 1793699000000, "kind": "user", "text": "Add the wire contract for the native app, with fixtures." },
     { "id": "c2", "ts": 1793699004000, "kind": "assistant", "text": "I will read the brief and the existing validator first, then write the test before any fixture." },

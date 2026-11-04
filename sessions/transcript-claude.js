@@ -2,6 +2,8 @@
 // p41 A2 — a Claude Code transcript (.jsonl) as the chat-thread messages the native app shows.
 //
 //   readThread(path, {before, limit = 80, sessionId, bannerPreset, fs}) -> Promise<{title, messages, cursor}>
+//     `cursor` is opaque: pass it back as `before`. A cursor that does not parse, or whose message is not at
+//     the byte offset it names, throws BadCursorError (code 'bad_cursor'); the route maps it to 400.
 //   tailThread(path, fromOffset, {signal, onReset, sessionId, bannerPreset, pollMs}) -> AsyncIterable<Msg>
 //   readAttachment(path, n, {fs}) -> Promise<{mime, data: Buffer} | null>
 //
@@ -30,22 +32,25 @@ const DEFAULT_LIMIT = 80;
 const MAX_LIMIT = 500;
 const OUTPUT_MAX = 2000;
 const TARGET_MAX = 300;
-const CURSOR_CACHE_MAX = 1000;
 const POLL_MS = 1000;
 const IMAGE_MARK = Buffer.from('"type":"image"');
 const NL = 10;
 
 const REAL_FS = { open: (...a) => fs.promises.open(...a) };
 
-// cursor id -> byte offset of its record, per file: a page far from the end resumes there instead of
-// reading back from the end again.
-const cursorCache = new Map();
-const cacheKey = (p, id) => `${p}\0${id}`;
-function cacheCursor(p, id, off) {
-  const k = cacheKey(p, id);
-  cursorCache.delete(k);
-  cursorCache.set(k, off);
-  if (cursorCache.size > CURSOR_CACHE_MAX) cursorCache.delete(cursorCache.keys().next().value);
+// The page cursor names the oldest message of a page and where its record starts in the file, so the
+// next page seeks straight there and never has to find the message by reading back from the end.
+class BadCursorError extends Error {
+  constructor(msg) { super(msg || 'bad cursor'); this.name = 'BadCursorError'; this.code = 'bad_cursor'; this.status = 400; }
+}
+const encodeCursor = (id, off) => Buffer.from(`${id}|${off}`).toString('base64url');
+function decodeCursor(c) {
+  if (typeof c !== 'string' || !c || !/^[A-Za-z0-9_-]+$/.test(c)) throw new BadCursorError();
+  const raw = Buffer.from(c, 'base64url').toString('utf8');
+  const bar = raw.lastIndexOf('|');
+  const off = raw.slice(bar + 1);
+  if (bar <= 0 || !/^\d{1,15}$/.test(off)) throw new BadCursorError();
+  return { id: raw.slice(0, bar), off: Number(off) };
 }
 
 const short = (s, n) => {
@@ -336,6 +341,23 @@ async function headTitle(h, size, chunkSize) {
   return title;
 }
 
+// The record a cursor points at, read alone: it must start a line and must hold the cursor's message.
+async function cursorRecord(h, size, { id, off }, bannerPreset) {
+  if (off >= size || (off > 0 && (await readAt(h, off - 1, 1))[0] !== NL)) throw new BadCursorError();
+  let line = Buffer.alloc(0);
+  for (let pos = off; pos < size;) {
+    const chunk = await readAt(h, pos, Math.min(CHUNK, size - pos));
+    if (!chunk.length) break;
+    pos += chunk.length;
+    const nl = chunk.indexOf(NL);
+    line = Buffer.concat([line, nl < 0 ? chunk : chunk.subarray(0, nl)]);
+    if (nl >= 0) break;
+  }
+  const entry = parseLines(line, off)[0];
+  if (!entry || !new Normaliser({ bannerPreset }).push(entry).some((m) => m.id === id)) throw new BadCursorError();
+  return entry;
+}
+
 const clampLimit = (n) => Math.min(MAX_LIMIT, Math.max(1, Math.floor(Number(n)) || DEFAULT_LIMIT));
 
 async function readThread(p, opts = {}) {
@@ -345,10 +367,13 @@ async function readThread(p, opts = {}) {
   try {
     const { size } = await h.stat();
     let end = size;
-    let fromCache = false;
+    let cursorEntry = null;
+    let cursorId = null;
     if (before != null) {
-      const off = cursorCache.get(cacheKey(p, before));
-      if (off != null && off > 0 && off <= size && (await readAt(h, off - 1, 1))[0] === NL) { end = off; fromCache = true; }
+      const c = decodeCursor(before);
+      cursorId = c.id;
+      cursorEntry = await cursorRecord(h, size, c, bannerPreset);
+      end = c.off;
     }
     const br = new BackReader(h, end, chunkSize);
     let norm;
@@ -357,12 +382,12 @@ async function readThread(p, opts = {}) {
       const more = await br.older();
       norm = new Normaliser({ bannerPreset });
       for (const e of br.entries) norm.push(e);
-      const edge = fromCache || before == null ? norm.out.length : norm.out.findIndex((m) => m.id === before);
+      if (cursorEntry) norm.push(cursorEntry);
+      const edge = cursorId == null ? norm.out.length : norm.out.findIndex((m) => m.id === cursorId);
       older = edge < 0 ? [] : norm.out.slice(0, edge);
-      if (!more || (edge >= 0 && older.length > limit)) break;
+      if (!more || older.length > limit) break;
     }
     const finished = br.pos <= 0;
-    if (before != null && !fromCache && !norm.out.some((m) => m.id === before)) return withEnd({ title: norm.title, messages: [], cursor: null }, br, size);
     const messages = older.slice(-limit);
     const hasOlder = older.length > limit;
 
@@ -372,8 +397,8 @@ async function readThread(p, opts = {}) {
     }
     let title = norm.title;
     if (!title && !finished) title = await headTitle(h, size, chunkSize);
-    if (hasOlder) cacheCursor(p, messages[0].id, norm.offs.get(messages[0].id));
-    return withEnd({ title, messages, cursor: hasOlder ? messages[0].id : null }, br, size);
+    const cursor = hasOlder ? encodeCursor(messages[0].id, norm.offs.get(messages[0].id)) : null;
+    return withEnd({ title, messages, cursor }, br, size);
   } finally {
     await h.close();
   }
@@ -479,4 +504,4 @@ async function* tailThread(p, fromOffset, opts = {}) {
   }
 }
 
-module.exports = { readThread, tailThread, readAttachment };
+module.exports = { readThread, tailThread, readAttachment, BadCursorError };

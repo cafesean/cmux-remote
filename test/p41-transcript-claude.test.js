@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { readThread, tailThread, readAttachment } = require('../sessions/transcript-claude.js');
+const { readThread, tailThread, readAttachment, BadCursorError } = require('../sessions/transcript-claude.js');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'p41-a2-'));
 test.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -202,7 +202,8 @@ test('pages with a cursor: oldest message id, null at the start', async () => {
   const p = file('pages', rows);
   const p1 = await readThread(p, { limit: 4 });
   assert.deepStrictEqual(p1.messages.map((m) => m.text), ['u7', 'a8', 'u9', 'a10']);
-  assert.strictEqual(p1.cursor, p1.messages[0].id);
+  assert.strictEqual(typeof p1.cursor, 'string');
+  assert.notStrictEqual(p1.cursor, p1.messages[0].id);
   const p2 = await readThread(p, { limit: 4, before: p1.cursor });
   assert.deepStrictEqual(p2.messages.map((m) => m.text), ['u3', 'a4', 'u5', 'a6']);
   const p3 = await readThread(p, { limit: 4, before: p2.cursor });
@@ -238,11 +239,34 @@ test('paging through a small chunk size never splits or repeats a tools group', 
   assert.ok(seen.filter((m) => m.kind === 'tools').every((m) => m.items.length === 2 && m.items.every((i) => i.status === 'ok')));
 });
 
-test('a before id that is not in the file gives an empty page', async () => {
-  const p = file('nobefore', [user(1, 'a')]);
-  const r = await readThread(p, { before: 'nope:0' });
-  assert.deepStrictEqual(r.messages, []);
-  assert.strictEqual(r.cursor, null);
+test('older page keeps sibling blocks of the cursor record', async () => {
+  const p = file('siblings', [
+    asst(1, 'q1'),
+    asst(2, 'q2'),
+    user(3, [{ type: 'text', text: 'A' }, { type: 'text', text: 'B' }, { type: 'text', text: 'C' }]),
+    asst(4, ['text', ...BANNER].join('\n')),
+  ]);
+  const p1 = await readThread(p, { limit: 2 });
+  assert.deepStrictEqual(p1.messages.map((m) => m.kind), ['assistant', 'callout']);
+  const p2 = await readThread(p, { limit: 2, before: p1.cursor });
+  assert.deepStrictEqual(p2.messages.map((m) => m.text), ['B', 'C']);
+  const p3 = await readThread(p, { limit: 2, before: p2.cursor });
+  assert.deepStrictEqual(p3.messages.map((m) => m.text), ['q2', 'A']);
+  const p4 = await readThread(p, { limit: 2, before: p3.cursor });
+  assert.deepStrictEqual(p4.messages.map((m) => m.text), ['q1']);
+  assert.strictEqual(p4.cursor, null);
+});
+
+test('bogus cursor -> bad_cursor', async () => {
+  const p = file('badcursor', [user(1, 'a'), asst(2, 'b')]);
+  const ok = Buffer.from(`${uid(2)}:0|${0}`).toString('base64url');
+  for (const before of ['nope:0', '', '%%%', 'bm9wZQ', Buffer.from('x|abc').toString('base64url'),
+    Buffer.from(`${uid(1)}:0|999999`).toString('base64url'),   // past the end
+    Buffer.from(`${uid(1)}:0|5`).toString('base64url'),        // not at a line start
+    Buffer.from(`${uid(2)}:0|0`).toString('base64url'),        // line start, other record
+    ok]) {
+    await assert.rejects(readThread(p, { before }), (e) => e instanceof BadCursorError && e.code === 'bad_cursor' && e.status === 400, JSON.stringify(before));
+  }
 });
 
 test('empty and missing files', async () => {
@@ -252,7 +276,7 @@ test('empty and missing files', async () => {
   await assert.rejects(readThread(path.join(tmp, 'nope.jsonl')), { code: 'ENOENT' });
 });
 
-test('pages backwards with cursor and never reads whole file (60 MB, bytes read < 2 MB)', async () => {
+test('pages backwards with cursor and never reads whole file (60 MB, bytes read < 2 MB; cold cursor < 2 MB)', async () => {
   const p = path.join(tmp, 'big.jsonl');
   const fd = fs.openSync(p, 'w');
   const filler = 'x'.repeat(2000);
@@ -291,6 +315,17 @@ test('pages backwards with cursor and never reads whole file (60 MB, bytes read 
   assert.strictEqual(older.messages.length, 80);
   assert.ok(bytes < 2 * 1024 * 1024, `read ${bytes} bytes for the second page`);
   assert.match(older.messages[79].text, new RegExp(`^(question|answer) ${n - 80} `));
+  assert.ok(older.cursor);
+
+  // A cold cursor (a fresh process, a bogus or evicted one) is just as cheap: it names its own offset.
+  bytes = 0;
+  const bogus = await readThread(p, { fs: counting, before: Buffer.from('nope:0|12345678').toString('base64url') }).catch((e) => e);
+  assert.ok(bogus instanceof BadCursorError);
+  assert.ok(bytes < 2 * 1024 * 1024, `read ${bytes} bytes for a bogus cursor`);
+  bytes = 0;
+  const cold = await readThread(p, { fs: counting, before: older.cursor });
+  assert.strictEqual(cold.messages.length, 80);
+  assert.ok(bytes < 2 * 1024 * 1024, `read ${bytes} bytes for a cold cursor`);
 });
 
 const nextTick = (ms) => new Promise((r) => setTimeout(r, ms));
