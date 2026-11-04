@@ -56,7 +56,7 @@ function bannerBlock(lines, start) {
   let end = start;
   while (end < lines.length && lines[end].startsWith('█')) end++;
   const asks = lines.slice(start, end).map((r) => ASK.exec(r)).filter(Boolean).map((m) => m[1].trim());
-  if (!asks.length) return null;
+  if (!asks.length) return { end, callout: null };
   return { end, callout: { type: 'needs-you', title: 'Needs you', body: asks.join('\n'), options: [] } };
 }
 
@@ -79,6 +79,12 @@ function splitCallouts(markdown, { seanBanner = false } = {}) {
         : HEADER.test(line) ? quoteBlock(lines, i)
         : seanBanner && line.startsWith('█') ? bannerBlock(lines, i)
         : null;
+      if (hit && !hit.callout) {
+        // A █ run with no numbered ask is text; keep it whole so it is not scanned again line by line.
+        keep.push(...lines.slice(i, hit.end));
+        i = hit.end;
+        continue;
+      }
       if (hit) {
         callouts.push(hit.callout);
         i = hit.end;

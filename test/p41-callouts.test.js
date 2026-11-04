@@ -87,6 +87,14 @@ test('a banner with no numbered asks is left as text', () => {
   assert.deepStrictEqual(splitCallouts(md, { seanBanner: true }), { text: md, callouts: [] });
 });
 
+test('20k-line █ run without ask parses in < 100 ms', () => {
+  const md = Array.from({ length: 20000 }, () => '█ x').join('\n');
+  const t0 = process.hrtime.bigint();
+  const out = splitCallouts(md, { seanBanner: true });
+  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 100);
+  assert.deepStrictEqual(out, { text: md, callouts: [] });
+});
+
 test('banner inside a code fence ignored', () => {
   const md = ['```', BANNER, '```'].join('\n');
   assert.deepStrictEqual(parseCallouts(md, { seanBanner: true }), []);
