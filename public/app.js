@@ -2576,7 +2576,7 @@
       b.dataset.source = source;                 // a chip is only ever actioned by ITS OWN source
       b.dataset.index = String(i);
       b.textContent = it.label;
-      if (it.kind) b.title = it.kind + ' · ' + it.label;
+      if (it.kind) b.title = it.kind + ' · ' + it.label + (it.desc ? ' — ' + it.desc : '');
       b.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         if (chipBusy) return;
@@ -2751,7 +2751,7 @@
       if (!d || !d.token || !d.candidates || !d.candidates.length) return clearChips();
       diskChips = { token: d.token, candidates: d.candidates, gen, sel: -1 };
       paintChips(
-        d.candidates.map((c) => ({ label: c.text, kind: c.kind })),
+        d.candidates.map((c) => ({ label: c.text, kind: c.kind, desc: c.desc })),
         'disk',
         (i, it) => { if (gen === chipGen) applyCompletion(d.token, it.label); },
       );

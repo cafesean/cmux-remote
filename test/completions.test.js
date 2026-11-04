@@ -119,4 +119,121 @@ test('/ completes skills, commands and agents, tagged by kind', async () => {
   assert.ok(!('brainstorming' in byKind), 'a skill that matches neither prefix nor substring is absent');
 });
 
+
+// ---- built-ins and plugins (p42) -----------------------------------------------------------
+// A fake fs so no real disk is read: `files` maps path -> content, a directory is any path prefix.
+
+function fakeFs(files) {
+  const calls = { readFile: 0 };
+  const names = Object.keys(files);
+  return {
+    calls,
+    readFile: async (p) => {
+      calls.readFile++;
+      if (!(p in files)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return files[p];
+    },
+    readdir: async (p) => {
+      const pre = p.endsWith('/') ? p : p + '/';
+      const kids = new Map();
+      for (const n of names) {
+        if (!n.startsWith(pre)) continue;
+        const rest = n.slice(pre.length).split('/');
+        kids.set(rest[0], rest.length > 1);
+      }
+      if (!kids.size) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return [...kids].map(([name, dir]) => ({ name, isDirectory: () => dir }));
+    },
+  };
+}
+
+const HOME = '/h';
+const pluginFs = (settings, extra = {}, home = HOME) => fakeFs(Object.assign({
+  [home + '/.claude/plugins/installed_plugins.json']: JSON.stringify({
+    version: 2,
+    plugins: {
+      'tools@mkt': [{ scope: 'user', installPath: '/p/tools', version: '1' }],
+      'off@mkt': [{ scope: 'user', installPath: '/p/off', version: '1' }],
+    },
+  }),
+  [home + '/.claude/settings.json']: JSON.stringify(settings),
+  '/p/tools/skills/caveman/SKILL.md': '---\nname: caveman\ndescription: "Ultra-compressed talk"\n---\nbody',
+  '/p/tools/skills/folded/SKILL.md': '---\nname: folded\ndescription: >\n  Folded text here\n---\n',
+  '/p/tools/skills/long/SKILL.md': '---\ndescription: ' + 'x'.repeat(300) + '\n---\n',
+  '/p/tools/commands/ship.md': '---\ndescription: Ship it\n---\n',
+  '/p/tools/agents/scout.md': '# no frontmatter',
+  '/p/off/skills/hidden/SKILL.md': '---\ndescription: nope\n---\n',
+}, extra));
+
+// Each test uses its own homedir: the plugin scan cache is module-level and keyed by it.
+const mkPlug = (f, extra = {}) => createCompletions(Object.assign(
+  { cwdForSurface: async () => '/cwd', homedir: HOME, readdir: f.readdir, readFile: f.readFile }, extra));
+const ask = (c, text) => c.complete({ surface: 's', text, caret: text.length });
+
+test('/ offers Claude Code built-ins tagged builtin, with a desc', async () => {
+  const f = pluginFs({ enabledPlugins: {} }, {}, '/builtin-home');
+  const r = await ask(mkPlug(f, { homedir: '/builtin-home' }), '/comp');
+  const c = r.candidates.find((x) => x.text === 'compact');
+  assert.strictEqual(c.kind, 'builtin');
+  assert.ok(c.desc);
+  const all = (await ask(mkPlug(f, { homedir: '/builtin-home' }), '/')).candidates.map((x) => x.text);
+  for (const n of ['clear', 'resume', 'model', 'rename', 'rewind', 'todos', 'terminal-setup', 'add-dir', 'output-style']) {
+    assert.ok(all.includes(n), n + ' is a built-in');
+  }
+});
+
+test('plugin skills, commands and agents are listed as plugin:name, enabled plugins only', async () => {
+  const f = pluginFs({ enabledPlugins: { 'tools@mkt': true, 'off@mkt': false } });
+  const c = mkPlug(f, { homedir: HOME });
+  const r = await ask(c, '/tools:');
+  const byText = Object.fromEntries(r.candidates.map((x) => [x.text, x]));
+  assert.strictEqual(byText['tools:caveman'].kind, 'skill');
+  assert.strictEqual(byText['tools:ship'].kind, 'command');
+  assert.strictEqual(byText['tools:scout'].kind, 'agent');
+  assert.strictEqual(byText['tools:caveman'].desc, 'Ultra-compressed talk');
+  assert.strictEqual(byText['tools:folded'].desc, 'Folded text here');
+  assert.strictEqual(byText['tools:long'].desc.length, 100, 'desc is capped at 100 chars');
+  assert.ok(!('desc' in byText['tools:scout']), 'no frontmatter, no desc');
+  assert.ok(!(await ask(c, '/off:')).candidates.length, 'a disabled plugin is absent');
+});
+
+test('a missing enabledPlugins key means every installed plugin is enabled', async () => {
+  const f = pluginFs({}, {}, '/all-on');
+  const r = await ask(mkPlug(f, { homedir: '/all-on' }), '/hidden');
+  assert.deepStrictEqual(r.candidates.map((x) => x.text), ['off:hidden']);
+});
+
+test('a prefix on the part after the colon is a prefix match, ranked before substrings', async () => {
+  const f = pluginFs({ enabledPlugins: { 'tools@mkt': true } }, {
+    '/p/tools/skills/xcave/SKILL.md': '---\ndescription: substring only\n---\n',
+  }, '/prefix-home');
+  const r = await ask(mkPlug(f, { homedir: '/prefix-home' }), '/cav');
+  assert.deepStrictEqual(r.candidates.map((x) => x.text), ['tools:caveman', 'tools:xcave']);
+});
+
+test('built-ins sort before plugin entries when equally matched', async () => {
+  const f = pluginFs({ enabledPlugins: { 'tools@mkt': true } }, {
+    '/p/tools/commands/review-pr.md': '---\ndescription: plugin review\n---\n',
+  }, '/order-home');
+  const r = await ask(mkPlug(f, { homedir: '/order-home' }), '/rev');
+  const names = r.candidates.map((x) => x.text);
+  assert.ok(names.indexOf('review') >= 0 && names.indexOf('review') < names.indexOf('tools:review-pr'));
+  assert.strictEqual(r.candidates[names.indexOf('review')].kind, 'builtin');
+});
+
+test('the plugin scan is cached for 60s, then re-read', async () => {
+  const f = pluginFs({ enabledPlugins: { 'tools@mkt': true } }, {}, '/cache-home');
+  let t = 1000;
+  const c = mkPlug(f, { homedir: '/cache-home', now: () => t });
+  await ask(c, '/a');
+  const first = f.calls.readFile;
+  assert.ok(first > 0);
+  t += 59000;
+  await ask(c, '/ab');
+  assert.strictEqual(f.calls.readFile, first, 'typing cadence must not re-read the plugin files');
+  t += 2000;
+  await ask(c, '/abc');
+  assert.ok(f.calls.readFile > first, 'after the TTL the scan runs again');
+});
+
 test('teardown', async () => { if (root) await fsp.rm(root, { recursive: true, force: true }); });
