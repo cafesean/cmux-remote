@@ -78,12 +78,17 @@ The reply to a thread read.
 
 One line of the live stream (`thread-stream`). Sent as server-sent events, one JSON object per event.
 
-- `type`: one of `msg`, `status`, `reset`.
+- `type`: one of `msg`, `status`, `reset`, `unsupported`, `gone`.
 - `session`: string. The Session `id` the event belongs to.
 - `msg`: Msg. Set for `msg`. A new message, or a replacement for an earlier one with the same `id`.
 - `status`: Session status. Set for `status`. The session changed state.
 - `reset`: no extra field. The transcript changed under the pane (restart, `/clear`, `/resume`). Drop
   the cached thread for this session and read it again.
+- `unsupported`: string, `'codex'`. Sent once, at open, for a Codex pane (transcripts are not read yet); the
+  stream then carries heartbeats only. The thread read for such a pane returns
+  `{title, messages: [], cursor: null, unsupported: 'codex'}`.
+- `gone`: no extra field. The pane was closed. The bridge ends the stream right after this event; do not
+  reconnect for this session.
 
 ## Routes
 

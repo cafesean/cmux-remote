@@ -135,3 +135,31 @@ test('token required', async () => {
 test('existing routes unchanged', async () => {
   assert.equal((await call(server.base, 'GET', '/api/cmux/machines', { token: TOKEN })).status, 200);
 });
+
+test('a machine that blips keeps its routing: thread-stream for its id is 502, not 404', async () => {
+  const fb = await fakeBridge('mini', 'sa');
+  const s2 = await bootServer({ env: {
+    SERVER_TOKEN: TOKEN,
+    CMUX_MACHINES: JSON.stringify([{ id: 'a', label: 'A', baseUrl: fb.url, secret: 'sa' }, { id: 'b', label: 'B', baseUrl: bb.url, secret: 'sb' }]),
+  } });
+  try {
+    const first = await call(s2.base, 'GET', '/api/sessions', { token: TOKEN });
+    assert.equal(first.json.sessions.length, 2);
+    await fb.close();   // tunnel down
+    const poll = await call(s2.base, 'GET', '/api/sessions', { token: TOKEN });   // the poll that used to drop the mapping
+    assert.equal(poll.json.machines.find((m) => m.id === 'a').ok, false);
+    const t = await call(s2.base, 'GET', `/api/sessions/${enc('mini:surface:1')}/thread`, { token: TOKEN });
+    assert.equal(t.status, 502);
+    const st = await openStream(s2.base, `/api/sessions/${enc('mini:surface:1')}/thread-stream`, { token: TOKEN });
+    assert.equal(st.status, 502);
+    st.close();
+    // an id nobody could own while a machine is down is also 502 (it may be that machine's)
+    assert.equal((await call(s2.base, 'GET', `/api/sessions/${enc('other:surface:1')}/thread`, { token: TOKEN })).status, 502);
+  } finally { await s2.stop(); }
+});
+
+test('?machine= on the list: unknown machine is 404', async () => {
+  assert.equal((await call(server.base, 'GET', '/api/sessions?machine=nope', { token: TOKEN })).status, 404);
+  const r = await call(server.base, 'GET', '/api/sessions?machine=b', { token: TOKEN });
+  assert.deepEqual(r.json.sessions.map((x) => x.id), ['air:surface:1']);
+});
