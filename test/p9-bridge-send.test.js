@@ -171,8 +171,9 @@ async function post(body, raw) {
 const OK_PLAN = { grid: { mode: 'ok', seq: 7 }, 'send-text': {}, 'send-key': {} };
 
 // p41 S2p: the private-surface gate needs a tree it read recently. A PRE-DISPATCH case removes the
-// binary, so the gate's own tree read fails too — read one first (any surface-addressed route), so
-// the gate clears SURFACE from that recent tree and the send itself meets the broken binary.
+// binary, so the gate's own tree read fails too (it would answer 503 gate_unavailable) — read one
+// first (any surface-addressed route), so the gate clears SURFACE from that recent (<= 5 s) tree and
+// the send itself meets the broken binary.
 async function warmGate() {
   plan(OK_PLAN);
   await (await fetch(bridge.base + '/cmux/screen?surface=' + SURFACE)).text();

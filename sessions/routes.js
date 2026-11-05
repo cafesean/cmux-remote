@@ -65,8 +65,9 @@ function createSessionRoutes(deps) {
   const backend = deps.backend;
   const home = deps.home || os.homedir();
   const loadTree = deps.loadTree;
-  // p41 S2p: (refs) -> Promise<(ref) -> bool>. A private surface is never listed and its thread/
-  // stream/attachment/subagents answer 423 `private`.
+  // p41 S2p: (refs) -> Promise<(ref) -> 'private' | 'unavailable' | null>. A private (or unproven)
+  // surface is never listed; its thread/stream/attachment/subagents/rename answer 423 `private`
+  // (503 `gate_unavailable` when the gate could not decide).
   const privateCheck = deps.privateCheck || (async () => () => false);
   const unreadBySurface = deps.unreadBySurface || (async () => null);
   const sseHead = deps.sseHead;
@@ -176,9 +177,10 @@ function createSessionRoutes(deps) {
   }
   // S2p: true when the 423 was sent.
   async function refusePrivate(res, entry) {
-    const isPriv = await privateCheck([entry.tab.id]);
-    if (!isPriv(entry.tab.id)) return false;
-    send(res, 423, { error: 'private' });
+    const v = (await privateCheck([entry.tab.id]))(entry.tab.id);
+    if (!v) return false;
+    if (v === 'private') send(res, 423, { error: 'private' });
+    else send(res, 503, { error: 'gate_unavailable' });
     return true;
   }
 
@@ -564,7 +566,8 @@ function createSessionRoutes(deps) {
     const entry = await findTab(b.sessionId);
     if (entry === null) return { code: 502, body: { error: 'cmux_failed' } };
     if (!entry) return { code: 404, body: { error: 'not_found' } };
-    if ((await privateCheck([entry.tab.id]))(entry.tab.id)) return { code: 423, body: { error: 'private' } };   // S2p
+    const pv = (await privateCheck([entry.tab.id]))(entry.tab.id);   // S2p
+    if (pv) return pv === 'private' ? { code: 423, body: { error: 'private' } } : { code: 503, body: { error: 'gate_unavailable' } };
     const d = requestDeps();
     let join = null;
     if (entry.tab.type !== 'browser') { try { join = await transcriptFor(joinSurface(entry.tab), d); } catch (_) { join = null; } }

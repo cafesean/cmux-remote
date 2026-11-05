@@ -171,8 +171,8 @@ function cmuxReadBody(req, cb, cap = 256 * 1024) {
     const refs = privateBodyRefs(b);
     const res = privateRes.get(req);
     if (!refs.length || !res) return run();
-    privacy.anyPrivate(refs).catch(() => true)   // a gate that cannot decide refuses
-      .then((isPriv) => (isPriv ? send(res, 423, { error: 'private' }) : run()));
+    privateGate(refs).catch(() => 503)   // a gate that cannot decide refuses
+      .then((code) => (code ? gateRefuse(res, code) : run()));
   });
 }
 
@@ -241,9 +241,28 @@ function privateBodyRefs(b) {
   add(b.surfaces);
   return out.filter(Boolean);
 }
+// -> null (clear) | 423 (a ref IS private) | 503 (a ref cannot be proven either way: the gate's tree
+// read failed or stalled, and no recent good tree knows the ref). A tmux-only session
+// id (minted, never in the cmux tree) is exempt from 503 when tmux resolves it: it is not a cmux pane.
+async function privateGate(refs) {
+  const v = await privacy.verdict(refs);
+  const vs = refs.map(v);
+  if (vs.includes('private')) return 423;
+  const unsure = refs.filter((r, i) => vs[i] === 'unavailable');
+  if (!unsure.length) return null;
+  if (tmuxCli) return 503;
+  for (const r of unsure) {
+    if (!SURFACE_RE.test(r)) return 503;
+    let tgt = null;
+    try { tgt = await sessionRoutes.tmuxTarget(r); } catch (_) { tgt = null; }
+    if (!tgt) return 503;
+  }
+  return null;
+}
+const gateRefuse = (res, code) => send(res, code, code === 423 ? { error: 'private' } : { error: 'gate_unavailable' });
 const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   machineId: MACHINE_ID,
-  privateCheck: (refs) => privacy.snapshot(refs),
+  privateCheck: (refs) => privacy.verdict(refs),
   backend: BACKEND,
   loadTree: () => loadTree(),
   unreadBySurface: () => (tmuxCli ? Promise.resolve(null) : unreadBySurface()),
@@ -520,6 +539,7 @@ async function loadTree(gate) {
       });
     }
   }
+  if (!gate) privacy.prime(workspaces);   // S2p: a fresh full tree keeps the gate's cache current
   return workspaces;
 }
 
@@ -2165,25 +2185,28 @@ function cmuxNotifications(res) {
 function handleCmux(req, res) {
   if (SECRET && !safeEqual(req.headers['x-bridge-secret'], SECRET)) return send(res, 403, { error: 'forbidden' });
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { return send(res, 400, { error: 'bad_url' }); }
+  // tmux has no browser surfaces: answered before the gate, nothing is reached either way
+  if (tmuxCli && u.pathname.startsWith('/cmux/browser/')) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
   // p41 S2p — the one private-surface gate (spec §4.5). Query params here; JSON bodies in cmuxReadBody.
   privateRes.set(req, res);
   const refs = PRIVATE_QUERY_KEYS.flatMap((k) => u.searchParams.getAll(k)).filter(Boolean);
   const multi = (u.searchParams.get('surfaces') || '').split(',').map((s) => s.trim());
   const hasMulti = multi.some(Boolean);
   if (!refs.length && !hasMulti) return dispatchCmux(req, res, u);
-  privacy.snapshot(refs.concat(multi.filter(Boolean))).then((isPriv) => {
-    if (refs.some(isPriv)) return send(res, 423, { error: 'private' });
-    if (hasMulti && multi.some(isPriv)) {
-      // multi-surface reads (panes-stream) drop private surfaces; `h` is positional, so it follows
-      const keep = multi.map((s) => !isPriv(s));
+  const multiRefs = multi.filter(Boolean);
+  Promise.all([refs.length ? privateGate(refs) : null, hasMulti ? privacy.verdict(multiRefs) : null]).then(([code, mv]) => {
+    if (code) return gateRefuse(res, code);
+    if (hasMulti && multiRefs.some(mv)) {
+      // multi-surface reads (panes-stream) drop private/unproven surfaces; `h` is positional, so it follows
+      const keep = multi.map((s) => !mv(s));
       const kept = multi.filter((_, i) => keep[i]).filter(Boolean);
-      if (!kept.length) return send(res, 423, { error: 'private' });
+      if (!kept.length) return gateRefuse(res, multiRefs.some((s) => mv(s) === 'private') ? 423 : 503);
       u.searchParams.set('surfaces', multi.filter((_, i) => keep[i]).join(','));
       const h = u.searchParams.get('h');
       if (h != null) { const hs = h.split(','); if (hs.length === multi.length) u.searchParams.set('h', hs.filter((_, i) => keep[i]).join(',')); }
     }
     dispatchCmux(req, res, u);
-  }, () => send(res, 423, { error: 'private' }));   // a gate that cannot decide refuses
+  }, () => gateRefuse(res, 503));   // a gate that cannot decide refuses
 }
 
 function dispatchCmux(req, res, u) {

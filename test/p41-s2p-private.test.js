@@ -296,12 +296,14 @@ test('gate tree read has its own short timeout; a stalled read refuses', async (
   assert.ok(Date.now() - t0 < 1000, 'answered at the gate timeout, not the route timeout');
 });
 
-test('forced reloads for unknown refs are capped at <= 1/s', async () => {
+test('forced reloads for unknown refs are capped at <= 1/s: over-budget lookups share ONE next-slot reload', async () => {
   let calls = 0; let t = 0;
   const p = priv.createPrivacy({ loadTree: async () => { calls++; return bridgeTree(); }, file: fresh('cap'), now: () => t });
   await p.isPrivateSurface(S2);                      // initial read
-  for (let i = 1; i <= 4; i++) { t = i * 200; await p.isPrivateSurface('surface:9' + i); }
-  assert.equal(calls, 2, 'one initial + one forced reload in 800 ms');
+  t = 200; await p.isPrivateSurface('surface:91');   // forced reload (budget used)
+  t = 400;
+  await Promise.all([1, 2, 3, 4].map((i) => p.isPrivateSurface('surface:8' + i)));
+  assert.equal(calls, 3, 'initial + forced + one shared slot reload');
 });
 
 test('bridge: non-string gated body values (arrays) are gated, never typed', async () => {
@@ -323,17 +325,21 @@ test('bridge: session-name on a private session -> 423, nothing renamed', async 
   assert.deepEqual(r.json, { error: 'private' });
 });
 
-test('bridge: tree read failing -> gate refuses (423), notifications drop unresolvable entries', async () => {
+test('bridge: tree read failing -> gate refuses (503 gate_unavailable; 423 only for a real private verdict), notifications drop unresolvable entries', async () => {
   const treeFile = path.join(dir, 'tree.json');
   fs.writeFileSync(treeFile, 'not json');
   try {
     await new Promise((res) => setTimeout(res, 1100));   // past the gate's tree cache
     // recent good tree (<= 5 s): refs it knows keep their verdict; a ref it does not know is refused
-    assert.equal((await get('/cmux/screen?surface=' + S1)).status, 423);
-    assert.equal((await get('/cmux/screen?surface=surface:42')).status, 423, 'unresolvable + no tree -> private');
+    assert.equal((await get('/cmux/screen?surface=' + S1)).status, 423, 'a real private verdict stays 423');
+    const un = await get('/cmux/screen?surface=surface:42');
+    assert.equal(un.status, 503, 'unresolvable + no tree -> refused as gate_unavailable, not "private"');
+    assert.deepEqual(un.json, { error: 'gate_unavailable' });
     await new Promise((res) => setTimeout(res, 4500));   // past STALE_MAX_MS: nothing is cleared
-    assert.equal((await get('/cmux/screen?surface=' + S2)).status, 423);
-    assert.equal((await post('/cmux/send', { surface: S2, text: 'x' })).status, 423);
+    assert.equal((await get('/cmux/screen?surface=' + S2)).status, 503);
+    const sd = await post('/cmux/send', { surface: S2, text: 'x' });
+    assert.equal(sd.status, 503);
+    assert.deepEqual(sd.json, { error: 'gate_unavailable' });
     const n = await get('/cmux/notifications');
     assert.equal(n.status, 200);
     assert.deepEqual(n.json.notifications, []);
@@ -342,4 +348,33 @@ test('bridge: tree read failing -> gate refuses (423), notifications drop unreso
   }
   await new Promise((res) => setTimeout(res, 1100));
   assert.equal((await get('/cmux/screen?surface=' + S2)).status, 200, 'recovers');
+});
+
+// ---------------------------------------------------------------- fix round 2
+test('cap window: a ref unknown while the 1/s cap is spent is judged on the next-slot reload, never cleared', async () => {
+  let t = 0; let withPriv = false;
+  const tree = () => bridgeTree().filter((w) => withPriv || w.id !== WS_P);
+  const p = priv.createPrivacy({ loadTree: async () => tree(), file: fresh('capwin'), now: () => t, log: () => {} });
+  await p.isPrivateSurface(S2);                       // t=0 initial read
+  t = 200; await p.isPrivateSurface('surface:8');     // forced reload, uses the 1/s budget
+  withPriv = true;                                    // the setup pane appears in "Claude accounts"
+  t = 500;
+  const t0 = Date.now();
+  assert.equal(await p.isPrivateSurface('surface:1'), true, 'capped + unknown -> waits for the next slot, never clear');
+  assert.ok(Date.now() - t0 >= 600, 'it waited for the budget (forcedAt 200 + 1000 - now 500)');
+  const v = await p.verdict(['surface:1', S2]);
+  assert.equal(v('surface:1'), 'private');
+  assert.equal(v(S2), null, 'a ref the tree knows keeps its verdict');
+});
+
+test('verdict: private vs unavailable vs clear', async () => {
+  let ok = true; let t = 0;
+  const p = priv.createPrivacy({ loadTree: async () => (ok ? bridgeTree() : null), file: fresh('verdict'), now: () => t, log: () => {} });
+  let v = await p.verdict([S1, S2]);
+  assert.equal(v(S1), 'private');
+  assert.equal(v(S2), null);
+  ok = false; t = 7000;
+  v = await p.verdict([S1, S2]);
+  assert.equal(v(S1), 'unavailable');
+  assert.equal(v(S2), 'unavailable');
 });
