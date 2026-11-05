@@ -47,6 +47,7 @@ async function fakeBridge(mid, secret) {
       res.write('data: {"type":"msg","session":"x","agentId":"a1111111111111111"}\n\n');
       return;   // left open
     }
+    if (u.pathname === `${pre}/upload/2026-11-05%2Fpasted-1.png`) { res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length }); return res.end(PNG); }   // D57
     if (u.pathname === `${pre}/attachment/0`) { res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length }); return res.end(PNG); }
     return send(404, { error: 'not_found' });
   });
@@ -94,6 +95,16 @@ test('status codes pass through (400 bad_cursor, 404) and attachment bytes', asy
   assert.equal(at.status, 200);
   assert.equal(at.headers['content-type'], 'image/png');
   assert.deepEqual(at.body, PNG);
+});
+
+test('D57: upload image bytes pass through as one encoded segment; token required', async () => {
+  const p = `/api/sessions/${enc('air:surface:1')}/upload/${enc('2026-11-05/pasted-1.png')}`;
+  const at = await call(server.base, 'GET', p, { token: TOKEN });
+  assert.equal(at.status, 200);
+  assert.equal(at.headers['content-type'], 'image/png');
+  assert.deepEqual(at.body, PNG);
+  assert.equal((await call(server.base, 'GET', p)).status, 401);
+  assert.equal((await call(server.base, 'GET', `/api/sessions/${enc('air:surface:1')}/upload/a/b`, { token: TOKEN })).status, 404);
 });
 
 test('an unreachable machine is reported, the rest still list', async () => {

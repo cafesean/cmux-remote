@@ -5,6 +5,7 @@
 //   GET  /cmux/sessions/:id/thread?before=&limit= -> {title, messages, cursor}
 //   GET  /cmux/sessions/:id/thread-stream        -> SSE of Stream events (msg | status | reset)
 //   GET  /cmux/sessions/:id/attachment/:n        -> image bytes
+//   GET  /cmux/sessions/:id/upload/:rel          -> an uploaded image's bytes (D57, sessions/uploads.js)
 //   GET  /cmux/sessions/:id/subagents            -> {subagents: Subagent[], total}       (A10)
 //   GET  /cmux/sessions/:id/subagents/:agentId/thread?before=&limit= -> Thread       (A10)
 //   GET  /cmux/sessions/:id/subagents/:agentId/thread-stream        -> SSE msg | reset | gone (A10)
@@ -22,7 +23,8 @@ const { redactTokens } = require('../lib/redact-tokens');
 const path = require('path');
 
 const { detectKind, foregroundCommand, latestSurfaceEvent } = require('./detect');
-const { readThread, tailThread, readAttachment, BadCursorError } = require('./transcript-claude');
+const { readThread, tailThread, readAttachment, uploadRefs, BadCursorError } = require('./transcript-claude');
+const uploads = require('./uploads');
 const { transcriptFor, watchJoin, isAllowedTranscriptPath, WATCH_POLL_MS } = require('./join');
 const { statusFor, contextUsage } = require('./status');
 const eventlog = require('../radar/eventlog');
@@ -52,6 +54,7 @@ const LIMITS = {
   ...choice.LIMITS,                   // A14 answer-choice limits (sessions/choice.js)
   ...names.LIMITS,                    // A16 session-name limits (sessions/names.js)
   ...subagents.LIMITS,                // A10 sub-agent limits (sessions/subagents.js)
+  ...uploads.LIMITS,                  // D57 inline upload images (sessions/uploads.js)
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 
@@ -86,6 +89,8 @@ function createSessionRoutes(deps) {
   const backend = deps.backend;
   const home = deps.home || os.homedir();
   const loadTree = deps.loadTree;
+  // D57: the bridge's upload directory (a getter: bridge.js defines it after this module is built).
+  const uploadRoot = () => { try { return (typeof deps.uploadRoot === 'function' ? deps.uploadRoot() : deps.uploadRoot) || null; } catch (_) { return null; } };
   // p41 S2p: (refs) -> Promise<(ref) -> 'private' | 'unavailable' | null>. A private (or unproven)
   // surface is never listed; its thread/stream/attachment/subagents/rename answer 423 `private`
   // (503 `gate_unavailable` when the gate could not decide).
@@ -344,7 +349,7 @@ function createSessionRoutes(deps) {
     if (!o) return send(res, 200, { title: session.title, messages: [], cursor: null });
     let amap = new Map();
     try { amap = await subagents.agentIdMap(join.path); } catch (_) { amap = new Map(); }
-    return page(res, u, join.path, o, { sessionId: session.id, agentIdFor: (tu) => amap.get(tu) }, session.title);
+    return page(res, u, join.path, o, { sessionId: session.id, agentIdFor: (tu) => amap.get(tu), uploadRoot: uploadRoot() }, session.title);
   }
 
   // One Thread page of an open transcript (main or sub-agent): the cursor is the reader's own.
@@ -371,6 +376,47 @@ function createSessionRoutes(deps) {
     if (!a) return send(res, 404, { error: 'not_found' });
     if (!IMAGE_MIME.test(a.mime)) return send(res, 415, { error: 'unsupported_media' });
     if (a.data.length > LIMITS.attachmentMaxBytes) return send(res, 413, { error: 'too_large' });
+    res.writeHead(200, { 'content-type': a.mime, 'content-length': a.data.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.end(a.data);
+  }
+
+  // M1: transcript path -> {root, dev, ino, size, mtimeMs, end, rels}. LRU, LIMITS.uploadRefsCacheMax
+  // entries. Same file grown: only the appended lines are scanned; replaced/shrunk/touched-in-place or a
+  // new root: rescanned. Takes ownership of o.fh (uploadRefs closes it).
+  const refsCache = new Map();
+  async function referencedUploads(p, o, root) {
+    const st = o.st;
+    let c = refsCache.get(p);
+    if (c) refsCache.delete(p);
+    const same = c && c.root === root && c.dev === st.dev && c.ino === st.ino;
+    if (same && c.size === st.size && c.mtimeMs === st.mtimeMs) { await o.fh.close().catch(() => {}); refsCache.set(p, c); return c.rels; }
+    const from = same && st.size > c.size ? c.end : 0;
+    const r = await uploadRefs(p, { uploadRoot: root, from, fs: shim(o.fh) });
+    const rels = from ? c.rels : new Set();
+    for (const x of r.rels) if (rels.size < LIMITS.uploadRefsPerSession) rels.add(x);
+    c = { root, dev: st.dev, ino: st.ino, size: r.size, mtimeMs: st.mtimeMs, end: r.end, rels };
+    refsCache.set(p, c);
+    while (refsCache.size > LIMITS.uploadRefsCacheMax) refsCache.delete(refsCache.keys().next().value);
+    return rels;
+  }
+
+  // D57 GET /cmux/sessions/:id/upload/:rel — an uploaded image the thread shows inline. Only a file whose
+  // real path is inside the upload directory, with an image extension, under the size cap.
+  // M1: and only a rel THIS session's transcript (human messages) references; a rel another session
+  // (a private one included) typed is 404 here.
+  async function upload(res, entry, relRaw) {
+    let rel;
+    try { rel = decodeURIComponent(relRaw); } catch (_) { return send(res, 400, { error: 'bad_path' }); }
+    const root = uploadRoot();
+    const { session, join } = await describe(entry, requestDeps(), null);
+    const o = root && join && session.kind === 'claude' && await safeOpen(join.path);
+    if (!o) return send(res, 404, { error: 'not_found' });
+    let refs = null;
+    try { refs = await referencedUploads(join.path, o, root); } catch (_) { refs = null; }
+    if (!refs || !refs.has(rel)) return send(res, 404, { error: 'not_found' });
+    const a = await uploads.readUpload(rel, root, { maxBytes: LIMITS.uploadMaxBytes });
+    if (!a) return send(res, 404, { error: 'not_found' });
+    if (a.tooLarge) return send(res, 413, { error: 'too_large' });
     res.writeHead(200, { 'content-type': a.mime, 'content-length': a.data.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
     res.end(a.data);
   }
@@ -414,7 +460,7 @@ function createSessionRoutes(deps) {
       const agentIdFor = subagents.agentIdLookup(p);   // cached per session; never re-read on a status tick
       (async () => {
         try {
-          for await (const msg of tailThread(p, null, { signal: ac.signal, sessionId: id, fs: guardedFs, agentIdFor, onReset: () => emit({ type: 'reset' }) })) {
+          for await (const msg of tailThread(p, null, { signal: ac.signal, sessionId: id, fs: guardedFs, agentIdFor, uploadRoot: uploadRoot(), onReset: () => emit({ type: 'reset' }) })) {
             if (ac.signal.aborted) break;
             emit({ type: 'msg', msg });
           }
@@ -541,7 +587,7 @@ function createSessionRoutes(deps) {
       })().catch(() => { if (!res.headersSent) send(res, 500, { error: 'sessions_failed' }); });
       return true;
     }
-    const m = /^\/cmux\/sessions\/([^/]+)\/(thread|thread-stream|attachment\/([^/]+))$/.exec(p);
+    const m = /^\/cmux\/sessions\/([^/]+)\/(thread|thread-stream|attachment\/([^/]+)|upload\/([^/]+))$/.exec(p);
     if (!m || req.method !== 'GET') return false;
     let id;
     try { id = decodeURIComponent(m[1]); } catch (_) { send(res, 404, { error: 'not_found' }); return true; }
@@ -552,6 +598,7 @@ function createSessionRoutes(deps) {
       if (await refusePrivate(res, entry)) return;
       if (m[2] === 'thread') return thread(res, entry, u);
       if (m[2] === 'thread-stream') return stream(req, res, entry);
+      if (m[4] != null) return upload(res, entry, m[4]);
       return attachment(res, entry, m[3]);
     })().catch(() => { if (!res.headersSent) send(res, 500, { error: 'sessions_failed' }); });
     return true;

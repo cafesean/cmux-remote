@@ -273,6 +273,7 @@ const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   loadTree: () => loadTree(),
   unreadBySurface: () => (tmuxCli ? Promise.resolve(null) : unreadBySurface()),
   sseHead: (res) => sseHead(res),
+  uploadRoot: () => UPLOAD_DIR,   // D57: inline images typed as upload paths (read lazily: defined below)
   joinPollMs: Number(process.env.P41_JOIN_POLL_MS) || undefined,
   procSnapshot: p41ProcSnapshotKnob(),
   statusPollMs: Number(process.env.P41_JOIN_POLL_MS) || undefined,

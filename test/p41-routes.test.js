@@ -296,6 +296,63 @@ test('attachment route: bytes and mime of image n; 404 past the end; 400 bad ind
   } finally { await b.stop(); }
 });
 
+test('D57 upload route: a typed upload path shows inline; bytes served; traversal, symlink escape, absolute refused; secret required', async () => {
+  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  const up = fs.realpathSync(tmp());
+  fs.mkdirSync(path.join(up, '2026-11-05'));
+  fs.writeFileSync(path.join(up, '2026-11-05', 'pasted-1.png'), PNG);
+  const out = path.join(fs.realpathSync(tmp()), 'outside.png');
+  fs.writeFileSync(out, PNG);
+  fs.symlinkSync(out, path.join(up, '2026-11-05', 'escape.png'));
+  const { h } = home([user(1, `what is this ${path.join(up, '2026-11-05', 'pasted-1.png')}`), asst(2, 'a png')]);
+  const b = await boot(h, { UPLOAD_DIR: up });
+  try {
+    const t = await call(b.socketPath, 'GET', `/cmux/sessions/${idOf(IDS.sfA1)}/thread`, { secret: SECRET });
+    assert.equal(t.status, 200, t.text);
+    const att = t.json.messages.find((m) => m.kind === 'attachment');
+    assert.ok(att, t.text);
+    assert.equal(t.json.messages.find((m) => m.kind === 'user').text, 'what is this');
+    const pre = `/cmux/sessions/${idOf(IDS.sfA1)}/upload/`;
+    assert.equal(att.attachment.url, `/api/sessions/${idOf(IDS.sfA1)}/upload/${encodeURIComponent('2026-11-05/pasted-1.png')}`);
+    const ok = await call(b.socketPath, 'GET', pre + encodeURIComponent('2026-11-05/pasted-1.png'), { secret: SECRET });
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.headers['content-type'], 'image/png');
+    assert.ok(ok.body.equals(PNG));
+    for (const rel of ['../outside.png', '2026-11-05/../../outside.png', '2026-11-05/escape.png', out, '%zz']) {
+      const r = await call(b.socketPath, 'GET', pre + (rel === '%zz' ? rel : encodeURIComponent(rel)), { secret: SECRET });
+      assert.ok(r.status === 404 || r.status === 400, `${rel} -> ${r.status}`);
+      assert.ok(!r.body.equals(PNG), rel);
+    }
+    assert.notEqual((await call(b.socketPath, 'GET', pre + encodeURIComponent('2026-11-05/pasted-1.png'))).status, 200);
+  } finally { await b.stop(); }
+});
+
+test('D57 M1: an upload another session typed is 404 via this session; a private session is 423', async () => {
+  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  const up = fs.realpathSync(tmp());
+  fs.mkdirSync(path.join(up, 'd'));
+  fs.writeFileSync(path.join(up, 'd', 'a.png'), PNG);
+  fs.writeFileSync(path.join(up, 'd', 'b.png'), PNG);
+  const { h, dir } = home([user(1, `mine ${path.join(up, 'd', 'a.png')}`), asst(2, `also ${path.join(up, 'd', 'b.png')}`)]);
+  const bp = path.join(dir, 'sess-b.jsonl');
+  fs.writeFileSync(bp, jsonl([user(3, `theirs ${path.join(up, 'd', 'b.png')}`)]));
+  eventlog.appendEventSync(path.join(h, '.radar'), { sessionId: 'sess-b', event: 'Stop', transcriptPath: bp, surfaceId: IDS.sfB1, cwd: '/work/alpha' }, T0 + 30000);
+  const priv = path.join(tmp(), 'private-surfaces.json');
+  fs.writeFileSync(priv, JSON.stringify([]), { mode: 0o600 });
+  const b = await boot(h, { UPLOAD_DIR: up, HYPERMUX_PRIVATE_FILE: priv });
+  const get = (sf, rel) => call(b.socketPath, 'GET', `/cmux/sessions/${idOf(sf)}/upload/${encodeURIComponent(rel)}`, { secret: SECRET });
+  try {
+    assert.equal((await get(IDS.sfA1, 'd/a.png')).status, 200);
+    assert.equal((await get(IDS.sfB1, 'd/b.png')).status, 200);
+    assert.equal((await get(IDS.sfA1, 'd/b.png')).status, 404, 'assistant mention + other session only');
+    assert.equal((await get(IDS.sfB1, 'd/a.png')).status, 404, 'A typed it, not B');
+    fs.writeFileSync(priv, JSON.stringify([{ surface: IDS.sfB1, until: Date.now() + 3600e3 }]), { mode: 0o600 });
+    const r = await get(IDS.sfB1, 'd/b.png');
+    assert.equal(r.status, 423, r.text);
+    assert.ok(!r.body.equals(PNG));
+  } finally { await b.stop(); }
+});
+
 // ---- fix round 2 ---------------------------------------------------------------------------------
 
 test('stream on a claude pane whose join moves to a Codex rollout: reset + unsupported, no Claude-parsed msgs', async () => {
