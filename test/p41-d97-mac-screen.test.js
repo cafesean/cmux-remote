@@ -31,6 +31,7 @@ fs.appendFileSync(D + '/osa-argv.log', JSON.stringify(process.argv.slice(2)) + '
 let s = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (d) => { s += d; });
 process.stdin.on('end', () => {
   fs.appendFileSync(D + '/osa-stdin.log', s + '\n<<END>>\n');
+  if (fs.existsSync(D + '/hang-osa')) return setTimeout(() => process.stdout.write('ok\n'), 6000);   // D102: slower than the timeout
   if (s.includes('canCapture')) return process.stdout.write(JSON.stringify({ displays: [{ index: 1, x: 0, y: 0, w: 1512, h: 982, scale: 2 }], canCapture: true, canControl: true }) + '\n');
   process.stdout.write(fs.existsSync(D + '/deny-ax') ? 'noax\n' : 'ok\n');
 });
@@ -45,7 +46,7 @@ before(async () => {
     SCREEN_SCREENCAPTURE_BIN: path.join(dir, 'screencapture'), SCREEN_SIPS_BIN: path.join(dir, 'sips'), SCREEN_OSASCRIPT_BIN: path.join(dir, 'osascript'),
     HYPERMUX_PRIVATE_FILE: path.join(dir, 'cfg', 'private-surfaces.json') };
   off = await bootBridge({ env: { ...base } });
-  on = await bootBridge({ env: { ...base, SCREEN_VIEW: '1', SCREEN_CONTROL: '1', TMPDIR: dir, SCREEN_SHOT_MIN_MS: '60000' } });
+  on = await bootBridge({ env: { ...base, SCREEN_VIEW: '1', SCREEN_CONTROL: '1', TMPDIR: dir, SCREEN_SHOT_MIN_MS: '60000', SCREEN_OSA_TIMEOUT_MS: '1500' } });
 });
 after(async () => { for (const b of [off, on]) if (b) await b.stop(); if (dir) await fsp.rm(dir, { recursive: true, force: true }); });
 
@@ -170,4 +171,30 @@ test('D101 shot-on-input: tap {shot:true} -> frame with -C; without shot -> no f
   const g = await get(on, '/cmux/screen/shot');
   assert.equal(g.status, 429, 'input frame re-arms the poll floor');
   assert.ok(LIMITS.SCREEN_INPUT_SHOT_MIN_MS >= 250);
+});
+
+test('D102 real shape: input {shot:true} twice, then info stays 200', async () => {
+  await pause(1100);   // clear the input rate window left by earlier tests
+  for (const dy of [1, -1]) {
+    const r = await post(on, '/cmux/screen/scroll', { dy, shot: true });
+    assert.equal(r.status, 200, r.text); assert.equal(r.json.ok, true);
+  }
+  const i = await get(on, '/cmux/screen/info');
+  assert.equal(i.status, 200, i.text); assert.equal(i.json.ok, true);
+});
+
+test('D102 osascript slower than the timeout: 502 cause timeout + one log line, bridge recovers on the next call', async () => {
+  fs.writeFileSync(path.join(dir, 'hang-osa'), '');
+  try {
+    const r = await post(on, '/cmux/screen/scroll', { dy: 1 });
+    assert.equal(r.status, 502); assert.equal(r.json.error, 'screen_failed'); assert.equal(r.json.cause, 'timeout');
+    const i = await get(on, '/cmux/screen/info');
+    assert.equal(i.status, 502); assert.equal(i.json.cause, 'timeout');
+  } finally { fs.rmSync(path.join(dir, 'hang-osa'), { force: true }); }
+  assert.match((on.stdout() + on.stderr()), /mac-screen: osascript timeout signal=SIGKILL after \d+ ms \(timeout 1500 ms\)/);
+  assert.ok(!/PARAMS|CGEvent/.test((on.stdout() + on.stderr())), 'script never logged');
+  const i = await get(on, '/cmux/screen/info');
+  assert.equal(i.status, 200, i.text);
+  const r = await post(on, '/cmux/screen/scroll', { dy: 1, shot: true });
+  assert.equal(r.status, 200, r.text);
 });
