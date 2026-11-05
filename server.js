@@ -664,7 +664,7 @@ async function handleApi(req, res, u) {
       relay(res, bridge(m, '/cmux/choose', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ surface: b.surface, choiceId: b.choiceId, index: b.index, label: b.label, answers: b.answers }),
-        timeout: Array.isArray(b.answers) ? 90000 : 20000,   // A17 askForm walks every question with readback
+        timeout: Array.isArray(b.answers) ? require('./sessions/choice').LIMITS.askFormRelayTimeoutMs : 20000,   // A17 askForm walks every question with readback
       }));
     });
   }

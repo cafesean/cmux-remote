@@ -27,7 +27,7 @@ const msgsOf = (input, uuid = 'u1:0') => input.questions.map((q, k) => ({
 function fakeForm(input, opts = {}) {
   const qs = input.questions;
   const s = { tab: opts.tab || 0, marked: qs.map(() => 0), answers: qs.map(() => null), checked: qs.map((q) => q.options.map(() => false)),
-    other: qs.map(() => ''), reviewMarked: 0, submitted: false, cancelled: false, seq: 1, keys: [] };
+    other: qs.map((q, k) => (opts.oldOther && opts.oldOther[k]) || ''), reviewMarked: 0, submitted: false, cancelled: false, seq: 1, keys: [] };
   const itemsOf = (k) => {
     const q = qs[k];
     const it = q.options.map((o, i) => (q.multiSelect ? `[${s.checked[k][i] ? '✔' : ' '}] ${o.label}` : o.label));
@@ -37,6 +37,8 @@ function fakeForm(input, opts = {}) {
     return it;
   };
   function render() {
+    if (s.submitted) return { columns: 100, rows: 1, styles: [{ id: 0, foreground: '#FFFFFF', background: '#000000' }],
+      spans: [{ row: 0, column: 0, style_id: 0, text: '⏺ Thanks, answers received.' }], cursor: { row: 0, column: 0, visible: false } };
     const lines = ['─'.repeat(80), '←  ' + qs.map((q, k) => `${s.answers[k] ? '☒' : '☐'} ${q.header}`).join('  ') + '  ✔ Submit  →', ''];
     if (s.tab < qs.length) {
       const k = s.tab;
@@ -72,6 +74,7 @@ function fakeForm(input, opts = {}) {
       else if (k === 'down') s.marked[t] = Math.min(n - 1, s.marked[t] + 1);
       else if (k === 'left') s.tab = Math.max(0, t - 1);
       else if (k === 'right') s.tab = t + 1;
+      else if (k === 'backspace' && s.marked[t] === q.options.length) s.other[t] = s.other[t].slice(0, -1);
       else if (k === 'space' && q.multiSelect && s.marked[t] < q.options.length) s.checked[t][s.marked[t]] = !s.checked[t][s.marked[t]];
       else if (k === 'enter') {
         const m = s.marked[t];
@@ -85,7 +88,10 @@ function fakeForm(input, opts = {}) {
     async sendText(text, submit) {
       s.keys.push(`text:${text}${submit ? '+enter' : ''}`);
       const t = s.tab;
-      if (t < qs.length && s.marked[t] === qs[t].options.length) s.other[t] += text;
+      // Typed characters land in the input ONLY when the "Type something." row is highlighted (and not
+      // at all with opts.textIsKeys, the I6 failure mode: characters act as selector hotkeys).
+      if (opts.textIsKeys) { const d = /^[0-9]/.test(text) ? Number(text[0]) - 1 : -1; if (d >= 0 && t < qs.length) { s.answers[t] = qs[t].options[d] ? qs[t].options[d].label : null; s.tab++; } }
+      else if (t < qs.length && s.marked[t] === qs[t].options.length) s.other[t] += text;
       bump(); return { ok: true };
     },
   };
@@ -164,7 +170,7 @@ test('choose drives N questions with readback, then verifies the review and subm
   const { f, r, current } = await setup(live);
   const res = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1',
     answers: [{ q: 0, picks: [1] }, { q: 1, picks: [2] }, { q: 2, picks: [0] }] }, f.io);
-  assert.deepEqual(res, { code: 200, body: { ok: true } });
+  assert.equal(res.code, 200); assert.equal(res.body.ok, true);
   assert.equal(f.s.submitted, true);
   assert.deepEqual(f.s.answers, ['Pear', 'Red', 'Circle, auto sized (Recommended)']);
   assert.deepEqual(f.s.keys, ['down', 'enter', 'down', 'down', 'enter', 'enter', 'enter']);
@@ -174,11 +180,11 @@ test('multiSelect toggles, Other text, starting from a later tab', async () => {
   const { f, r, current } = await setup(multiInput, { tab: 2 });
   const res = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1',
     answers: [{ q: 2, other: 'turbo mode' }, { q: 0, picks: [0] }, { q: 1, picks: [2, 0] }] }, f.io);
-  assert.deepEqual(res, { code: 200, body: { ok: true } });
+  assert.equal(res.code, 200); assert.equal(res.body.ok, true);
   assert.equal(f.s.submitted, true);
   assert.deepEqual(f.s.answers, ['Small patch', 'iOS, Web', 'turbo mode']);
   assert.deepEqual(f.s.checked[1], [true, false, true]);
-  assert.ok(f.s.keys.includes('text:turbo mode'));
+  assert.ok(f.s.keys.includes('text:t') && f.s.keys.includes('text:urbo mode'));
   assert.ok(!f.s.keys.some((k) => k.endsWith('+enter')));
 });
 
@@ -231,4 +237,83 @@ test('stale choiceId -> 409 stale before any key; screen not this form -> 409 st
   const bad = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1', answers: [{ q: 0, picks: [0] }] }, f.io);
   assert.deepEqual([bad.code, bad.body.error], [400, 'bad_answers']);
   assert.deepEqual(f.s.keys, []);
+});
+
+// ---- fix round 1 ---------------------------------------------------------------------------------
+
+test('C1: Other with a backslash escape, control char or line separator -> 400 bad_other, no key', async () => {
+  for (const other of ['x\\r\\r1', 'x\\n1', 'x\\t', 'C:\\new', 'a\nb', 'a\tb', 'x\u2028', 'x\u0085', ' pad', 'x'.repeat(LIMITS.askFormOtherMax + 1)]) {
+    const { f, r, current } = await setup(multiInput);
+    const res = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1',
+      answers: [{ q: 0, other }, { q: 1, picks: [0] }, { q: 2, picks: [0] }] }, f.io);
+    assert.deepEqual([res.code, res.body.error], [400, 'bad_other'], JSON.stringify(other));
+    assert.deepEqual(f.s.keys, []);
+  }
+});
+
+test('I6: typed Other lands in the input row — probe char first, then the rest, exact row readback', async () => {
+  const { f, r, current } = await setup(multiInput);
+  const res = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1',
+    answers: [{ q: 0, other: 'Patch' }, { q: 1, picks: [1] }, { q: 2, other: '2 flags' }] }, f.io);
+  assert.equal(res.code, 200);
+  assert.deepEqual(f.s.answers, ['Patch', 'Android', '2 flags']);
+  assert.deepEqual(f.s.keys.slice(0, 6), ['down', 'down', 'text:P', 'text:atch', 'enter', 'down']);
+  const q2 = f.s.keys.slice(f.s.keys.indexOf('text:x') - 2);
+  assert.deepEqual(q2.slice(0, 6), ['down', 'down', 'text:x', 'backspace', 'text:2 flags', 'enter']);
+});
+
+test('I6: characters do NOT reach the input (hotkeys) -> 409 at the probe, the rest never typed, never submitted', async () => {
+  const { f, r, current } = await setup(multiInput, { textIsKeys: true });
+  const res = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1',
+    answers: [{ q: 0, other: 'Patch 1' }, { q: 1, picks: [1] }, { q: 2, picks: [0] }] }, f.io);
+  assert.deepEqual([res.code, res.body.error, res.body.step], [409, 'selection_moved', 'q:0:other:probe']);
+  assert.deepEqual(f.s.keys, ['down', 'down', 'text:P']);
+  assert.equal(f.s.submitted, false);
+});
+
+test('I2/I3: old Other text is erased first; "old"+"new" is never submitted; on-screen substring is not a readback', async () => {
+  const { f, r, current } = await setup(multiInput, { oldOther: ['Small'] });
+  const res = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1',
+    answers: [{ q: 0, other: 'Small' }, { q: 1, picks: [0] }, { q: 2, picks: [1] }] }, f.io);
+  assert.equal(res.code, 200);
+  assert.deepEqual(f.s.answers, ['Small', 'iOS', 'quick-mode']);
+  assert.deepEqual(f.s.keys.slice(0, 9), ['down', 'down', 'backspace', 'backspace', 'backspace', 'backspace', 'backspace', 'backspace', 'backspace']);
+  assert.ok(f.s.keys.includes('text:S') && f.s.keys.includes('text:mall'));
+});
+
+test('I4: review must show each question\'s OWN answer exactly (a superstring elsewhere does not pass)', async () => {
+  const { f, r, current } = await setup(live, { onKey: (k, s) => {
+    if (s.tab === 2 && k === 'enter') { s.answers[2] = 'Circle, auto sized (Recommended) or larger'; s.tab = 3; s.seq++; return 'swallow'; }
+    return null;
+  } });
+  const res = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1',
+    answers: [{ q: 0, picks: [0] }, { q: 1, picks: [0] }, { q: 2, picks: [0] }] }, f.io);
+  assert.deepEqual([res.code, res.body.error, res.body.step], [409, 'selection_moved', 'review:q:2']);
+  assert.equal(f.s.submitted, false);
+  const swapped = await setup(live, { onKey: (k, s) => {
+    if (s.tab === 1 && k === 'enter') { s.answers[1] = s.answers[0]; s.tab = 2; s.seq++; return 'swallow'; }
+    return null;
+  } });
+  const res2 = await swapped.r.commitForm({ current: swapped.current, choiceId: swapped.current.choiceId, surface: 'S1',
+    answers: [{ q: 0, picks: [0] }, { q: 1, picks: [0] }, { q: 2, picks: [0] }] }, swapped.f.io);
+  assert.deepEqual([res2.code, res2.body.step], [409, 'review:q:1']);
+  assert.equal(swapped.f.s.submitted, false);
+});
+
+test('I4: review pairs parsed from the live-geometry fixture, one exact answer per question', () => {
+  const qs = askFormOf(msgsOf(live)).questions;
+  const at = formAt(reviewGrid, qs);
+  assert.deepEqual(at.reviewPairs.map((p) => p.answer), qs.map((q) => q.options[0].label.replace(/\s+/g, '')));
+  assert.deepEqual(at.reviewPairs.map((p) => p.question), qs.map((q) => q.question.replace(/\s+/g, '')));
+});
+
+test('I5: a second choose on the same surface while one drives -> 409 busy, no keys from it', async () => {
+  const { f, r, current } = await setup(live);
+  const body = { current, choiceId: current.choiceId, surface: 'S1', answers: [{ q: 0, picks: [0] }, { q: 1, picks: [0] }, { q: 2, picks: [0] }] };
+  const p1 = r.commitForm(body, f.io);
+  const res2 = await r.commitForm(body, { pressKey: async () => assert.fail('busy sent a key'), sendText: async () => assert.fail('busy sent text') });
+  assert.deepEqual([res2.code, res2.body.error], [409, 'busy']);
+  const res1 = await p1;
+  assert.deepEqual(res1, { code: 200, body: { ok: true, confirmed: true } });
+  assert.equal(f.s.submitted, true);
 });

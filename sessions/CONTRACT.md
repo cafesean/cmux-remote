@@ -86,8 +86,16 @@ One terminal, agent or browser surface on one machine.
     each step waits for the next tab on a fresh screen. On the review step every answer must be on screen, then
     arrows to `Submit answers` + readback + Enter. Any mismatch -> `409 {error:'selection_moved'|'no_confirmation', step}`
     (`q:<i>[:pick|:toggle:<j>|:other|:next]`, `tab:<t>`, `review[:q:<i>]`, `submit`); Submit is never pressed then.
-  Limits: askFormQuestionsMax 8, askFormOtherMax 500, askFormLookbackRows 16, askFormStepTimeoutMs 4000
-  (server relay timeout 90 s for an askForm choose).
+  - `other`: trimmed, 1..askFormOtherMax chars, NO backslash (`cmux send` turns \n \r \t into Enter/Tab), no C0/C1
+    controls, no U+2028/2029 -> else `400 bad_other`. The Other input is emptied first (backspace + placeholder
+    readback), one probe character is typed and read back IN the Other row (a leading digit is probed with `x` +
+    backspace), then the rest; the row must equal the text exactly before Enter.
+  - Review: each question's own `● question` / `→ answer` pair must equal the planned answer exactly (multi: labels
+    joined `, ` in option order).
+  - One drive per surface: a second choose while one runs -> `409 {error:'busy'}`, no keys.
+  - Success `200 {ok:true, confirmed}`: Submit was pressed; `confirmed` = a fresh screen showed the form closed.
+  Limits: askFormQuestionsMax 8, askFormOtherMax 500, askFormLookbackRows 16, askFormStepTimeoutMs 4000,
+  askFormRelayTimeoutMs 90000 (server relay timeout for an askForm choose).
 - `reach`: `cmux` or `tmux`. How input reaches the pane. On a cmux host, a tmux session that runs
   claude or codex but that no cmux pane shows (detached, or its cmux pane was closed) is still listed,
   under workspace `tmux`, with `reach: 'tmux'` and a minted tmux surface id (`lib/tmux-ids.js`). The

@@ -29,6 +29,7 @@ const LIMITS = {
   askFormOtherMax: 500,         // chars of "Other" free text per answer
   askFormLookbackRows: 16,      // grid rows above option 1 searched for the question text
   askFormStepTimeoutMs: 4000,   // per key step: wait this long for the screen to show the expected state
+  askFormRelayTimeoutMs: 90000, // server.js relay timeout for an askForm choose (a single pick keeps 20000)
 };
 const WAITING = new Set(['needs-you', 'your-turn']);
 
@@ -146,7 +147,14 @@ function createChoiceReader({ readGrid, now = Date.now } = {}) {
   // is followed by a fresh screen that must show the expected state (highlight / tab / checkbox / text)
   // before the next key. The final Submit is pressed only after the review step shows every answer.
   // Any mismatch stops with 409 {error, step} and the form is left unsubmitted.
-  async function commitForm({ current, choiceId, answers, surface }, io) {
+  // One drive per surface at a time: a second choose while one runs is 409 busy (no keys).
+  const inFlight = new Set();
+  async function commitForm(args, io) {
+    if (inFlight.has(args.surface)) return { code: 409, body: { error: 'busy' } };
+    inFlight.add(args.surface);
+    try { return await driveForm(args, io); } finally { inFlight.delete(args.surface); }
+  }
+  async function driveForm({ current, choiceId, answers, surface }, io) {
     const stale = (error, step) => ({ code: 409, body: { error, step, choice: current || null } });
     if (!current || current.source !== 'askForm' || current.choiceId !== choiceId) return stale('stale', 'choice');
     const qs = current.questions;
@@ -194,14 +202,41 @@ function createChoiceReader({ readGrid, now = Date.now } = {}) {
       const step = `q:${q}`;
       if (st.tab !== q) return stale('selection_moved', step);
       if (a.other !== undefined) {
-        const m = await moveTo(st, qs[q].options.length, `${step}:other`);
+        const oi = qs[q].options.length;
+        const ostep = `${step}:other`;
+        const m = await moveTo(st, oi, ostep);
         if (m.err) return m.err;
         st = m.st;
-        const r = await io.sendText(a.other, false);
-        if (!r || !r.ok) return { code: 502, body: { error: 'send_failed', step: `${step}:other` } };
-        const want = compact(a.other);
-        const w = await waitFor((f) => f.tab === q && f.menu.markedIndex === qs[q].options.length && f.textBelow.includes(want));
-        if (!w.ok) return stale('selection_moved', `${step}:other`);
+        const onOther = (f) => f.tab === q && f.menu.markedIndex === oi;
+        // The input must be EMPTY (placeholder) before typing: old text from an earlier attempt is
+        // erased with backspace and the placeholder read back, so "old"+"new" can never be submitted.
+        if (!isPlaceholder(otherRowText(st, oi))) {
+          const n = Math.min(otherRowText(st, oi).length + 2, LIMITS.askFormOtherMax + 2);
+          for (let i = 0; i < n; i++) if (!(await press('backspace'))) return keyFail(ostep);
+          const w = await waitFor((f) => onOther(f) && isPlaceholder(otherRowText(f, oi)));
+          if (!w.ok) return stale('selection_moved', `${ostep}:clear`);
+          st = w.ok;
+        }
+        // Probe: ONE non-digit character first, read back IN the Other row, before the rest is typed —
+        // proves keystrokes land in the input and are not selector hotkeys (a digit would pick/submit).
+        const probe = /^[0-9]/.test(a.other) ? 'x' : a.other[0];
+        const r1 = await io.sendText(probe, false);
+        if (!r1 || !r1.ok) return { code: 502, body: { error: 'send_failed', step: ostep } };
+        const w1 = await waitFor((f) => onOther(f) && compact(otherRowText(f, oi)) === compact(probe));
+        if (!w1.ok) return stale('selection_moved', `${ostep}:probe`);
+        let rest = a.other.slice(1);
+        if (probe !== a.other[0]) {
+          if (!(await press('backspace'))) return keyFail(ostep);
+          const w2 = await waitFor((f) => onOther(f) && isPlaceholder(otherRowText(f, oi)));
+          if (!w2.ok) return stale('selection_moved', `${ostep}:probe`);
+          rest = a.other;
+        }
+        if (rest) {
+          const r = await io.sendText(rest, false);
+          if (!r || !r.ok) return { code: 502, body: { error: 'send_failed', step: ostep } };
+        }
+        const w = await waitFor((f) => onOther(f) && compact(otherRowText(f, oi)) === compact(a.other));
+        if (!w.ok) return stale('selection_moved', ostep);
         st = w.ok;
         if (!(await press('enter'))) return keyFail(step);
       } else if (!qs[q].multiSelect) {
@@ -235,17 +270,29 @@ function createChoiceReader({ readGrid, now = Date.now } = {}) {
     }
     // Review: every planned answer must be on screen before Submit is pressed.
     if (!st.review) return stale('selection_moved', 'review');
+    // Per question: its own `● question` / `→ answer` pair, answer matched EXACTLY (multi: the exact
+    // comma-joined set in option order), never a substring of the whole block.
     for (let q = 0; q < qs.length; q++) {
       const a = plan[q];
-      const shown = a.other !== undefined ? [compact(a.other)] : a.picks.map((i) => compact(qs[q].options[i].label));
-      if (!shown.every((t) => st.reviewText.includes(t))) return stale('selection_moved', `review:q:${q}`);
+      const want = a.other !== undefined ? a.other : a.picks.map((i) => qs[q].options[i].label).join(', ');
+      const pairs = st.reviewPairs.filter((p) => p.question === compact(qs[q].question));
+      if (pairs.length !== 1 || pairs[0].answer !== compact(want)) return stale('selection_moved', `review:q:${q}`);
     }
     const submitAt = st.menu.items.findIndex((it) => /^submit/i.test(it.text));
     if (submitAt < 0) return stale('selection_moved', 'review');
     const m = await moveTo(st, submitAt, 'submit');
     if (m.err) return m.err;
     if (!(await press('enter'))) return keyFail('submit');
-    return { code: 200, body: { ok: true } };
+    // Read back that the form closed. Submit WAS pressed, so this is 200 either way; `confirmed` says
+    // whether a fresh screen proved it.
+    const until = now() + LIMITS.askFormStepTimeoutMs;
+    let gone = false;
+    while (!gone && now() < until) {
+      await sleep(LIMITS.choiceReadbackPollMs);
+      const sc = await read();
+      gone = !!(sc && sc.grid) && !locate(sc);
+    }
+    return { code: 200, body: { ok: true, confirmed: gone } };
   }
 
   return { choiceFor, menuFor, commit, commitForm };
@@ -279,6 +326,30 @@ function askFormOf(msgs) {
   return { source: 'askForm', question: questions[0].question || questions[0].header, questions, options: [] };
 }
 
+const isPlaceholder = (t) => /^type something\.?$/i.test(String(t).trim());
+// The Other row's full text (it wraps for long input): its rows up to the next item, minus `❯ n.`.
+function otherRowText(f, oi) {
+  const it = f.menu.items[oi];
+  const next = f.menu.items[oi + 1];
+  const rows = f.rows.filter((r) => r.row >= it.startRow && (!next || r.row < next.startRow) && !(r.isRuleish && !r.isBlank) && !r.isBlank);
+  return rows.map((r) => r.trimmed).join(' ').replace(/^\s*[❯▶►▸➤»‣]?\s*\d{1,2}[.)]\s*/, '').trim();
+}
+// Review block -> [{question, answer}] (compacted). `●` starts a question, `→` its answer; rows after
+// either continue it (wraps). The `│` gutter is ignored.
+function reviewPairsOf(lines) {
+  const out = [];
+  let cur = null, part = null;
+  for (const raw of lines) {
+    const t = raw.replace(/^[\s│|]+/, '');
+    if (!t) { part = null; continue; }               // a blank row ends the pair (e.g. before "Ready to submit")
+    if (t.startsWith('●')) { cur = { question: t.slice(1), answer: null }; out.push(cur); part = 'q'; }
+    else if (t.startsWith('→') && cur) { cur.answer = t.slice(1); part = 'a'; }
+    else if (cur && part === 'a') cur.answer += ' ' + t;
+    else if (cur && part === 'q') cur.question += ' ' + t;
+  }
+  return out.map((p) => ({ question: compact(p.question), answer: p.answer === null ? null : compact(p.answer) }));
+}
+
 const compact = (s) => String(s || '').replace(/[\s│|]+/g, '');
 const CHECKBOX_RE = /^(\[.?\]|[☐☒◻◼])\s*/;
 const isChecked = (text) => /^(\[[^\s\]]\]|[☒◼])/.test(text);
@@ -303,14 +374,15 @@ function formAt(grid, qs) {
   }
   const aboveText = compact(above.join(' '));
   const textBelow = compact(rows.filter((r) => r.row >= first).map((r) => r.trimmed).join(' '));
-  const base = { menu, textBelow, checked: [] };
+  const base = { menu, rows, textBelow, checked: [] };
   if (/Readytosubmityouranswers\?/.test(aboveText) || /^submit answers/i.test(menu.items[0].text)) {
     // The review lists every answer above the prompt; read the whole form block (past the lookback).
     let start = rows.findIndex((r) => r.row >= first);
     let i = start - 1;
     while (i >= 0 && !(rows[i].isRuleish && !rows[i].isBlank)) i--;
-    const reviewText = compact(rows.slice(i + 1, start).map((r) => r.trimmed).join(' '));
-    return { ...base, tab: qs.length, review: true, reviewText };
+    const block = [];                                   // rows with no spans are blank rows: keep them as ''
+    rows.slice(i + 1, start).forEach((r, k, arr) => { if (k && r.row > arr[k - 1].row + 1) block.push(''); block.push(r.trimmed); });
+    return { ...base, tab: qs.length, review: true, reviewText: compact(block.join(' ')), reviewPairs: reviewPairsOf(block) };
   }
   const hits = [];
   qs.forEach((q, k) => {
@@ -331,7 +403,10 @@ function planAnswers(qs, answers) {
     const q = qs[a.q];
     if (a.other !== undefined) {
       if (q.multiSelect) return { error: 'other_multi_unsupported' };
-      if (typeof a.other !== 'string' || !a.other.trim() || a.other.length > LIMITS.askFormOtherMax || /[\u0000-\u001f\u007f]/.test(a.other)) return { error: 'bad_other' };
+      // No backslash: `cmux send` turns \n \r \t into Enter/Tab (would answer/submit unread). No C0/C1
+      // controls or Unicode line breaks. Trimmed, because the readback compares the row exactly.
+      if (typeof a.other !== 'string' || !a.other.trim() || a.other !== a.other.trim() || a.other.length > LIMITS.askFormOtherMax
+        || /[\\\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(a.other)) return { error: 'bad_other' };
       plan[a.q] = { other: a.other };
       continue;
     }
