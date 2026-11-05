@@ -749,7 +749,8 @@ async function handleApi(req, res, u) {
       if (!m) return sendJson(res, 404, { error: 'no_machine' });
       relay(res, bridge(m, '/cmux/new-surface', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ workspace: b.workspace, pane: b.pane }),
+        // p41 S2d: `account` passes through when it is a short string; the bridge validates it
+        body: JSON.stringify({ workspace: b.workspace, pane: b.pane, ...(typeof b.account === 'string' && b.account.length <= 16 ? { account: b.account } : {}) }),
         timeout: 20000,
       }));
     });

@@ -1334,18 +1334,35 @@ function cmuxNewSurface(req, res) {
     if (pane && !PANE_RE.test(pane)) return send(res, 400, { error: 'bad_pane' });
     const args = ['new-surface', '--type', 'terminal', '--workspace', workspace, '--focus', 'false'];
     if (pane) args.push('--pane', pane);
+    // p41 S2d: `account` — absent / "terminal" = today's terminal; "default" = the launcher on the
+    // Mac's own login (`a`); <name> = validated + present in the Keychain. The command is built only
+    // from validated values; the launcher reads the token itself, the bridge never does.
+    const account = b.account == null || b.account === 'terminal' ? null : b.account;
     const before = new Set();
     (async () => {
+      if (account !== null) {
+        if (!ACCOUNT_BIN_DIR_OK) return send(res, 503, { error: 'accounts_disabled' });
+        if (account !== 'default') {
+          if (typeof account !== 'string' || !ACCOUNT_NAME_RE.test(account) || account === 'a') return send(res, 400, { error: 'bad_account' });
+          if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
+          if (!(await accountsLib.exists(account))) return send(res, 400, { error: 'bad_account' });
+        }
+        args.push('--command', `'${ACCOUNT_BIN_DIR}/hypermux-claude' ${account === 'default' ? 'a' : account}`);
+      }
       const pre = await loadTree();
       if (pre) for (const w of pre) for (const t of w.tabs) before.add(t.id);
-      cmux(args, async (err, stdout, stderr) => {
-        if (err) return send(res, 502, { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 400) });
+      const done = async (err, stdout, stderr) => {
+        // a named account never falls back to a plain terminal; its failure carries no cmux text
+        if (err) return send(res, 502, account !== null ? { error: 'cmux_failed' } : { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 400) });
         const workspaces = await treePayload();
         let created = null;
         if (workspaces) for (const w of workspaces) for (const t of w.tabs) if (!before.has(t.id)) created = t.id;
-        send(res, 200, { ok: true, id: created, workspaces: workspaces || [] });
-      }, 12000);
-    })();
+        send(res, 200, { ok: true, id: created, account, workspaces: workspaces || [] });
+      };
+      // account: plain cli — cmux()'s retry would drop an "unknown" --command and open a bare shell
+      if (account !== null) cli(args, { timeout: 12000 }, done);
+      else cmux(args, done, 12000);
+    })().catch(() => { if (!res.headersSent) send(res, 502, { error: 'cmux_failed' }); });
   });
 }
 

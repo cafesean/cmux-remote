@@ -60,6 +60,17 @@ function send(res, code, obj) {
   res.end(redactTokens(JSON.stringify(obj)));   // S2r
 }
 
+// p41 S2d: transcript tail -> 'revoked' | null. Text Claude Code shows on a dead OAuth token:
+// "Failed to authenticate: OAuth token revoked. Please log in again…" (seen in a real transcript).
+const AUTH_FAIL_RE = /OAuth token revoked|Failed to authenticate/i;
+function accountErrorOf(lastMsgs) {
+  for (let i = (lastMsgs || []).length - 1; i >= 0; i--) {
+    const m = lastMsgs[i];
+    if (m && m.kind === 'assistant') return AUTH_FAIL_RE.test(String(m.text || '')) ? 'revoked' : null;
+  }
+  return null;
+}
+
 function createSessionRoutes(deps) {
   const machineId = deps.machineId;
   const backend = deps.backend;
@@ -249,6 +260,9 @@ function createSessionRoutes(deps) {
     });
     s.status = st.status;
     s.preview = st.preview || '';
+    // p41 S2d: Claude Code writes an auth failure (revoked / replaced setup-token) into the transcript
+    // as an API-error assistant entry. Only the NEWEST assistant entry counts: a later answer clears it.
+    if (accountErrorOf(lastMsgs)) s.accountError = accountErrorOf(lastMsgs);
     if (cu && cu.model) s.model = cu.model;
     if (st.contextPct !== undefined) s.contextPct = st.contextPct;
     s.subagents = await subagents.countSubagents(join.path, { home, now: d.now() });
@@ -580,4 +594,4 @@ function createSessionRoutes(deps) {
   return { handle, tmuxTarget, choose, rename };
 }
 
-module.exports = { createSessionRoutes, LIMITS };
+module.exports = { createSessionRoutes, LIMITS, accountErrorOf };
