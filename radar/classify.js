@@ -574,7 +574,7 @@ const PROVIDER_IDS = Object.keys(PROVIDERS);
 // classifying with the default beats a sweep that dies on a typo.
 const providerOf = (id) => PROVIDERS[id] || PROVIDERS[DEFAULT_PROVIDER];
 
-const VERDICT_SCHEMA_PATH = path.join(__dirname, 'verdict.schema.json');
+const VERDICT_SCHEMA_PATH = path.join(require('../lib/pkg-root').pkgRoot(), 'radar', 'verdict.schema.json');   // D62
 
 // The digest an UNCONFIGURED collector runs under — the default provider's own model and flags, not
 // a separate set of constants that could drift away from what the provider actually sends.
