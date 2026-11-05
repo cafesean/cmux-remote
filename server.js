@@ -1040,4 +1040,18 @@ graceful.install(() => { if (radar) radar.stop(); });
 // D52 defense in depth: an unhandled rejection in one relay must not take every session's send down
 // with it (each crash = a launchd restart = cloudflared 502s). Log the cause (no message, no secret).
 process.on('unhandledRejection', (e) => { try { console.error(`unhandled_rejection ${JSON.stringify({ cause: relayFail.classify(e) })}`); } catch (_) {} });
+// D93 last resort: Node 26's undici can THROW `TypeError: terminated` (cause UND_ERR_SOCKET / ERR_HTTP2_*)
+// from inside a socket 'close' / h2 stream 'error' emit when a bridge connection dies mid-response:
+// no relay's try/catch can reach that frame, and the unhandledRejection handler above never sees it.
+// A dead bridge connection is not a broken server, so ONLY that error class is logged and survived.
+// Any other uncaught exception prints its stack and exits 1 exactly like Node's default (launchd
+// restarts it): a genuine bug must not be swallowed.
+process.on('uncaughtException', (e) => {
+  if (relayFail.isTransportError(e)) {
+    try { console.error(`uncaught_transport ${JSON.stringify({ cause: relayFail.classify(e) })}`); } catch (_) {}
+    return;
+  }
+  try { console.error((e && e.stack) || e); } catch (_) {}
+  process.exit(1);
+});
 }
