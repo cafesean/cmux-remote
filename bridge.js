@@ -244,7 +244,13 @@ function privateBodyRefs(b) {
 // -> null (clear) | 423 (a ref IS private) | 503 (a ref cannot be proven either way: the gate's tree
 // read failed or stalled, and no recent good tree knows the ref). A tmux-only session
 // id (minted, never in the cmux tree) is exempt from 503 when tmux resolves it: it is not a cmux pane.
-async function privateGate(refs) {
+// A ref in none of the addressable formats (surface / pane / workspace; browser targets are surfaces)
+// skips the gate: every route validates with these same regexes and answers 400 for it, so it can
+// reach nothing — and a stalled tree read must not turn that 400 into a 503.
+const GATEABLE_REF = (r) => SURFACE_RE.test(r) || PANE_RE.test(r) || WORKSPACE_RE.test(r);
+async function privateGate(allRefs) {
+  const refs = allRefs.filter(GATEABLE_REF);
+  if (!refs.length) return null;
   const v = await privacy.verdict(refs);
   const vs = refs.map(v);
   if (vs.includes('private')) return 423;
@@ -2189,7 +2195,8 @@ const accountsLib = require('./lib/accounts').createAccounts();
 const ACCOUNT_BIN_DIR = path.join(__dirname, 'bin');
 const ACCOUNT_BIN_DIR_OK = /^[A-Za-z0-9/._-]+$/.test(ACCOUNT_BIN_DIR);   // safe inside '…' in --command
 const ACCOUNTS_MAX = 32;                     // accountsMax
-const ACCOUNT_SETUP_TIMEOUT_MS = 600000;     // accountSetupTimeoutMs (pane flag + private mark)
+const ACCOUNT_SETUP_TIMEOUT_MS = 600000;     // accountSetupTimeoutMs (pane flag)
+const ACCOUNT_MARK_TTL_MS = 660000;          // private mark: setup timeout + kill grace + close delay
 const ACCOUNT_BODY_MAX = 1024;               // accountBodyMax
 const ACCOUNT_LABEL_RE = /^[A-Za-z0-9 ._-]{1,40}$/;
 const ACCOUNT_NAME_RE = require('./lib/accounts').NAME_RE;
@@ -2211,27 +2218,36 @@ async function openAccountPane(cmdline) {
   const pre = await loadTree();
   if (!pre) return null;
   const before = new Set(pre.flatMap((w) => (w.tabs || []).map((t) => t.id)));
-  const ws = pre.find((w) => w.title === privateSurfaces.PRIVATE_WORKSPACE_TITLE);
+  const beforeWs = new Set(pre.map((w) => w.id));
+  const ws = pre.find((w) => privateSurfaces.isPrivateTitle(w.title));
   const args = ws
     ? ['new-surface', '--type', 'terminal', '--workspace', ws.ref || ws.id, '--focus', 'false', '--command', cmdline]
     // focus true: a detached caller's unfocused new workspace may not have a live terminal yet
     : ['new-workspace', '--name', privateSurfaces.PRIVATE_WORKSPACE_TITLE, '--focus', 'true', '--command', cmdline];
-  const ok = await new Promise((resolve) => cli(args, { timeout: 12000 }, (err) => resolve(!err)));
-  if (!ok) return null;
+  const out = await new Promise((resolve) => cli(args, { timeout: 12000 }, (err, stdout) => resolve(err ? null : String(stdout || ''))));
+  if (out == null) return null;
+  // Only a NEW tab inside the targeted "Claude accounts" workspace (or the new workspace with that
+  // title) can be ours — a tab opened elsewhere at the same moment must never be marked or tracked.
+  // cmux's own `surface:N` in stdout, when it prints one, picks among them.
   const post = await loadTree();
-  for (const w of post || []) for (const t of w.tabs || []) {
-    if (before.has(t.id)) continue;
-    privateSurfaces.mark({ surface: t.id, workspace: w.id, ttlMs: ACCOUNT_SETUP_TIMEOUT_MS });
-    return { surface: t.id };
+  const said = (/\bsurface:\d+\b/.exec(out) || [])[0] || null;
+  const mine = [];
+  for (const w of post || []) {
+    const target = ws ? w.id === ws.id : (!beforeWs.has(w.id) && privateSurfaces.isPrivateTitle(w.title));
+    if (!target) continue;
+    for (const t of w.tabs || []) if (!before.has(t.id)) mine.push({ t, w });
   }
-  return { surface: null };
+  const pick = (said && mine.find((x) => x.t.ref === said)) || (mine.length === 1 ? mine[0] : null);
+  if (!pick) return { surface: null };
+  privateSurfaces.mark({ surface: pick.t.id, workspace: pick.w.id, ttlMs: ACCOUNT_MARK_TTL_MS });
+  return { surface: pick.t.id };
 }
 
 async function accountOpen(res, cmdline) {
   const r = await openAccountPane(cmdline);
-  if (!r) return send(res, 502, { error: 'cmux_failed' });
+  // surface unknown: no guard (it could never clear by the tree); the title rule still hides the pane
+  if (!r || !r.surface) return send(res, 502, { error: 'cmux_failed' });
   accountPane = { surface: r.surface, until: Date.now() + ACCOUNT_SETUP_TIMEOUT_MS };
-  if (!r.surface) return send(res, 502, { error: 'cmux_failed' });
   send(res, 200, { ok: true, surface: r.surface });
 }
 

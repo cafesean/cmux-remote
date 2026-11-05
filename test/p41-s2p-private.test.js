@@ -332,6 +332,9 @@ test('bridge: tree read failing -> gate refuses (503 gate_unavailable; 423 only 
     await new Promise((res) => setTimeout(res, 1100));   // past the gate's tree cache
     // recent good tree (<= 5 s): refs it knows keep their verdict; a ref it does not know is refused
     assert.equal((await get('/cmux/screen?surface=' + S1)).status, 423, 'a real private verdict stays 423');
+    const bad = await get('/cmux/history?surface=not-a-surface');
+    assert.equal(bad.status, 400, 'a ref no route can address skips the gate: the route answers 400');
+    assert.equal((await post('/cmux/send', { surface: 'nope', text: 'x' })).status, 400, 'same for a body ref');
     const un = await get('/cmux/screen?surface=surface:42');
     assert.equal(un.status, 503, 'unresolvable + no tree -> refused as gate_unavailable, not "private"');
     assert.deepEqual(un.json, { error: 'gate_unavailable' });

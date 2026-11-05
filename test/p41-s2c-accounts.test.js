@@ -137,19 +137,30 @@ const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : n
 const read = () => JSON.parse(fs.readFileSync(F, 'utf8'));
 const write = (t) => fs.writeFileSync(F, JSON.stringify(t));
 const uuid = (n) => 'cccccccc-0000-4000-8000-' + String(n).padStart(12, '0');
+const D = require('path').dirname(F);
+// race: an unrelated tab opens in the ordinary workspace at the same moment
+function race(t) {
+  if (!fs.existsSync(D + '/race')) return;
+  const n = (t.seq = (t.seq || 10) + 1);
+  const s = { id: uuid(n), ref: 'surface:' + n, title: 'other', type: 'terminal', selected: false, selected_in_pane: true };
+  t.windows[0].workspaces[0].panes.push({ id: uuid(200 + n), ref: 'pane:' + n, index: 9, focused: false, selected_surface_id: s.id, surfaces: [s] });
+}
+const noadd = () => fs.existsSync(D + '/noadd');
 let out = 'OK\n';
 if (op === 'tree') out = fs.readFileSync(F, 'utf8');
 else if (op === 'list-status') out = '';
 else if (op === 'read-screen') out = 'hello\n';
 else if (op === 'rpc') out = '{}';
+else if (op === 'new-workspace' && noadd()) out = 'OK\n';
 else if (op === 'new-workspace') {
-  const t = read(); const n = (t.seq = (t.seq || 10) + 1);
+  const t = read(); race(t); const n = (t.seq = (t.seq || 10) + 1);
   const s = { id: uuid(n), ref: 'surface:' + n, title: 'setup', type: 'terminal', selected: true, selected_in_pane: true };
   t.windows[0].workspaces.push({ id: uuid(100 + n), ref: 'workspace:' + n, title: flag('--name') || 'shell', selected: false,
     panes: [{ id: uuid(200 + n), ref: 'pane:' + n, index: 0, focused: true, selected_surface_id: s.id, surfaces: [s] }] });
   write(t); out = 'OK workspace:' + n + '\n';
+} else if (op === 'new-surface' && noadd()) { out = 'OK\n';
 } else if (op === 'new-surface') {
-  const t = read(); const n = (t.seq = (t.seq || 10) + 1);
+  const t = read(); race(t); const n = (t.seq = (t.seq || 10) + 1);
   const ws = t.windows[0].workspaces.find((w) => w.ref === flag('--workspace') || w.id === flag('--workspace'));
   const s = { id: uuid(n), ref: 'surface:' + n, title: 'setup', type: 'terminal', selected: true, selected_in_pane: true };
   ws.panes.push({ id: uuid(200 + n), ref: 'pane:' + n, index: ws.panes.length, focused: false, selected_surface_id: s.id, surfaces: [s] });
@@ -214,7 +225,7 @@ test('bridge: setup with no "Claude accounts" workspace -> new-workspace --name,
   assert.match(r.json.surface, /^cccccccc-/);
   assert.equal((await call('GET', '/cmux/screen?surface=' + r.json.surface)).status, 423);
   const mark = JSON.parse(fs.readFileSync(path.join(dir, 'private.json'), 'utf8'));
-  assert.ok(mark.some((e) => e.surface === r.json.surface && e.until > Date.now() + 590000));
+  assert.ok(mark.some((e) => e.surface === r.json.surface && e.until > Date.now() + 650000), 'mark outlives the 600 s setup timeout (660 s)');
   const t = await call('GET', '/cmux/tree');
   assert.equal(t.text.includes('Claude accounts'), false);
   // one pane at a time
@@ -288,6 +299,38 @@ test('bridge: empty BRIDGE_SECRET -> account routes 503 not_secured', async () =
   } finally { await b2.stop(); }
 });
 
+test('bridge: a concurrent unrelated new tab is never taken for the account pane', async () => {
+  await new Promise((res) => setTimeout(res, 1100));
+  fs.writeFileSync(path.join(dir, 'race'), '');
+  let ok;
+  try { ok = await call('POST', '/cmux/accounts/setup', { name: 'qq' }); } finally { fs.unlinkSync(path.join(dir, 'race')); }
+  assert.equal(ok.status, 200, ok.text);
+  const t = JSON.parse(fs.readFileSync(treeFile, 'utf8'));
+  const priv = t.windows[0].workspaces.find((w) => w.title === 'Claude accounts');
+  const inPriv = priv.panes.flatMap((p) => p.surfaces.map((x) => x.id));
+  assert.ok(inPriv.includes(ok.json.surface), 'reply names the tab inside "Claude accounts"');
+  const other = t.windows[0].workspaces[0].panes.flatMap((p) => p.surfaces).find((x) => x.title === 'other');
+  const mark = JSON.parse(fs.readFileSync(path.join(dir, 'private.json'), 'utf8'));
+  assert.equal(mark.some((e) => e.surface === other.id), false, 'the unrelated tab is not marked');
+  assert.equal((await call('GET', '/cmux/screen?surface=' + other.id)).status, 200, 'and stays readable');
+  // the guard tracks the RIGHT tab: closing the unrelated one does not free it
+  closeSurface(other.id);
+  await new Promise((res) => setTimeout(res, 50));
+  assert.equal((await call('POST', '/cmux/accounts/setup', { name: 'qq2' })).status, 429);
+  closeSurface(ok.json.surface);
+});
+
+test('bridge: pane opened but not found in the tree -> 502, and the guard is NOT held for 600 s', async () => {
+  fs.writeFileSync(path.join(dir, 'noadd'), '');
+  try {
+    const r = await call('POST', '/cmux/accounts/setup', { name: 'nn' });
+    assert.equal(r.status, 502); assert.deepEqual(r.json, { error: 'cmux_failed' });
+  } finally { fs.unlinkSync(path.join(dir, 'noadd')); }
+  const r2 = await call('POST', '/cmux/accounts/setup', { name: 'nn' });
+  assert.equal(r2.status, 200, r2.text);
+  closeSurface(r2.json.surface);
+});
+
 // ---------------------------------------------------------------- server relay
 function fakeBridge() {
   const seen = [];
@@ -340,5 +383,20 @@ test('server: empty SERVER_TOKEN -> account routes 503 not_secured', async () =>
       assert.equal(r.status, 503, p); assert.deepEqual(await r.json(), { error: 'not_secured' });
     }
     assert.equal(fb.seen.length, 0);
+  } finally { await s.stop(); await fb.close(); }
+});
+
+test('server: the per-caller key is the credential that AUTHENTICATED (junk bearer + valid x-app-token cannot reset it)', async () => {
+  const fb = await fakeBridge();
+  const s = await bootServer({ env: { SERVER_TOKEN: 'tok', CMUX_MACHINES: JSON.stringify([{ id: 'm1', label: 'M1', baseUrl: fb.url, secret: 'sb' }]) } });
+  const H = () => ({ 'x-app-token': 'tok', authorization: 'Bearer junk-' + Math.random().toString(36).slice(2) });
+  try {
+    let last;
+    for (let i = 0; i < 11; i++) last = await fetch(s.base + '/api/cmux/accounts/acme?machine=m1', { method: 'DELETE', headers: H() });
+    assert.equal(last.status, 429, '11th from one authenticated credential is limited');
+    await fetch(s.base + '/api/cmux/accounts?machine=m1&fresh=1', { headers: H() });
+    assert.equal(fb.seen.pop().url, '/cmux/accounts?fresh=1');
+    await fetch(s.base + '/api/cmux/accounts?machine=m1&fresh=1', { headers: H() });
+    assert.equal(fb.seen.pop().url, '/cmux/accounts', 'fresh throttle holds across junk bearers');
   } finally { await s.stop(); await fb.close(); }
 });

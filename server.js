@@ -350,9 +350,14 @@ const { createAccountLimits, callerKeyOf } = require('./lib/accounts-limits');
 const accountLimits = createAccountLimits();
 const ACCOUNT_BODY_MAX = 1024;                 // accountBodyMax
 const ACCOUNT_NAME_RE = /^[a-z][a-z0-9]{0,5}$/;
+// Keyed on the credential that AUTHENTICATED (authed() accepts any one of three): a junk value in
+// another slot must not mint a fresh caller key. Device key -> its device id; SERVER_TOKEN -> one key.
 function accountCaller(req, u) {
   const h = req.headers['authorization'] || '';
-  return callerKeyOf((h.startsWith('Bearer ') ? h.slice(7) : '') || req.headers['x-app-token'] || u.searchParams.get('token') || '');
+  const slots = [h.startsWith('Bearer ') ? h.slice(7) : '', req.headers['x-app-token'] || '', u.searchParams.get('token') || ''];
+  for (const c of slots) if (c && safeEqual(c, SERVER_TOKEN)) return callerKeyOf('server-token');
+  for (const c of slots) { const dev = c && pairing.verifyKey(c); if (dev) return callerKeyOf('device:' + dev.id); }
+  return null;
 }
 function readRaw(req, cap, cb) {
   const chunks = []; let size = 0, over = false;
@@ -365,6 +370,7 @@ function accountsRelay(req, res, u, p) {
   const m = findMachine(u.searchParams.get('machine'));
   if (!m) return sendJson(res, 404, { error: 'no_machine' });
   const caller = accountCaller(req, u);
+  if (!caller) return sendJson(res, 401, { error: 'unauthorized' });
   if (req.method === 'GET' && p === '/api/cmux/accounts') {
     const fresh = u.searchParams.get('fresh') === '1' && accountLimits.fresh(caller);
     return relay(res, bridge(m, '/cmux/accounts' + (fresh ? '?fresh=1' : ''), { timeout: 20000 }));
