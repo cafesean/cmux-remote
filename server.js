@@ -29,7 +29,7 @@ const { emptyShadowed } = require('./loadenv');
 const secretsIn = require('./lib/secrets-stdin');
 // D62: the body is main(), not a top-level `return` + self re-require: `bun build --compile` drops a
 // top-level return (the body ran before the secrets were read, so auth was open). Same order on node.
-if (secretsIn.pending()) secretsIn.loadSecrets().then(main);
+if (secretsIn.pending()) secretsIn.loadSecrets({ require: ['SERVER_TOKEN'] }).then(main);
 else main();
 function main() {
 const http = require('http');

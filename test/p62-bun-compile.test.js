@@ -46,7 +46,7 @@ test('server.js and bridge.js: no top-level return, no self re-require; body is 
     const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
     assert.ok(!/require\(__filename\)/.test(src), `${f}: self re-require`);
     assert.ok(!/^\s{0,2}return;\s*$/m.test(src.split('function main() {')[0]), `${f}: top-level return before main()`);
-    assert.match(src, /if \(secretsIn\.pending\(\)\) secretsIn\.loadSecrets\(\)\.then\(main\);\nelse main\(\);\nfunction main\(\) \{/);
+    assert.match(src, /if \(secretsIn\.pending\(\)\) secretsIn\.loadSecrets\(\{ require: \[[^\]]+\] \}\)\.then\(main\);\nelse main\(\);\nfunction main\(\) \{/);
     assert.ok(src.trimEnd().endsWith('}'), `${f}: main() closed at end of file`);
   }
 });
@@ -62,4 +62,40 @@ test('pkg-root: node resolves the repo dir, ignoring HYPERMUX_PKG_ROOT', () => {
   } finally {
     if (prev === undefined) delete process.env.HYPERMUX_PKG_ROOT; else process.env.HYPERMUX_PKG_ROOT = prev;
   }
+});
+
+// D62: role is explicit, never guessed from the entry filename (a Bun binary's entry is not
+// server.js/bridge.js). Each entry names exactly its own required secret.
+test('server.js / bridge.js pass explicit require lists to loadSecrets', () => {
+  for (const [f, want] of [['server.js', ['SERVER_TOKEN']], ['bridge.js', ['BRIDGE_SECRET']]]) {
+    const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    const calls = [...src.matchAll(/secretsIn\.loadSecrets\(([^)]*)\)/g)];
+    assert.strictEqual(calls.length, 1, `${f}: exactly one loadSecrets call`);
+    const m = /^\{ require: \[([^\]]*)\] \}$/.exec(calls[0][1]);
+    assert.ok(m, `${f}: loadSecrets called with { require: [...] }`);
+    assert.deepStrictEqual(m[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')), want, f);
+  }
+  const lib = fs.readFileSync(path.join(ROOT, 'lib', 'secrets-stdin.js'), 'utf8');
+  assert.doesNotMatch(lib, /require\.main|module\.parent|process\.argv\[1\]/, 'no entry-filename role guess');
+});
+
+// The guess is gone, so an entry renamed by bun (or anything) still fails closed with its list.
+test('loadSecrets: explicit require fails closed regardless of entry name; bad name fails closed', () => {
+  const { spawnSync } = require('child_process');
+  const run = (req, line) => {
+    const code = `
+      const { EventEmitter } = require('events');
+      const s = require(${JSON.stringify(path.join(ROOT, 'lib/secrets-stdin.js'))});
+      const fake = new EventEmitter(); fake.pause = () => {}; fake.resume = () => {};
+      s.loadSecrets({ stdin: fake, require: ${JSON.stringify(req)}, exit: (c) => { console.log('EXIT', c); process.exit(0); } })
+        .then(() => console.log('LOADED'));
+      fake.emit('data', Buffer.from(${JSON.stringify(line)}));`;
+    return spawnSync(process.execPath, ['-e', code], {
+      env: { PATH: process.env.PATH, HOME: require('os').tmpdir(), HYPERMUX_SECRETS_ON_STDIN: '1' }, encoding: 'utf8',
+    }).stdout;
+  };
+  assert.match(run(['SERVER_TOKEN'], '{"BRIDGE_SECRET":"x"}\n'), /EXIT 78/);
+  assert.match(run(['BRIDGE_SECRET'], '{"SERVER_TOKEN":"x"}\n'), /EXIT 78/);
+  assert.match(run(['SERVER_TOKN'], '{"SERVER_TOKEN":"x"}\n'), /EXIT 78/);
+  assert.match(run(['SERVER_TOKEN'], '{"SERVER_TOKEN":"x"}\n'), /LOADED/);
 });
