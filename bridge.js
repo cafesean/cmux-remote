@@ -1341,6 +1341,8 @@ function cmuxNewSurface(req, res) {
     const before = new Set();
     (async () => {
       if (account !== null) {
+        // spec §4.2 / §6.1: sessions on an account only through a secured bridge
+        if (!SECRET) return send(res, 503, { error: 'not_secured' });
         // tmux's new-surface ignores --command: an account session there would be a bare shell
         if (tmuxCli) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
         if (!ACCOUNT_BIN_DIR_OK) return send(res, 503, { error: 'accounts_disabled' });
@@ -2301,7 +2303,9 @@ const ACCOUNT_BIN_DIR_OK = /^[^\x00-\x1f\x7f'"\\]+$/.test(ACCOUNT_BIN_DIR);
 // POSIX single-quote: 'a'\''b' — same as gitpanel shellQuote.
 const shq = (v) => "'" + String(v).split("'").join("'\\''") + "'";
 const ACCOUNTS_MAX = 32;                     // accountsMax
-const ACCOUNT_SETUP_TIMEOUT_MS = 600000;     // accountSetupTimeoutMs (pane flag)
+// accountSetupTimeoutMs: the setup script's own capture limit (lib/account-setup.js). The pane guard and
+// the private mark both use ACCOUNT_MARK_TTL_MS, which covers confirm (30 s) + this + grace + close delay.
+const ACCOUNT_SETUP_TIMEOUT_MS = 600000;
 const ACCOUNT_MARK_TTL_MS = 660000;          // private mark: setup timeout + kill grace + close delay
 const ACCOUNT_BODY_MAX = 1024;               // accountBodyMax
 const ACCOUNT_LABEL_RE = /^[A-Za-z0-9 ._-]{1,40}$/;
@@ -2353,7 +2357,8 @@ async function accountOpen(res, cmdline) {
   const r = await openAccountPane(cmdline);
   // surface unknown: no guard (it could never clear by the tree); the title rule still hides the pane
   if (!r || !r.surface) return send(res, 502, { error: 'cmux_failed' });
-  accountPane = { surface: r.surface, until: Date.now() + ACCOUNT_SETUP_TIMEOUT_MS };
+  // guard = mark TTL: the pane (30 s confirm + 600 s capture + grace + close delay) never outlives either
+  accountPane = { surface: r.surface, until: Date.now() + ACCOUNT_MARK_TTL_MS };
   send(res, 200, { ok: true, surface: r.surface });
 }
 

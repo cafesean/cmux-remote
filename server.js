@@ -747,6 +747,8 @@ async function handleApi(req, res, u) {
       if (!b) return sendJson(res, 400, { error: 'bad_json' });
       const m = findMachine(b.machine);
       if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      // p41 S2 final: a session on an account only through a secured server (spec §4.2 / §6.1)
+      if (b.account != null && b.account !== 'terminal' && !SERVER_TOKEN) return sendJson(res, 503, { error: 'not_secured' });
       relay(res, bridge(m, '/cmux/new-surface', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         // p41 S2d: `account` passes through when it is a short string; the bridge validates it

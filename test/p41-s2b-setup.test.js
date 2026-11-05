@@ -422,3 +422,39 @@ test('N2: >32 bytes of ANSI inside the prefix across chunks -> no body printed',
   noLeak(res);
   assert.ok(!res.stdout.includes('oat01'), 'body leaked');
 });
+
+// ---- S2 final I1: an unanswered [y/N] times out (HYPERMUX_CONFIRM_TIMEOUT_S, default 30) ----------
+// 30 s prompt + 600 s capture + kill grace + close delay < 660 s private mark: privacy outlives the pane.
+function runOpen(bin, r, args, extra) {
+  return new Promise((resolve) => {
+    const c = require('child_process').spawn('bash', [bin, ...args], { env: { ...r.env, ...extra }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = ''; c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { out += d; });
+    const t0 = Date.now();
+    const kill = setTimeout(() => c.kill('SIGKILL'), 15000);
+    c.on('exit', (code) => { clearTimeout(kill); resolve({ code, out, ms: Date.now() - t0 }); });   // stdin left OPEN: nobody answers
+  });
+}
+test('setup: unanswered confirm times out -> cancelled, exit 1, nothing stored, setup command never run', async () => {
+  const r = rig();
+  const res = await runOpen(SETUP, r, ['acme'], { HYPERMUX_CONFIRM_TIMEOUT_S: '1' });
+  assert.strictEqual(res.code, 1);
+  assert.match(res.out, /cancelled/);
+  assert.ok(res.ms < 8000, 'timed out, did not wait forever');
+  assert.deepStrictEqual(r.keychain(), {});
+  assert.ok(!fs.existsSync(r.side));
+});
+test('remove: unanswered confirm times out -> cancelled, nothing deleted', async () => {
+  const r = rig();
+  fs.writeFileSync(r.kc, JSON.stringify({ [KEY('acme')]: TOKEN }));
+  const res = await runOpen(REMOVE, r, ['acme'], { HYPERMUX_CONFIRM_TIMEOUT_S: '1' });
+  assert.strictEqual(res.code, 1);
+  assert.match(res.out, /cancelled/);
+  assert.strictEqual(r.keychain()[KEY('acme')], TOKEN);
+});
+test('confirm timeout default is 30 s, read with -t in both scripts', () => {
+  for (const f of [SETUP, REMOVE]) {
+    const src = fs.readFileSync(f, 'utf8');
+    assert.match(src, /HYPERMUX_CONFIRM_TIMEOUT_S:-30/);
+    assert.match(src, /read -r -t /);
+  }
+});

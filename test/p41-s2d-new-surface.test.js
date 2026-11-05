@@ -272,3 +272,36 @@ test('accountError absent normally, and once a later answer replaces the failure
   const later = await sessionsWith([user(1, 'hi'), REVOKED(2), user(3, 'again'), asst(4, 'fine now')]);
   assert.equal('accountError' in later, false);
 });
+
+// ---- S2 final I2: account sessions are secured-only (spec §4.2 / §6.1) --------------------------
+test('bridge without BRIDGE_SECRET: account session 503 not_secured, terminal unchanged', async () => {
+  const b = await bootBridge({ cwd: dir, env: { CMUX_BIN: path.join(dir, 'fake-cmux'), FAKE_DIR: dir,
+    HYPERMUX_SECURITY_BIN: path.join(sec, 'security'), FAKE_SEC_DIR: sec, USER: 'tester',
+    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private-c.json'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'), NODE_ENV: 'test', COMPLETIONS_ENABLED: '0' } });
+  try {
+    for (const account of ['default', 'acme']) {
+      const r = await nsOn(b.base, { workspace: WS, account });
+      assert.equal(r.status, 503, account); assert.deepEqual(r.json, { error: 'not_secured' });
+      assert.deepEqual(r.ns, []);
+    }
+    const t = await nsOn(b.base, { workspace: WS });
+    assert.equal(t.status, 200); assert.deepEqual(t.ns, [TERMINAL_ARGV]);
+  } finally { await b.stop(); }
+});
+
+test('server without SERVER_TOKEN: new-surface with account 503 not_secured (not relayed); without account relayed', async () => {
+  const seen = [];
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => { b += c; }); req.on('end', () => {
+    seen.push(JSON.parse(b || '{}')); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); }); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const s = await bootServer({ env: { SERVER_TOKEN: '', CMUX_MACHINES: JSON.stringify([{ id: 'm1', label: 'M1', baseUrl: `http://127.0.0.1:${srv.address().port}`, secret: 'sb' }]) } });
+  const post = (body) => fetch(s.base + '/api/cmux/new-surface', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ machine: 'm1', workspace: WS, ...body }) });
+  try {
+    const a = await post({ account: 'acme' });
+    assert.equal(a.status, 503); assert.deepEqual(await a.json(), { error: 'not_secured' });
+    assert.equal(seen.length, 0);
+    const t = await post({});
+    assert.equal(t.status, 200);
+    assert.deepEqual(seen.pop(), { workspace: WS });
+  } finally { await s.stop(); await new Promise((r) => srv.close(r)); }
+});

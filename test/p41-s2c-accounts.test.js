@@ -437,3 +437,11 @@ test('bridge: bin dir with a quote char -> list still 200, setup/delete refused 
     assert.equal(d.status, 503); assert.deepEqual(d.json, { error: 'accounts_disabled' });
   } finally { await b4.stop(); }
 });
+
+test('S2 final I1: the one-pane guard lasts as long as the private mark (660 s), not 600 s', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'bridge.js'), 'utf8');
+  assert.match(src, /const ACCOUNT_MARK_TTL_MS = 660000;/);
+  assert.match(src, /accountPane = \{ surface: r\.surface, until: Date\.now\(\) \+ ACCOUNT_MARK_TTL_MS \}/);
+  // 30 s confirm + 600 s capture + 2 s kill grace + 5 s close delay < 660 s
+  assert.ok(30 + 600 + 2 + 5 < 660);
+});
