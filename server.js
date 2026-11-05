@@ -11,6 +11,8 @@
 //   SERVER_TOKEN   token the browser must present on /api/* (empty = open; trusted LAN only)
 //   PUBLIC_URL     the address the native app should pair with (e.g. https://cmux-max.cafesean.com); unset = the request Host
 //   DEVICES_FILE   paired-device store, default ~/.config/cmux-remote/devices.json (hashed keys only, 0600)
+//   PAIR_LOCAL     'off' disables D40 local pairing (no Allow dialog; /api/pair/local answers 403 unavailable).
+//                  Default on for macOS. Unsupported in SERVER_SOCKET mode (a unix peer is never local-only).
 //
 //   Machine registry (any of these, merged by id — nothing is committed to the repo):
 //     CMUX_MACHINE_URL / CMUX_MACHINE_SECRET / CMUX_MACHINE_LABEL      — a single default machine
@@ -42,7 +44,10 @@ const unixListen = require('./lib/unix-listen');
 // p41: QR pairing. Device keys are an equal credential to SERVER_TOKEN (see authed below).
 // D40: /api/pair/hello names the machine on this Mac (unix: socket or loopback http bridge), read per
 // request because MACHINES is built below.
+// D40 W1: local pairing asks the person at this Mac with an Allow/Deny dialog (lib/confirm-dialog.js).
+const confirmDialog = require('./lib/confirm-dialog');
 const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '',
+  confirm: String(process.env.PAIR_LOCAL || '').toLowerCase() === 'off' ? confirmDialog.disabledConfirm : confirmDialog.createConfirm(),
   localMachine: () => { const m = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl)); return m ? m.id : null; } });
 const { parseUnixBaseUrl, unixFetch } = require('./lib/unix-fetch');
 let SERVER_SOCKET = '';

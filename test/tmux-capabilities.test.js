@@ -135,7 +135,8 @@ test('docs: README has the headless tmux section with its settings and the featu
 });
 
 test('public repo: no deployment identifiers in the docs, lib/, the fixture script or any p18 test file', () => {
-  const IDENT = /jetdevs|172\.16\.|\bray\b|\bstanley\b|cmux-claude|co\.jetdevs/i;
+  // `cf-ray` is Cloudflare's public request-id header (lib/pairing.js FORWARD_HEADERS), not a name.
+  const IDENT = /jetdevs|172\.16\.|(?<!cf-)\bray\b|\bstanley\b|cmux-claude|co\.jetdevs/i;
   const files = ['README.md', '.env.example', 'scripts/capture-tmux-fixture.js',
     ...fs.readdirSync(path.join(REPO, 'lib')).filter((f) => f.endsWith('.js')).map((f) => `lib/${f}`),
     ...fs.readdirSync(path.join(REPO, 'test')).filter((f) => /^(tmux-.*\.test\.js|radar-tmux-identity\.test\.js|p18-.*\.mjs)$/.test(f)).map((f) => `test/${f}`),
