@@ -74,12 +74,12 @@ test('info: displays + permission preflight + settings paths', async () => {
   assert.match(r.json.settingsPath.accessibility, /Privacy & Security > Accessibility/);
 });
 
-test('shot: JPEG frame, -x -t jpg -D 1, 0600 file in 0700 dir, temp removed; 2nd inside the floor -> 429', async () => {
+test('shot: JPEG frame, -x -C (cursor) -t jpg -D 1, 0600 file in 0700 dir, temp removed; 2nd inside the floor -> 429', async () => {
   const r = await get(on, '/cmux/screen/shot');
   assert.equal(r.status, 200); assert.equal(r.json.mime, 'image/jpeg');
   assert.deepEqual(Buffer.from(r.json.image, 'base64'), JPEG);
   const a = JSON.parse(rd('cap.log').trim().split('\n')[0]);
-  assert.deepEqual(a.slice(0, 5), ['-x', '-t', 'jpg', '-D', '1']);
+  assert.deepEqual(a.slice(0, 6), ['-x', '-C', '-t', 'jpg', '-D', '1']);
   assert.match(rd('mode.log'), /^600 700/);
   const r2 = await get(on, '/cmux/screen/shot');
   assert.equal(r2.status, 429); assert.ok(r2.json.retryMs > 0 && r2.json.retryMs <= 60000);
@@ -148,4 +148,26 @@ test('input rate cap: > SCREEN_INPUT_MAX_PER_SEC in a second -> 429', async () =
   for (let i = 0; i < LIMITS.SCREEN_INPUT_MAX_PER_SEC + 3; i++) rs.push(post(on, '/cmux/screen/key', { key: 'down' }));
   const st = (await Promise.all(rs)).map((r) => r.status);
   assert.ok(st.filter((s) => s === 429).length >= 3, st.join(','));
+});
+
+// p41 D101: input {shot:true} answers with a fresh frame (cursor captured, -C) so the phone sees the click land.
+test('D101 shot-on-input: tap {shot:true} -> frame with -C; without shot -> no frame; floor waits, never skips', async () => {
+  await pause(1100);
+  const n0 = rd('cap.log').trim().split('\n').length;
+  const plain = await post(on, '/cmux/screen/tap', { fx: 0.5, fy: 0.5 });
+  assert.equal(plain.status, 200); assert.equal(plain.json.image, undefined);
+  assert.equal(rd('cap.log').trim().split('\n').length, n0, 'no capture without shot:true');
+  const r = await post(on, '/cmux/screen/tap', { fx: 0.4, fy: 0.6, shot: true });
+  assert.equal(r.status, 200, r.text); assert.equal(r.json.mime, 'image/jpeg');
+  assert.deepEqual(Buffer.from(r.json.image, 'base64'), JPEG);
+  const lines = rd('cap.log').trim().split('\n');
+  assert.equal(lines.length, n0 + 1);
+  assert.deepEqual(JSON.parse(lines[lines.length - 1]).slice(0, 2), ['-x', '-C']);
+  const t0 = Date.now();
+  const r2 = await post(on, '/cmux/screen/key', { key: 'down', shot: true });
+  assert.equal(r2.status, 200); assert.equal(typeof r2.json.image, 'string', 'second frame waits out the floor, not dropped');
+  assert.ok(Date.now() - t0 >= LIMITS.SCREEN_INPUT_SHOT_MIN_MS - 200, 'input-shot floor honoured');
+  const g = await get(on, '/cmux/screen/shot');
+  assert.equal(g.status, 429, 'input frame re-arms the poll floor');
+  assert.ok(LIMITS.SCREEN_INPUT_SHOT_MIN_MS >= 250);
 });
