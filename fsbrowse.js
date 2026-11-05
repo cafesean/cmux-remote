@@ -200,7 +200,7 @@ function imageDataUri(file) {
   return new Promise((resolve) => {
     execFile('/usr/bin/sips',
       ['-Z', String(FS_IMAGE_MAX_DIM), '-s', 'format', 'jpeg', '-s', 'formatOptions', FS_IMAGE_JPEG_Q, file, '--out', out],
-      { timeout: 15000 },
+      { timeout: 15000, env: require('./lib/secrets-stdin').childEnv() },
       (err) => {
         if (err) return resolve(null);
         fsp.readFile(out)

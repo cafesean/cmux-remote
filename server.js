@@ -24,6 +24,13 @@
 //       accessId/accessSecret (still accepted). Missing var -> no headers + a startup note naming the var.
 //     CMUX_CONFIG     — path to a gitignored JSON file { "machines": [ ... ] } (extends/overrides)
 const { emptyShadowed } = require('./loadenv');
+// p62 S2: HYPERMUX_SECRETS_ON_STDIN=1 -> read the secrets line first, then run this file for real
+// (re-required once loaded, so every const below sees them). Unset -> no-op, today's behaviour.
+const secretsIn = require('./lib/secrets-stdin');
+if (secretsIn.pending()) {
+  secretsIn.loadSecrets().then(() => { delete require.cache[__filename]; require(__filename); });
+  return;
+}
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -33,7 +40,7 @@ const { pipeline } = require('stream/promises');
 
 const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || process.env.SERVER_HOST || '127.0.0.1';
-const SERVER_TOKEN = process.env['SERVER_TOKEN'] || '';
+const SERVER_TOKEN = secretsIn.get('SERVER_TOKEN');
 const { safeEqual } = require('./lib/safe-equal');
 const { redactTokens } = require('./lib/redact-tokens');
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -62,7 +69,7 @@ function loadMachines() {
       id: 'default',
       label: process.env.CMUX_MACHINE_LABEL || 'My Mac',
       baseUrl: process.env.CMUX_MACHINE_URL,
-      secret: process.env.CMUX_MACHINE_SECRET || '',
+      secret: secretsIn.get('CMUX_MACHINE_SECRET'),
       accessId: process.env.CMUX_MACHINE_ACCESS_ID || '',
       accessSecret: process.env.CMUX_MACHINE_ACCESS_SECRET || '',
     });

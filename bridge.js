@@ -23,6 +23,12 @@
 //   BACKEND        cmux (default) | tmux — tmux drives a headless tmux server through lib/tmux-cli.js
 //   TMUX_BIN / TMUX_SOCKET / TMUX_SESSION   the tmux backend's binary, server socket, default session
 const { emptyShadowed } = require('./loadenv');
+// p62 S2: see server.js: stdin secrets first, then this file runs for real. Unset -> no-op.
+const secretsIn = require('./lib/secrets-stdin');
+if (secretsIn.pending()) {
+  secretsIn.loadSecrets().then(() => { delete require.cache[__filename]; require(__filename); });
+  return;
+}
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
@@ -35,7 +41,7 @@ const { normalizeLayout } = require('./panelayout');
 
 const PORT = Number(process.env.BRIDGE_PORT || 8799);
 const HOST = process.env.BRIDGE_HOST || '127.0.0.1';
-const SECRET = process.env.BRIDGE_SECRET || '';
+const SECRET = secretsIn.get('BRIDGE_SECRET');
 const { safeEqual } = require('./lib/safe-equal');
 const { redactTokens, redactText, redactRows, redactGrid } = require('./lib/redact-tokens');
 // p19: BRIDGE_SOCKET set → listen on that UNIX socket and open NO TCP port. On a shared Mac any user
@@ -50,7 +56,7 @@ catch (e) { console.error(`refusing to start: ${e.code}: ${e.detail}`); process.
 // every response that carries session data carries the machine it came from.
 const MACHINE_ID = process.env.RADAR_MACHINE_ID || os.hostname();
 const CMUX_BIN = process.env.CMUX_BIN || '/Applications/cmux.app/Contents/Resources/bin/cmux';
-const CMUX_ENV = { ...process.env, CMUX_QUIET: '1' };
+const CMUX_ENV = secretsIn.childEnv({ CMUX_QUIET: '1' });   // p62 S2: no secret reaches cmux or its panes
 // p18: which program answers the cmux argv this file builds. `cmux` (the default) is the cmux CLI,
 // exactly as before. `tmux` is lib/tmux-cli.js — an in-process emulator that takes the same argv and
 // answers in cmux's shapes from a headless tmux server, so every handler below runs unchanged. A typo
@@ -1704,7 +1710,7 @@ function cmuxChromePrompt(req, res) {
 // Deliberately narrow: one fixed directory (never a caller-supplied one), the name reduced to a
 // basename with anything exotic stripped, a size cap, and no execute bit. It is reachable only with
 // the bridge secret, i.e. only through the token-gated server.
-const UPLOAD_DIR = process.env.UPLOAD_DIR || `${os.homedir()}/Downloads/cmux-remote`;
+const UPLOAD_DIR = require('./lib/hm-home').uploadDir();   // p62 S1: UPLOAD_DIR, else $HYPERMUX_HOME/uploads, else ~/Downloads/cmux-remote
 const UPLOAD_MAX_BYTES = Number(process.env.UPLOAD_MAX_BYTES || 32 * 1024 * 1024);
 function safeName(raw) {
   let n = String(raw || '').split(/[\\/]/).pop() || '';        // basename: no traversal, no directories
@@ -1980,7 +1986,7 @@ function browserShotNow(surface, shrink, q) {   // -> Promise<{buf, raw, src}|nu
     fs.readFile(out, (e, png) => {
       if (e) return resolve(null);
       execFile('/usr/bin/sips', [...(shrink ? ['-Z', String(BROWSER_SHOT_MAX_DIM)] : []), '-s', 'format', 'jpeg',
-        '-s', 'formatOptions', q, out, '--out', jpg], { timeout: 8000 }, (se) => {
+        '-s', 'formatOptions', q, out, '--out', jpg], { timeout: 8000, env: secretsIn.childEnv() }, (se) => {
         // src = hash of the SOURCE pixels, so the same picture at two qualities counts as unchanged
         const src = crypto.createHash('md5').update(png).digest('hex');
         if (se) return resolve({ buf: png, raw: png.length, src });   // sips failed → raw PNG fallback
