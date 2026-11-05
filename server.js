@@ -756,7 +756,7 @@ async function handleApi(req, res, u) {
   // ----- panes: split / focus / resize (multi-pane mirror) -----
   // The bridge validates every field (pane/surface/workspace shape, direction allow-list, target
   // clamp), so these relay the body straight through like the browser actions do.
-  if (req.method === 'POST' && ['/api/cmux/new-pane', '/api/cmux/split-off', '/api/cmux/drop-surface', '/api/cmux/reorder-tab', '/api/cmux/close-pane',
+  if (req.method === 'POST' && ['/api/cmux/new-pane', '/api/cmux/split-off', '/api/cmux/drop-surface', '/api/cmux/move-pane', '/api/cmux/reorder-tab', '/api/cmux/close-pane',
     '/api/cmux/focus-pane', '/api/cmux/focus-surface', '/api/cmux/resize-pane',
     '/api/cmux/equalize'].includes(p)) {
     return readBody(req, (b) => {
