@@ -259,6 +259,6 @@ On SIGTERM/SIGINT the server (`server.js`) and bridge (`bridge.js`) tell every o
 
 Clients must treat `restarting` as "reconnect now (after ~retryMs, reset backoff)", not as an error.
 Then in-flight non-stream requests get a drain window (`RESTART_DRAIN_MS`, default 3000) and the process
-exits 0. Hint is `RESTART_RETRY_MS` (default 500). Defaults live in `lib/graceful.js` LIMITS.
+exits 75 (EX_TEMPFAIL). Nonzero on purpose: the launchd plists use KeepAlive {SuccessfulExit=false}, so exit 0 would NOT be relaunched. Hint is `RESTART_RETRY_MS` (default 500). Defaults live in `lib/graceful.js` LIMITS.
 `GET /healthz` (no auth) returns `{ok,ready,draining}`: 200 once listening, 503 while draining.
 The server listens before any slow work; nothing blocks startup.

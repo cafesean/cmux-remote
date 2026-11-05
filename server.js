@@ -631,7 +631,8 @@ async function handleApi(req, res, u) {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     try {
       const reader = up.body.getReader();
-      for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(Buffer.from(value)); }
+      res.on('close', () => { try { reader.cancel(); } catch (_) {} });   // A18: graceful end / client gone
+      for (;;) { const { done, value } = await reader.read(); if (done || res.writableEnded) break; res.write(Buffer.from(value)); }
     } catch (_) { /* client or upstream closed */ }
     try { res.end(); } catch (_) {}
     return;
@@ -823,7 +824,8 @@ async function handleApi(req, res, u) {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     try {
       const reader = up.body.getReader();
-      for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(Buffer.from(value)); }
+      res.on('close', () => { try { reader.cancel(); } catch (_) {} });   // A18: graceful end / client gone
+      for (;;) { const { done, value } = await reader.read(); if (done || res.writableEnded) break; res.write(Buffer.from(value)); }
     } catch (_) { /* client or upstream closed */ }
     try { res.end(); } catch (_) {}
     return;
