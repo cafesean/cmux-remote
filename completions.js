@@ -108,6 +108,12 @@ function createCompletions(opts = {}) {
       if (IGNORE_DIRS.has(name)) continue;
       if (isDeniedPath(path.join(real, name), homedir)) continue;
       if (lower && !name.toLowerCase().startsWith(lower)) continue;
+      // A symlink entry is judged by its target, so `plink -> ~/.ssh/key` is not offered.
+      if (typeof e.isSymbolicLink === 'function' && e.isSymbolicLink()) {
+        let target = null;
+        try { target = await realpath(path.join(real, name)); } catch (_) { /* dangling: offer the name */ }
+        if (target && isDeniedPath(target, homedir)) continue;
+      }
       const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : !!e.isDirectory;
       out.push({ text: dir + name + (isDir ? '/' : ''), kind: isDir ? 'dir' : 'file' });
     }

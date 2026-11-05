@@ -42,15 +42,32 @@ const DENIED = [
   '.claude-swap-backup', '.claude-swap-backup/sequence.json', '.claude-swap-backup/sessions/3-a-example-com/.credentials.json',
   '.claude/.credentials.json', '.claude.json', '.claude.json.backup', '.ssh', '.ssh/id_ed25519',
   '.appstoreconnect/key.p8', 'Library/Keychains/login.keychain-db', '.config/foo/token.json', '.config/tokens/a.txt',
-  'project/app.credentials.json',
+  'project/app.credentials.json', '.config/gh/hosts.yml',
 ];
-const ALLOWED = ['.claude', '.claude/settings.json', '.config', '.config/gh/hosts.yml', 'project', 'project/readme.md', 'Library'];
+const ALLOWED = ['.claude', '.claude/settings.json', '.config', '.config/gh', 'project', 'project/readme.md', 'Library'];
 
 test('isDeniedPath: every credential path denied, neighbours allowed', async () => {
   const h = await home();
   for (const rel of DENIED) assert.strictEqual(isDeniedPath(path.join(h, rel), h), true, rel);
   for (const rel of ALLOWED) assert.strictEqual(isDeniedPath(path.join(h, rel), h), false, rel);
   assert.strictEqual(isDeniedPath('', h), true);
+});
+
+test('isDeniedPath: macOS firmlink long form (/System/Volumes/Data/...) is denied too', () => {
+  const h = '/Users/someone';
+  for (const rel of ['.ssh/id_ed25519', '.claude.json', '.claude-swap-backup/sequence.json']) {
+    assert.strictEqual(isDeniedPath(`/System/Volumes/Data${h}/${rel}`, h), true, rel);
+    assert.strictEqual(isDeniedPath(`/System/Volumes/Data${h}/${rel}`, `/System/Volumes/Data${h}`), true, `long home ${rel}`);
+  }
+  assert.strictEqual(isDeniedPath(`/System/Volumes/Data${h}/project/readme.md`, h), false);
+});
+
+test('completions @: a symlink entry pointing at a credential path is not offered', async () => {
+  const h = await home();
+  await fsp.symlink(path.join(h, '.ssh', 'id_ed25519'), path.join(h, 'project', 'plink'));
+  const c = createCompletions({ cwdForSurface: async () => h, homedir: h });
+  const r = await c.complete({ surface: 's', text: '@project/p', caret: 10 });
+  assert.ok(!r.candidates.some((i) => i.text === 'project/plink'));
 });
 
 test('fsbrowse: read/download/list refuse credential paths with 403 denied, incl. symlink escapes', async () => {
