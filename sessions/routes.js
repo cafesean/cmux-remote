@@ -29,6 +29,7 @@ const tmuxIds = require('../lib/tmux-ids');
 const procs = require('./procs');
 const subagents = require('./subagents');
 const { pickTitle } = require('./titles');
+const statusline = require('./statusline');
 
 // Every limit this module adds (LIMITS.md rows).
 const LIMITS = {
@@ -44,6 +45,7 @@ const LIMITS = {
   markerIdMax: 128,
   procSnapshotTtlMs: 2000,           // one ps+tmux snapshot is shared for this long (list, describe, streams)
   attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n
+  ...statusline.LIMITS,               // A12 status-line limits (sessions/statusline.js)
   ...subagents.LIMITS,                // A10 sub-agent limits (sessions/subagents.js)
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
@@ -228,7 +230,15 @@ function createSessionRoutes(deps) {
     if (cu && cu.model) s.model = cu.model;
     if (st.contextPct !== undefined) s.contextPct = st.contextPct;
     s.subagents = await subagents.countSubagents(join.path, { home, now: d.now() });
+    await addStatusLine(s, join, tab, d);
     return { session: s, join };
+  }
+  const gitInfo = deps.gitInfo || statusline.createGitInfo({ git: deps.git });
+  async function addStatusLine(s, join, tab, d) {
+    let cwd = null;
+    try { if (d.cwdFor) cwd = await d.cwdFor(joinSurface(tab).id); } catch (_) { cwd = null; }
+    cwd = cwd || tab.cwd || null;
+    try { s.statusLine = await statusline.statusLineFor({ sessionId: join.sessionId, home, session: s, cwd, gitInfo }); } catch (_) { /* optional */ }
   }
   async function unreadFor(tab) {
     let by = null;

@@ -30,6 +30,15 @@ One terminal, agent or browser surface on one machine.
 - `lastActivity`: number. When the session last changed.
 - `model`: string, optional. The model name, for chat kinds.
 - `contextPct`: number 0 to 100, optional. How full the model context is.
+- `statusLine`: optional object, what Sean's terminal status line shows. Claude kind with a joined transcript only.
+  `{account, lastReplyAt, ctxUsed, ctxLimit, ctxPct, model, title, branch, repo, writtenAt}`; every field is a
+  string or number or `null`. `lastReplyAt` is ISO UTC (the app formats it local); `ctxPct` may exceed 100.
+  Source: the sidecar `<configDir>/statusline/<sessionId>.json` written by `~/.claude/get-session-name.sh`
+  (`~/.claude` and each cswap config dir), opened safely (no symlink, size cap, bad JSON ignored). With no
+  sidecar the bridge fills what it knows (`model`, `contextPct` as `ctxPct`, `title`, `lastActivity` as
+  `writtenAt`) plus `branch`/`repo` from git on the pane cwd (cached); `account` is `null` then. Example:
+  `{"account":"jet","lastReplyAt":"2026-11-05T01:19:28.440Z","ctxUsed":205000,"ctxLimit":200000,"ctxPct":102,"model":"Opus 5.5","title":"x-cmux-native-3","branch":"integration/p41-native","repo":"cmux-remote","writtenAt":"2026-11-05T01:19:42Z"}`.
+  Limits (`sessions/statusline.js`): sidecarMaxBytes 16 KiB, gitCacheTtlMs 10000, gitCacheMax 128, gitTimeoutMs 2000, strMax 300.
 - `reach`: `cmux` or `tmux`. How input reaches the pane. On a cmux host, a tmux session that runs
   claude or codex but that no cmux pane shows (detached, or its cmux pane was closed) is still listed,
   under workspace `tmux`, with `reach: 'tmux'` and a minted tmux surface id (`lib/tmux-ids.js`). The
