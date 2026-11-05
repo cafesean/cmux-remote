@@ -309,10 +309,15 @@ CMUX_CONFIG=./config.json
   "machines": [
     { "id": "studio", "label": "Studio Mac", "baseUrl": "https://...", "secret": "..." },
     { "id": "laptop", "label": "Laptop",     "baseUrl": "https://...", "secret": "...",
-      "accessId": "cf-access-client-id", "accessSecret": "cf-access-client-secret" }
+      "accessIdEnv": "CMUX_LAPTOP_CF_ACCESS_ID", "accessSecretEnv": "CMUX_LAPTOP_CF_ACCESS_SECRET" }
   ]
 }
 ```
+
+`accessIdEnv` / `accessSecretEnv` are env var NAMES (`^[A-Z][A-Z0-9_]{0,63}$`) holding the Cloudflare
+Access service token, so no token value sits in the file. The name wins over raw `accessId`/`accessSecret`
+(still accepted). A missing var sends no headers and the startup line says `[CF Access: missing <NAME>]`.
+The same two fields work on radar `bridges[]` rows; they are never sent to `unix:` bridges.
 
 Adding a machine is just another row. The repo ships only `config.example.json` with placeholders.
 

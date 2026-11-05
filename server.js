@@ -16,7 +16,10 @@
 //     CMUX_MACHINE_URL / CMUX_MACHINE_SECRET / CMUX_MACHINE_LABEL      — a single default machine
 //       (a baseUrl is http(s)://host:port, or unix:/abs/path/bridge.sock for a bridge on a UNIX socket)
 //     CMUX_MACHINE_ACCESS_ID / CMUX_MACHINE_ACCESS_SECRET             — optional Cloudflare Access token
-//     CMUX_MACHINES   — JSON array [{id,label,baseUrl,secret,accessId?,accessSecret?}] (extends/overrides)
+//     CMUX_MACHINES   — JSON array [{id,label,baseUrl,secret,accessIdEnv?,accessSecretEnv?}] (extends/overrides)
+//       accessIdEnv / accessSecretEnv are env var NAMES (^[A-Z][A-Z0-9_]{0,63}$) holding the Cloudflare
+//       Access service token, e.g. "accessIdEnv":"CMUX_MINI_CF_ACCESS_ID". The name wins over raw
+//       accessId/accessSecret (still accepted). Missing var -> no headers + a startup note naming the var.
 //     CMUX_CONFIG     — path to a gitignored JSON file { "machines": [ ... ] } (extends/overrides)
 const { emptyShadowed } = require('./loadenv');
 const http = require('http');
@@ -144,9 +147,10 @@ const ensureMachine = async (id) => { if (id && !MACHINES.some((m) => m.id === i
 
 // Cloudflare Access service-token headers, for machines reached over a named tunnel gated by CF Access.
 // Empty accessId/accessSecret → no headers (LAN / quick-tunnel machines).
-const accessHeaders = (m) => (m.accessId && m.accessSecret)
-  ? { 'CF-Access-Client-Id': m.accessId, 'CF-Access-Client-Secret': m.accessSecret }
-  : {};
+// A row may name env vars (accessIdEnv / accessSecretEnv) instead of carrying values; lib/cf-access.js
+// resolves either form and sends nothing to unix: socket bridges.
+const cfAccess = require('./lib/cf-access');
+const accessHeaders = (m) => cfAccess.accessHeadersFor(m, process.env);
 
 // p19: the one way this file reaches a bridge. http(s): the global fetch, exactly as before.
 // unix:<path>: lib/unix-fetch over the socket — Node's fetch cannot dial a UNIX socket.
@@ -873,7 +877,7 @@ function afterListen() {
     let host = m.baseUrl;
     if (m.socketPath) host = `unix:${m.socketPath}`;
     else try { host = new URL(m.baseUrl).host; } catch (_) { /* print as given */ }
-    console.log(`  machine "${m.id}" (${m.label}) → ${host}${m.accessId ? ' [CF Access]' : ''}`);
+    console.log(`  machine "${m.id}" (${m.label}) → ${host}${cfAccess.statusLabel(m, process.env)}`);
   }
   if (!SERVER_TOKEN) console.log('WARNING: SERVER_TOKEN empty → UI/API open. Set it before exposing outside a trusted LAN.');
 }

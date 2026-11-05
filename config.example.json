@@ -12,8 +12,8 @@
       "label": "Laptop",
       "baseUrl": "https://laptop.example.com",
       "secret": "another-bridge-secret",
-      "accessId": "optional-cf-access-client-id",
-      "accessSecret": "optional-cf-access-client-secret"
+      "accessIdEnv": "CMUX_LAPTOP_CF_ACCESS_ID",
+      "accessSecretEnv": "CMUX_LAPTOP_CF_ACCESS_SECRET"
     }
   ]
 }

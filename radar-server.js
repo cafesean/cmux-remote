@@ -154,6 +154,7 @@ const isTmuxBackend = (env) => String((env && env.BACKEND) || '').trim().toLower
 // is a POST — so this is the one place a bridge-bound method/body exists. It owns NO timeout: the
 // ROUTE owns every deadline through an AbortController it created (§5.5 steps 6-8), which is what
 // makes an injected transport time out exactly like the real one instead of ignoring the clock.
+const cfAccess = require('./lib/cf-access');
 function bridgeFetch(url, opts) {
   const o = opts || {};
   return fetch(url, { method: o.method || 'GET', headers: o.headers || {}, body: o.body, signal: o.signal })
@@ -372,7 +373,7 @@ function createRadar(opts) {
     try {
       const r = await bridgeHttp(`${bridge.baseUrl}/cmux/send`, {
         method: 'POST',
-        headers: secret ? { 'x-bridge-secret': secret } : {},
+        headers: { ...(secret ? { 'x-bridge-secret': secret } : {}), ...cfAccess.accessHeadersFor(bridge, env) },
         body: JSON.stringify({ surface: a.surface, text: a.text, submit: a.submit === true }),
         signal: ctl.signal,
         timeoutMs: SEND_TIMEOUT_MS,
@@ -812,7 +813,7 @@ function createRadar(opts) {
     // remote events, tree, grid, send. The bridge's own rejection is 403 {error:'forbidden'};
     // `unauthorized` is the shared server's vocabulary and never comes from a bridge.
     const secret = bridge.secretRef ? (process.env[bridge.secretRef] || '') : '';
-    const headers = secret ? { 'x-bridge-secret': secret } : {};
+    const headers = { ...(secret ? { 'x-bridge-secret': secret } : {}), ...cfAccess.accessHeadersFor(bridge, process.env) };
     const bridgeMs = (cfg.timeouts && cfg.timeouts.bridgeMs) || 8000;
 
     // Every deadline in this route is the ROUTE's, held on an AbortController it created and

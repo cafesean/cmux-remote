@@ -70,6 +70,8 @@ const implicitLocal = (collectorId) =>
   // would make the collector's behaviour depend on whatever else happens to be listening there.
   ({ id: collectorId, baseUrl: DEFAULT_BRIDGE_URL, secretRef: 'BRIDGE_SECRET', local: true, implicit: true });
 
+const cfAccessHeaders = require('../lib/cf-access').accessHeadersFor;
+
 function normalizeBridges(raw, collectorId, issues) {
   const list = raw && Array.isArray(raw.bridges) ? raw.bridges : null;
   if (!list) return [implicitLocal(collectorId)];
@@ -87,6 +89,8 @@ function normalizeBridges(raw, collectorId, issues) {
       id,
       baseUrl: baseUrl.replace(/\/+$/, ''),
       secretRef: str(b.secretRef) || 'BRIDGE_SECRET',
+      // CF Access token source (env var NAMES, or raw values); resolved per call by lib/cf-access.
+      ...['accessIdEnv', 'accessSecretEnv', 'accessId', 'accessSecret'].reduce((a, k) => (typeof b[k] === 'string' && b[k] ? { ...a, [k]: b[k] } : a), {}),
       local: b.local === true || id === collectorId,
       implicit: false,
     });
@@ -346,7 +350,7 @@ async function readMachineEvents(bridge, ctx) {
   }
 
   const secret = bridge.secretRef ? (process.env[bridge.secretRef] || '') : '';
-  const headers = secret ? { 'x-bridge-secret': secret } : {};
+  const headers = { ...(secret ? { 'x-bridge-secret': secret } : {}), ...cfAccessHeaders(bridge, process.env) };
   try {
     // `signal` is the caller's, composed with the transport's own timeout: a disconnected client
     // must kill the request in flight, not merely suppress the calls that would have followed.
@@ -367,7 +371,7 @@ async function readMachineEvents(bridge, ctx) {
 async function collectMachine(bridge, ctx) {
   const { http, timeoutMs, network } = ctx;
   const secret = bridge.secretRef ? (process.env[bridge.secretRef] || '') : '';
-  const headers = secret ? { 'x-bridge-secret': secret } : {};
+  const headers = { ...(secret ? { 'x-bridge-secret': secret } : {}), ...cfAccessHeaders(bridge, process.env) };
 
   // `fetch: false` (the collector's no-network scan mode) suppresses every HTTP call. The local
   // machine's events still come off disk — that is not the network — but nothing is PROBED, so
@@ -645,7 +649,7 @@ async function collectSessions(opts) {
 
 module.exports = {
   collectSessions,
-  normalizeBridges, foldSession, groupEvents, mapCwd,
+  normalizeBridges, cfAccessHeaders, foldSession, groupEvents, mapCwd,
   buildSurfaceIndex, joinSurface, joinRecorded, surfaceCandidate, sessionsForMachine,
   sessionStatusOf, readMachineEvents, collectMachine,
   BLOCKING_NOTIFICATIONS, CLEARING_EVENTS, RUNNING_WINDOW_MS, CACHE_TTL_MS, ABANDON_MS, DEFAULT_BRIDGE_URL,
