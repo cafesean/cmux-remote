@@ -1341,6 +1341,8 @@ function cmuxNewSurface(req, res) {
     const before = new Set();
     (async () => {
       if (account !== null) {
+        // tmux's new-surface ignores --command: an account session there would be a bare shell
+        if (tmuxCli) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
         if (!ACCOUNT_BIN_DIR_OK) return send(res, 503, { error: 'accounts_disabled' });
         if (account !== 'default') {
           if (typeof account !== 'string' || !ACCOUNT_NAME_RE.test(account) || account === 'a') return send(res, 400, { error: 'bad_account' });

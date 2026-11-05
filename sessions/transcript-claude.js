@@ -140,7 +140,7 @@ class Normaliser {
       if (!b || typeof b !== 'object') return;
       const id = `${uuid}:${i}`;
       if (rec.type === 'assistant') {
-        if (b.type === 'text' && typeof b.text === 'string') this.assistantText(id, ts, b.text, off, changed);
+        if (b.type === 'text' && typeof b.text === 'string') this.assistantText(id, ts, b.text, off, changed, rec);
         else if (b.type === 'tool_use') this.toolUse(id, ts, b, off, changed);
       } else if (b.type === 'text' && typeof b.text === 'string') {
         if (!b.text.startsWith('<')) this.text('user', id, ts, b.text, off, changed);
@@ -158,10 +158,18 @@ class Normaliser {
     return changed;
   }
 
-  assistantText(id, ts, raw, off, changed) {
+  assistantText(id, ts, raw, off, changed, rec) {
     if (!raw.trim()) return;
     const { text, callouts } = splitCallouts(raw, { seanBanner: this.bannerPreset });
-    if (text.trim()) this.add({ id, ts, kind: 'assistant', text: text.trim() }, off, changed);
+    if (text.trim()) {
+      const msg = { id, ts, kind: 'assistant', text: text.trim() };
+      // p41 S2d: Claude Code's own API-error entry (isApiErrorMessage / error code), kept for the
+      // bridge's Session.accountError. NON-enumerable: the Thread wire shape does not change.
+      if (rec && (rec.isApiErrorMessage === true || (typeof rec.error === 'string' && rec.error))) {
+        Object.defineProperty(msg, 'apiError', { value: { code: typeof rec.error === 'string' ? rec.error : null }, enumerable: false });
+      }
+      this.add(msg, off, changed);
+    }
     callouts.forEach((callout, i) => this.add({ id: `${id}:callout:${i}`, ts, kind: 'callout', callout }, off, changed));
   }
 

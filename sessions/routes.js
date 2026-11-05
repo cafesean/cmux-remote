@@ -60,13 +60,23 @@ function send(res, code, obj) {
   res.end(redactTokens(JSON.stringify(obj)));   // S2r
 }
 
-// p41 S2d: transcript tail -> 'revoked' | null. Text Claude Code shows on a dead OAuth token:
-// "Failed to authenticate: OAuth token revoked. Please log in again…" (seen in a real transcript).
-const AUTH_FAIL_RE = /OAuth token revoked|Failed to authenticate/i;
+// p41 S2d: transcript tail -> 'revoked' | 'auth_failed' | null. Keys on Claude Code's STRUCTURED
+// API-error entry (the reader carries `apiError` from isApiErrorMessage / error), never on prose: an
+// answer that merely quotes the phrase sets nothing. A real revoked token is written as
+// {type:"assistant", isApiErrorMessage:true, error:"authentication_failed",
+//  text:"Failed to authenticate: OAuth token revoked. Please log in again…"} (seen in a real transcript).
+// Only the NEWEST assistant entry counts: a later answer clears it.
+const AUTH_FAIL_TEXT_RE = /^\s*(API Error: )?Failed to authenticate/i;   // fallback when the code is absent
+const REVOKED_RE = /OAuth token revoked/i;
 function accountErrorOf(lastMsgs) {
   for (let i = (lastMsgs || []).length - 1; i >= 0; i--) {
     const m = lastMsgs[i];
-    if (m && m.kind === 'assistant') return AUTH_FAIL_RE.test(String(m.text || '')) ? 'revoked' : null;
+    if (!m || m.kind !== 'assistant') continue;
+    if (!m.apiError) return null;
+    const text = String(m.text || '');
+    const auth = m.apiError.code === 'authentication_failed' || AUTH_FAIL_TEXT_RE.test(text);
+    if (!auth) return null;
+    return REVOKED_RE.test(text) ? 'revoked' : 'auth_failed';
   }
   return null;
 }
@@ -260,9 +270,9 @@ function createSessionRoutes(deps) {
     });
     s.status = st.status;
     s.preview = st.preview || '';
-    // p41 S2d: Claude Code writes an auth failure (revoked / replaced setup-token) into the transcript
-    // as an API-error assistant entry. Only the NEWEST assistant entry counts: a later answer clears it.
-    if (accountErrorOf(lastMsgs)) s.accountError = accountErrorOf(lastMsgs);
+    // p41 S2d: 'revoked' | 'auth_failed' from Claude Code's API-error entry (accountErrorOf)
+    const accountError = accountErrorOf(lastMsgs);
+    if (accountError) s.accountError = accountError;
     if (cu && cu.model) s.model = cu.model;
     if (st.contextPct !== undefined) s.contextPct = st.contextPct;
     s.subagents = await subagents.countSubagents(join.path, { home, now: d.now() });

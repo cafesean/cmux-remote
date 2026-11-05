@@ -16,6 +16,7 @@ const { bootBridge } = require('./helpers/bridge-child');
 const { bootServer } = require('./helpers/server-boot');
 const { writeFakeCmux, IDS } = require('./helpers/fake-cmux');
 const eventlog = require('../radar/eventlog');
+const { startTmux, tmuxBinary } = require('./helpers/tmux-server');
 
 const SECRET = 's2d-secret';
 const BIN = path.join(path.dirname(require.resolve('../bridge.js')), 'bin');
@@ -130,6 +131,22 @@ test('cmux rejects --command -> 502, never a plain terminal instead', async () =
   for (const t of replies) assert.equal(t.includes('sk-ant'), false);
 });
 
+test('tmux backend: an account session is 501 unsupported_backend, never a bare shell', async (t) => {
+  if (!tmuxBinary()) return t.skip('no tmux binary');
+  const srv = await startTmux({ cols: 80, rows: 24 });
+  const b = await bootBridge({ env: { BACKEND: 'tmux', TMUX_BIN: srv.tmuxBin, TMUX_SOCKET: srv.socket,
+    BRIDGE_SECRET: SECRET, HYPERMUX_SECURITY_BIN: path.join(sec, 'security'), FAKE_SEC_DIR: sec } });
+  try {
+    const tr = await (await fetch(b.base + '/cmux/tree', { headers: { 'x-bridge-secret': SECRET } })).json();
+    const tws = tr.workspaces[0].id;   // a real tmux workspace id, so the private gate can resolve it
+    for (const account of ['default', 'acme']) {
+      const r = await fetch(b.base + '/cmux/new-surface', { method: 'POST', headers: { 'x-bridge-secret': SECRET, 'content-type': 'application/json' }, body: JSON.stringify({ workspace: tws, account }) });
+      assert.equal(r.status, 501, account);
+      assert.deepEqual(await r.json(), { error: 'unsupported_backend', backend: 'tmux' });
+    }
+  } finally { await b.stop(); await srv.stop(); }
+});
+
 // ---------------------------------------------------------------- server relay
 test('server relays `account` (string <= 16 chars), omits anything else', async () => {
   const seen = [];
@@ -159,6 +176,10 @@ const asst = (n, text, extra) => ({ type: 'assistant', uuid: uid(n), timestamp: 
   model: 'claude-opus-4-5', content: [{ type: 'text', text }], usage: { input_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1 } } });
 // the shape Claude Code writes when the account's token is revoked (an API-error assistant entry)
 const REVOKED = (n) => asst(n, 'Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator.', { isApiErrorMessage: true, error: 'authentication_failed' });
+const AUTH_OTHER = (n) => asst(n, 'Failed to authenticate. API Error: 401 invalid x-api-key', { isApiErrorMessage: true, error: 'authentication_failed' });
+// an API error entry without the `error` code: the anchored text is the fallback
+const REVOKED_TEXT_ONLY = (n) => asst(n, 'API Error: Failed to authenticate: OAuth token revoked.', { isApiErrorMessage: true });
+const RATE = (n) => asst(n, 'API Error: Rate limited', { isApiErrorMessage: true, error: 'rate_limit' });
 
 async function sessionsWith(rows) {
   const h = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 's2d-h-')));
@@ -186,6 +207,20 @@ test('accountError "revoked" when the newest assistant entry is Claude Code\'s a
   assert.ok(s, 'session listed');
   assert.equal(s.kind, 'claude');
   assert.equal(s.accountError, 'revoked');
+});
+
+test('accountError "auth_failed" for any other structured auth failure; text-only error entry falls back to the anchored text', async () => {
+  const s = await sessionsWith([user(1, 'hi'), AUTH_OTHER(2)]);
+  assert.equal(s.accountError, 'auth_failed');
+  const t = await sessionsWith([user(1, 'hi'), REVOKED_TEXT_ONLY(2)]);
+  assert.equal(t.accountError, 'revoked');
+});
+
+test('assistant PROSE mentioning the phrases, or a non-auth API error, sets nothing', async () => {
+  const s = await sessionsWith([user(1, 'what broke?'), asst(2, 'The log says "Failed to authenticate: OAuth token revoked" — the setup-token was replaced.')]);
+  assert.equal('accountError' in s, false);
+  const r = await sessionsWith([user(1, 'hi'), RATE(2)]);
+  assert.equal('accountError' in r, false);
 });
 
 test('accountError absent normally, and once a later answer replaces the failure', async () => {
