@@ -35,12 +35,13 @@ function writeFakeCmux(dir, opts) {
   const o = opts || {};
   const cwd = o.cwd || dir;
   const grid = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'grids', (o.grid || 'claude-slash-2') + '.json'), 'utf8')).grid;
-  const data = { IDS, cwd, browser: !!o.browser, hideFile: o.hideFile || '', replay: { seq: 7, render_grid: grid } };
+  const data = { IDS, cwd, browser: !!o.browser, hideFile: o.hideFile || '', logFile: o.logFile || '', replay: { seq: 7, render_grid: grid } };
   const file = path.join(dir, 'fake-cmux');
   const src = '#!' + process.execPath + '\n' + String.raw`'use strict';
 const D = ${JSON.stringify(data)};
 const I = D.IDS;
 const args = process.argv.slice(2);
+if (D.logFile) require('fs').appendFileSync(D.logFile, JSON.stringify(args) + '\n');
 const has = (a) => args.includes(a);
 const sf = (id, ref) => ({ id, ref, title: ref, type: 'terminal', selected: true, selected_in_pane: true });
 const pane = (id, ref, index, s) => ({ id, ref, index, focused: index === 0, selected_surface_id: s.id, selected_surface_ref: s.ref, surfaces: [s] });

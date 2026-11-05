@@ -367,3 +367,28 @@ test('A14: waiting session carries choice from the live menu; slash menu gives n
     assert.equal(r.json.sessions.find((s) => s.surface === IDS.sfA1).choice, undefined, 'a slash completion menu is not a question');
   } finally { await b2.stop(); }
 });
+
+// A14 fix 1: POST /cmux/choose re-reads and refuses a stale pick without sending anything.
+test('A14: /cmux/choose — stale choiceId and label mismatch are 409 and send nothing; a fresh pick sends', async () => {
+  const { h } = home([user(1, 'go'), asst(2, 'Deleting build.')]);
+  const logFile = path.join(tmp(), 'cmux.log');
+  const b = await boot(h, {}, { grid: 'a14-permission', logFile });
+  const sent = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '').split('\n').filter(Boolean)
+    .map((l) => JSON.parse(l)).filter((a) => a[0] === 'send-key' || a[0] === 'send');
+  try {
+    const list = await call(b.socketPath, 'GET', '/cmux/sessions', { secret: SECRET });
+    const ch = list.json.sessions.find((s) => s.surface === IDS.sfA1).choice;
+    const post = (body) => call(b.socketPath, 'POST', '/cmux/choose', { secret: SECRET, body: { surface: IDS.sfA1, ...body } });
+    const stale = await post({ choiceId: '0000000000000000', index: 0, label: 'Yes' });
+    assert.equal(stale.status, 409, stale.text);
+    assert.equal(stale.json.error, 'stale');
+    assert.equal(stale.json.choice.choiceId, ch.choiceId);
+    const wrong = await post({ choiceId: ch.choiceId, index: 0, label: 'No' });
+    assert.equal(wrong.status, 409);
+    assert.equal((await post({ choiceId: ch.choiceId, index: 'x', label: 'Yes' })).status, 400);
+    assert.deepEqual(sent(), [], 'nothing typed on a refused pick');
+    const ok = await post({ choiceId: ch.choiceId, index: 0, label: 'Yes' });
+    assert.equal(ok.status, 200, ok.text);
+    assert.deepEqual(sent().map((a) => a[a.length - 1]), ['enter']);
+  } finally { await b.stop(); }
+});

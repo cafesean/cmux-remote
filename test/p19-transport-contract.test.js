@@ -131,6 +131,7 @@ function cases() {
     '/api/cmux/panes-stream': [sse(`/api/cmux/panes-stream?surfaces=${I.sfA1},${I.sfA2}`)],
     '/api/cmux/send': [post('/api/cmux/send', { surface: I.sfA1, text: 'echo p19' }), post('/api/cmux/send', { surface: I.sfA1, text: 'x', expect_seq: 1 })],
     '/api/cmux/key': [post('/api/cmux/key', { surface: I.sfA1, key: 'enter' })],
+    '/api/cmux/choose': [post('/api/cmux/choose', { surface: I.sfA1, choiceId: '0000000000000000', index: 0, label: 'x' })],
     '/api/cmux/new-surface': [post('/api/cmux/new-surface', { workspace: I.wsA, pane: I.paneA1 })],
     '/api/cmux/new-workspace': [post('/api/cmux/new-workspace', { cwd: fakeDir })],
     '/api/cmux/close-tab': [post('/api/cmux/close-tab', { surface: I.sfA2 })],

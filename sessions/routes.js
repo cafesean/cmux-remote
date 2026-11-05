@@ -237,7 +237,7 @@ function createSessionRoutes(deps) {
     await addStatusLine(s, join, tab, d);
     if (choice.WAITING.has(s.status)) {
       try {
-        const c = await choices.choiceFor({ status: s.status, lastMsgs, surface: tab.id, screen: !tab.tmuxPane });
+        const c = await choices.choiceFor({ status: s.status, lastMsgs, surface: tab.id, screen: !tab.tmuxPane, fresh: !!d.freshChoice });
         if (c) s.choice = c;
       } catch (_) { /* optional */ }
     }
@@ -516,7 +516,23 @@ function createSessionRoutes(deps) {
     try { return await procs.tmuxTargetFor(surface, { procSnapshot: sharedSnapshot }); } catch (_) { return null; }
   }
 
-  return { handle, tmuxTarget };
+  // A14 POST /cmux/choose (bridge.js reads the body): recompute the surface's choice NOW and execute
+  // the pick only if it is still the same question and the same option. io = {pressKey, sendText}.
+  async function choose(b, io) {
+    const surface = String((b && b.surface) || '');
+    const index = b && Number.isInteger(b.index) ? b.index : -1;
+    if (!b || typeof b.choiceId !== 'string' || typeof b.label !== 'string' || index < 0) return { code: 400, body: { error: 'bad_json' } };
+    const tabs = await treeTabs();
+    if (!tabs) return { code: 502, body: { error: 'cmux_failed' } };
+    const entry = tabs.find((x) => x.tab.id === surface);
+    if (!entry) return { code: 404, body: { error: 'not_found' } };
+    const d = requestDeps();
+    d.freshChoice = true;
+    const { session } = await describe(entry, d, await unreadFor(entry.tab));
+    return choices.commit({ current: session.choice || null, choiceId: b.choiceId, index, label: b.label, surface }, io);
+  }
+
+  return { handle, tmuxTarget, choose };
 }
 
 module.exports = { createSessionRoutes, LIMITS };

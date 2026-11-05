@@ -22,7 +22,7 @@ async function fakeBridge(mid, secret) {
     if (req.headers['x-bridge-secret'] !== secret) return send(401, { error: 'unauthorized' });
     const u = new URL(req.url, 'http://x');
     const pre = `/cmux/sessions/${encodeURIComponent(mid + ':surface:1')}`;
-    if (req.method === 'POST' && (u.pathname === '/cmux/send' || u.pathname === '/cmux/key')) {
+    if (req.method === 'POST' && (u.pathname === '/cmux/send' || u.pathname === '/cmux/key' || u.pathname === '/cmux/choose')) {
       let body = '';
       req.on('data', (c) => { body += c; });
       req.on('end', () => { rec.body = body; send(200, { ok: true, via: mid }); });
@@ -193,6 +193,13 @@ test('BUG2: /api/cmux/send|key and query routes accept the bridge machineId (ses
     assert.deepEqual(JSON.parse(sent.body), { surface: 'surface:1', text: 'hi', submit: true });
     const key = await call(s2.base, 'POST', '/api/cmux/key', { token: TOKEN, body: { machine: 'mini', surface: 'surface:1', key: 'enter' } });
     assert.equal(key.json.via, 'mini');
+    // A14: /api/cmux/choose passes exactly {surface, choiceId, index, label} through, device-auth gated.
+    const n1 = bb.log.length;
+    const ch = await call(s2.base, 'POST', '/api/cmux/choose', { token: TOKEN, body: { machine: 'air', surface: 'surface:1', choiceId: 'abc', index: 1, label: 'Yes', keys: ['enter'] } });
+    assert.equal(ch.json.via, 'air');
+    const fwd = bb.log.slice(n1).find((x) => x.url === '/cmux/choose');
+    assert.deepEqual(JSON.parse(fwd.body), { surface: 'surface:1', choiceId: 'abc', index: 1, label: 'Yes' });
+    assert.equal((await call(s2.base, 'POST', '/api/cmux/choose', { body: { machine: 'air', surface: 'surface:1', choiceId: 'abc', index: 1, label: 'Yes' } })).status, 401);
     const lay = await call(s2.base, 'GET', '/api/cmux/layout?machine=air&workspace=w', { token: TOKEN });
     assert.equal(lay.json.via, 'air');
     // registry ids keep working (PWA)

@@ -213,7 +213,7 @@ const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   procSnapshot: p41ProcSnapshotKnob(),
   statusPollMs: Number(process.env.P41_JOIN_POLL_MS) || undefined,
   // A14: Session.choice reads the live screen through the same path as the grid mirror.
-  readGrid: (surface) => new Promise((resolve) => gridPayload(surface, (obj) => resolve(obj && obj.grid ? obj.grid : null))),
+  readGrid: (surface) => new Promise((resolve) => gridPayload(surface, (obj) => resolve(obj && obj.grid ? { seq: obj.seq, grid: obj.grid } : null))),
 });
 
 // ---------- compose-box completions (p7 §6.2) --------------------------------
@@ -1172,6 +1172,49 @@ function cmuxSend(req, res) {
       // conservative direction, since the caller treats it as "check the tab", never as a retry.
       answer(502, { error: 'text_command_unconfirmed', detail: String((e && e.message) || e).slice(0, 200) });
     });
+  });
+}
+
+// POST /cmux/choose { surface, choiceId, index, label } (p41 A14) — answer a Session.choice atomically.
+// The bridge recomputes the choice NOW; a different choiceId or label is 409 {error:'stale', choice}
+// and nothing is sent. Menu picks walk from the CURRENT highlight and read back before Enter
+// (sessions/choice.js commit). The app never sends raw keys for a choice.
+function pressKeyP(surface, key) {
+  return new Promise((resolve) => {
+    const viaCmux = () => cmux(['send-key', '--surface', surface, '--', key], (e) => resolve(e ? { ok: false, error: 'cmux_failed' } : { ok: true }));
+    if (tmuxCli) return viaCmux();
+    sessionRoutes.tmuxTarget(surface).then(async (tgt) => {
+      if (!tgt) return viaCmux();
+      resolve(await require('./sessions/procs').tmuxSend(tgt, { press: key }));
+    }).catch(() => resolve({ ok: false, error: 'cmux_failed' }));
+  });
+}
+function sendTextP(surface, text, submit) {
+  return new Promise((resolve) => {
+    serializeSend(surface, async () => {
+      const tgt = tmuxCli ? null : await sessionRoutes.tmuxTarget(surface);
+      if (tgt) return resolve(await require('./sessions/procs').tmuxSend(tgt, { text, submit }));
+      if (text) {
+        const e = await runSendCommandP(['send', '--surface', surface, '--', text]);
+        if (e) return resolve({ ok: false, error: e.dispatched ? 'text_command_unconfirmed' : 'send_failed' });
+      }
+      if (submit) {
+        if (text) await new Promise((r) => setTimeout(r, SUBMIT_SETTLE_MS));
+        const e = await runSendCommandP(['send-key', '--surface', surface, '--', 'enter']);
+        if (e) return resolve({ ok: false, error: 'submit_failed_text_inserted' });
+      }
+      resolve({ ok: true });
+    }).catch(() => resolve({ ok: false, error: 'text_command_unconfirmed' }));
+  });
+}
+function cmuxChoose(req, res) {
+  cmuxReadBody(req, (b) => {
+    if (!b) return send(res, 400, { error: 'bad_json' });
+    const surface = String(b.surface || '');
+    if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
+    sessionRoutes.choose(b, { pressKey: (k) => pressKeyP(surface, k), sendText: (t, sub) => sendTextP(surface, t, sub) })
+      .then((r) => send(res, r.code, r.body))
+      .catch(() => send(res, 500, { error: 'choose_failed' }));
   });
 }
 
@@ -2149,6 +2192,7 @@ function handleCmux(req, res) {
     return cmuxStream(req, res, s);
   }
   if (req.method === 'POST' && p === '/cmux/send') return cmuxSend(req, res);
+  if (req.method === 'POST' && p === '/cmux/choose') return cmuxChoose(req, res);
   if (req.method === 'POST' && p === '/cmux/key') return cmuxKey(req, res);
   if (req.method === 'POST' && p === '/cmux/new-surface') return cmuxNewSurface(req, res);
   if (req.method === 'POST' && p === '/cmux/new-workspace') return cmuxNewWorkspace(req, res);

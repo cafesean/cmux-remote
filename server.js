@@ -653,6 +653,19 @@ async function handleApi(req, res, u) {
       }));
     });
   }
+  // p41 A14: answer a Session.choice atomically (the bridge re-reads and refuses a stale pick).
+  if (req.method === 'POST' && p === '/api/cmux/choose') {
+    return readBody(req, (b) => {
+      if (!b) return sendJson(res, 400, { error: 'bad_json' });
+      const m = findMachine(b.machine);
+      if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      relay(res, bridge(m, '/cmux/choose', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ surface: b.surface, choiceId: b.choiceId, index: b.index, label: b.label }),
+        timeout: 20000,
+      }));
+    });
+  }
   if (req.method === 'POST' && p === '/api/cmux/key') {
     return readBody(req, (b) => {
       if (!b) return sendJson(res, 400, { error: 'bad_json' });
