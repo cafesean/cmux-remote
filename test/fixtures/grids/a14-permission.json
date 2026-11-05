@@ -1,0 +1,101 @@
+{
+ "name": "a14-permission",
+ "meta": {
+  "note": "hand-built from a Claude Code permission prompt layout (A14); marked row = #B1B9F9 + ❯"
+ },
+ "grid": {
+  "columns": 100,
+  "rows": 16,
+  "active_screen": "primary",
+  "styles": [
+   {
+    "id": 0,
+    "foreground": "#FFFFFF",
+    "background": "#000000"
+   },
+   {
+    "id": 1,
+    "foreground": "#B1B9F9",
+    "background": "#000000"
+   },
+   {
+    "id": 2,
+    "foreground": "#999999",
+    "background": "#000000"
+   }
+  ],
+  "row_spans": [
+   {
+    "row": 0,
+    "column": 0,
+    "style_id": 0,
+    "text": "⏺ I will delete the build folder."
+   },
+   {
+    "row": 2,
+    "column": 0,
+    "style_id": 0,
+    "text": "⏺ Bash(rm -rf build)"
+   },
+   {
+    "row": 3,
+    "column": 2,
+    "style_id": 0,
+    "text": "⎿  Running…"
+   },
+   {
+    "row": 5,
+    "column": 0,
+    "style_id": 0,
+    "text": "────────────────────────────────────────────────────────────────────────────────"
+   },
+   {
+    "row": 6,
+    "column": 1,
+    "style_id": 0,
+    "text": "Bash command"
+   },
+   {
+    "row": 8,
+    "column": 3,
+    "style_id": 0,
+    "text": "rm -rf build"
+   },
+   {
+    "row": 9,
+    "column": 3,
+    "style_id": 0,
+    "text": "Remove stale build output"
+   },
+   {
+    "row": 11,
+    "column": 1,
+    "style_id": 0,
+    "text": "Do you want to proceed?"
+   },
+   {
+    "row": 12,
+    "column": 1,
+    "style_id": 1,
+    "text": "❯ 1. Yes"
+   },
+   {
+    "row": 13,
+    "column": 3,
+    "style_id": 2,
+    "text": "2. Yes, and don't ask again for rm commands in /work/alpha"
+   },
+   {
+    "row": 14,
+    "column": 3,
+    "style_id": 2,
+    "text": "3. No, and tell Claude what to do differently (esc)"
+   }
+  ],
+  "cursor": {
+   "row": 15,
+   "column": 0,
+   "visible": false
+  }
+ }
+}

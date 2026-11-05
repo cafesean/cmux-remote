@@ -1,0 +1,119 @@
+{
+ "name": "a14-ask",
+ "meta": {
+  "note": "hand-built AskUserQuestion selector layout (A14), highlight on option 2, numbered prose above"
+ },
+ "grid": {
+  "columns": 100,
+  "rows": 18,
+  "active_screen": "primary",
+  "styles": [
+   {
+    "id": 0,
+    "foreground": "#FFFFFF",
+    "background": "#000000"
+   },
+   {
+    "id": 1,
+    "foreground": "#B1B9F9",
+    "background": "#000000"
+   },
+   {
+    "id": 2,
+    "foreground": "#999999",
+    "background": "#000000"
+   }
+  ],
+  "row_spans": [
+   {
+    "row": 0,
+    "column": 0,
+    "style_id": 0,
+    "text": "Here are the steps:"
+   },
+   {
+    "row": 1,
+    "column": 0,
+    "style_id": 0,
+    "text": "1. first thing"
+   },
+   {
+    "row": 2,
+    "column": 0,
+    "style_id": 0,
+    "text": "2. second thing"
+   },
+   {
+    "row": 4,
+    "column": 0,
+    "style_id": 0,
+    "text": "────────────────────────────────────────────────────────────────────────────────"
+   },
+   {
+    "row": 5,
+    "column": 1,
+    "style_id": 0,
+    "text": "☐ Approach"
+   },
+   {
+    "row": 7,
+    "column": 0,
+    "style_id": 0,
+    "text": "Which approach should I take?"
+   },
+   {
+    "row": 9,
+    "column": 2,
+    "style_id": 2,
+    "text": "1. Small patch"
+   },
+   {
+    "row": 10,
+    "column": 5,
+    "style_id": 0,
+    "text": "Touch one file only"
+   },
+   {
+    "row": 11,
+    "column": 0,
+    "style_id": 1,
+    "text": "❯ 2. Refactor"
+   },
+   {
+    "row": 12,
+    "column": 5,
+    "style_id": 0,
+    "text": "Restructure the module"
+   },
+   {
+    "row": 13,
+    "column": 2,
+    "style_id": 2,
+    "text": "3. Type something."
+   },
+   {
+    "row": 14,
+    "column": 0,
+    "style_id": 0,
+    "text": "────────────────────────────────────────────────────────────────────────────────"
+   },
+   {
+    "row": 15,
+    "column": 2,
+    "style_id": 2,
+    "text": "4. Chat about this"
+   },
+   {
+    "row": 17,
+    "column": 0,
+    "style_id": 0,
+    "text": "Enter to select · ↑/↓ to navigate · Esc to cancel"
+   }
+  ],
+  "cursor": {
+   "row": 17,
+   "column": 0,
+   "visible": false
+  }
+ }
+}

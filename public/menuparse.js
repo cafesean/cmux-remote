@@ -343,8 +343,95 @@
       : { kind: 'shell', why: 'shell prompt below any agent box', seq: grid.state_seq };
   }
 
+  // ---- numbered selector (p41 A14) -------------------------------------------------------------
+  //
+  // The OTHER menu Claude Code draws: permission prompts ("Do you want to proceed? ❯ 1. Yes 2. …")
+  // and the AskUserQuestion selector. The PWA picks one by tapping the row (app.js tryMenuClick):
+  // the `❯` marker row is the highlight, item order = arrow steps, then Enter. This is the same rule
+  // over a grid, so the bridge can offer the same picks — tighter than the tap path in two ways,
+  // because nobody is looking at the screen when the bridge reads it:
+  //   - items must be numbered 1..n CONSECUTIVELY around the marked row (numbered prose above the
+  //     prompt cannot shift the index), with at most NUM_MAX_GAP non-item rows (descriptions,
+  //     a separator rule) between two items;
+  //   - exactly one item carries the marker, and only the bottom `tailRows` grid rows are looked at.
+  const NUM_ITEM_RE = new RegExp('^\\s*([' + MARKER_GLYPHS + ']?)\\s*(\\d{1,2})[.)]\\s+(\\S.*)$');
+  const NUM_MAX_GAP = 3;
+  const NUM_MIN_ITEMS = 2;
+  const NUM_TEXT_MAX = 200;
+
+  function parseNumberedMenu(grid, opts) {
+    if (!grid || !spansOf(grid)) return null;
+    const tailRows = (opts && opts.tailRows) || 40;
+    const all = buildRows(grid).rows;
+    if (!all.length) return null;
+    const bottom = Math.max(all[all.length - 1].row, (grid.rows || 0) - 1);
+    const rows = all.filter((r) => r.row > bottom - tailRows);
+    const info = rows.map((r) => {
+      const m = NUM_ITEM_RE.exec(r.trimmed);
+      return m ? { marked: !!m[1], n: Number(m[2]), text: m[3].trim().replace(/\s+/g, ' ') } : null;
+    });
+    let at = -1;
+    for (let i = info.length - 1; i >= 0; i--) if (info[i] && info[i].marked) { at = i; break; }
+    if (at < 0) return null;                                  // no live highlight -> not a selector
+    const picked = [{ i: at, ...info[at] }];
+    // Walk outward for n-1, n-2 … 1 above and n+1 … below; anything else numbered stops the walk.
+    const walk = (dir, want, stopAt) => {
+      let gap = 0;
+      for (let i = picked[dir < 0 ? 0 : picked.length - 1].i + dir; i >= 0 && i < info.length; i += dir) {
+        const it = info[i];
+        if (it) {
+          if (it.n !== want) return;
+          if (dir < 0) picked.unshift({ i, ...it }); else picked.push({ i, ...it });
+          if (want === stopAt) return;
+          want += dir; gap = 0;
+        } else if (rows[i].isBlank && dir > 0) {
+          return;                                             // a blank row ends the menu below it
+        } else if (++gap > NUM_MAX_GAP) return;
+      }
+    };
+    if (info[at].n > 1) walk(-1, info[at].n - 1, 1);
+    walk(1, info[at].n + 1, -1);
+    if (picked[0].n !== 1 || picked.length < NUM_MIN_ITEMS) return null;
+    if (picked.filter((p) => p.marked).length !== 1) return null;
+    let question = '';
+    for (let i = picked[0].i - 1; i >= 0 && i >= picked[0].i - 4; i--) {
+      const r = rows[i];
+      if (r.isBlank || r.isRuleish) continue;
+      question = r.trimmed.trim().replace(/\s+/g, ' ').replace(/^[│|]\s*|\s*[│|]$/g, '').slice(0, NUM_TEXT_MAX);
+      break;
+    }
+    return {
+      question,
+      items: picked.map((p) => ({ text: p.text.replace(/\s*[│|]$/, '').slice(0, NUM_TEXT_MAX), number: p.n, startRow: rows[p.i].row })),
+      markedIndex: picked.findIndex((p) => p.marked),
+      signal: 'marker',
+    };
+  }
+
+  /** The exact keys the PWA sends to pick item `i` (tryMenuClick / commitMenuPick): arrows, then Enter. */
+  function pickKeys(menu, i) {
+    const steps = stepsTo(menu, i);
+    return steps ? steps.concat('enter') : null;
+  }
+
+  /**
+   * menuChoice(grid) -> null | {question, options:[{label, send:{keys}}], menu}
+   * The numbered selector (what a waiting session shows); with opts.slash also the slash/@
+   * completion menu, which is the operator typing, not the session asking — so off by default.
+   */
+  function menuChoice(grid, opts) {
+    const menu = parseNumberedMenu(grid, opts) || (opts && opts.slash ? parseMenu(grid) : null);
+    if (!menu) return null;
+    return {
+      question: menu.question || '',
+      options: menu.items.map((it, i) => ({ label: it.text, send: { keys: pickKeys(menu, i) } })),
+      markedIndex: menu.markedIndex,
+    };
+  }
+
   return {
     parseMenu, stepsTo, paneKind, buildRows, defaultBackground,
+    parseNumberedMenu, pickKeys, menuChoice,
     _internals: { candidateRun, groupItems, markedIndex, looksMultiColumn, rowIsMultiCandidate },
   };
 });
