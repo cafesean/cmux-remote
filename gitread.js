@@ -36,6 +36,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 // ONE require of the untouched p7 module, not two: every pure export gitread borrows arrives here.
 const { GitPanelError, validatePathspec, isInside, shellQuote, DIFF_MAX_BYTES } = require('./gitpanel');
+const { redactDeniedDiff } = require('./lib/secret-diff');
 const { GIT_BIN } = require('./lib/gitcmd');
 const { parseStatusZ, parseBranchHeader, parseWorktreePorcelain } = require('./lib/gitporcelain');
 
@@ -1181,14 +1182,16 @@ function createGitRead(opts) {
     // The only rule-3 flags that stay at a call site, because they are SUBCOMMAND flags and not
     // `-c` overrides. BOTH are required: measured, `--no-ext-diff` alone still runs a
     // .gitattributes-selected textconv, and neither alone touches the filter drivers.
-    const args = ['diff', '--no-color', '--no-ext-diff', '--no-textconv'];
+    // S2-0b: fixed a/ b/ prefixes so the redaction can parse headers whatever diff.noprefix says.
+    const args = ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
     if (staged) args.push('--cached');
     args.push('--', p);
     const r = await withSlot(() => spawnGit(t.top, args, { timeoutMs: 15000, env: pinEnv(t) }));
     if (!r.ok) return { error: 'git_failed', detail: r.stderr.slice(0, 300) };
-    const full = r.stdout || '';
+    // S2-0b: a credential file's diff never leaves the Mac, whatever the pathspec widened to.
+    const { diff: full, redacted } = redactDeniedDiff(r.stdout || '', t.top, homedirFn());
     const truncated = full.length > DIFF_MAX_BYTES;
-    return { repo: t.top, path: p, staged: !!staged, diff: truncated ? full.slice(0, DIFF_MAX_BYTES) : full, truncated, bytes: full.length };
+    return { repo: t.top, path: p, staged: !!staged, diff: truncated ? full.slice(0, DIFF_MAX_BYTES) : full, truncated, bytes: full.length, redacted };
   }
 
   // ---- generated command text (specs.md §5.4, §6.1) ------------------------------------------

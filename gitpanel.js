@@ -19,6 +19,7 @@ const path = require('path');
 const { realpath } = require('fs/promises');
 const { gitIn, gitTest, mapLimit } = require('./lib/gitcmd');
 const { parseStatusZ, parseBranchHeader, parseWorktreePorcelain } = require('./lib/gitporcelain');
+const { redactDeniedDiff } = require('./lib/secret-diff');
 
 const DIFF_MAX_BYTES = 256 * 1024;
 const MAX_PATHS_PER_WRITE = 200;
@@ -189,14 +190,16 @@ function createGitPanel(opts = {}) {
   async function diff(repo, rel, staged) {
     const dir = await assertRepo(repo);
     const p = validatePathspec(rel);
-    const args = ['diff', '--no-color'];
+    // fixed a/ b/ prefixes: S2-0b parses the headers, and diff.noprefix/mnemonicPrefix would change them
+    const args = ['diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/'];
     if (staged) args.push('--cached');
     args.push('--', p);
     const r = await run(dir, args, { timeoutMs: 15000 });
     if (!r.ok) return { error: 'git_failed', detail: r.stderr.slice(0, 300) };
-    const full = r.stdout || '';
+    // S2-0b: a credential file's diff never leaves the Mac, whatever the pathspec widened to.
+    const { diff: full, redacted } = redactDeniedDiff(r.stdout || '', dir, opts.homedir);
     const truncated = full.length > DIFF_MAX_BYTES;
-    return { repo: dir, path: p, staged: !!staged, diff: truncated ? full.slice(0, DIFF_MAX_BYTES) : full, truncated, bytes: full.length };
+    return { repo: dir, path: p, staged: !!staged, diff: truncated ? full.slice(0, DIFF_MAX_BYTES) : full, truncated, bytes: full.length, redacted };
   }
 
   // ---- writes: exactly two, both index-only -------------------------------------------------
