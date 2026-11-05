@@ -36,6 +36,7 @@ const { normalizeLayout } = require('./panelayout');
 const PORT = Number(process.env.BRIDGE_PORT || 8799);
 const HOST = process.env.BRIDGE_HOST || '127.0.0.1';
 const SECRET = process.env.BRIDGE_SECRET || '';
+const { safeEqual } = require('./lib/safe-equal');
 // p19: BRIDGE_SOCKET set → listen on that UNIX socket and open NO TCP port. On a shared Mac any user
 // can bind a free loopback port before we do and collect BRIDGE_SECRET from the server; a socket in a
 // 0700 directory of ours cannot be bound or reached by them. A bad value refuses to start here, before
@@ -2064,7 +2065,7 @@ function cmuxNotifications(res) {
 
 // ---------- routing ---------------------------------------------------------
 function handleCmux(req, res) {
-  if (SECRET && req.headers['x-bridge-secret'] !== SECRET) return send(res, 403, { error: 'forbidden' });
+  if (SECRET && !safeEqual(req.headers['x-bridge-secret'], SECRET)) return send(res, 403, { error: 'forbidden' });
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { return send(res, 400, { error: 'bad_url' }); }
   const p = u.pathname;
   // tmux has no browser surfaces: say so plainly (the page hides these from capabilities anyway)

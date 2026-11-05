@@ -10,6 +10,7 @@
 // injected. Same shape as fsbrowse.js, which exists for the same reason.
 
 const path = require('path');
+const { isDeniedPath } = require('./lib/secret-paths');
 
 const MAX_CANDIDATES = 60;
 // Never descend into these. They are the reason a recursive design would be unusable, and they are
@@ -86,12 +87,17 @@ function createCompletions(opts = {}) {
   const readdir = opts.readdir || require('fs/promises').readdir;
   const homedir = opts.homedir || require('os').homedir();
   const readFile = opts.readFile || require('fs/promises').readFile;
+  const realpath = opts.realpath || require('fs/promises').realpath;
   const now = opts.now || Date.now;
 
   // ---- @ : files and directories, one readdir deep ---------------------------------------------
   async function files(cwd, body) {
     const { dir, prefix } = splitSegment(body);
     const abs = safeJoin(cwd, dir || '.');
+    // S2-0: resolve links first, then keep credential paths out of `@` suggestions.
+    let real = abs;
+    try { real = await realpath(abs); } catch (_) { /* readdir below reports a missing dir */ }
+    if (isDeniedPath(real, homedir)) return [];
     let entries;
     try { entries = await readdir(abs, { withFileTypes: true }); }
     catch (e) { throw new CompletionError(e && e.code === 'ENOENT' ? 'not_found' : 'unreadable'); }
@@ -100,6 +106,7 @@ function createCompletions(opts = {}) {
     for (const e of entries) {
       const name = e.name;
       if (IGNORE_DIRS.has(name)) continue;
+      if (isDeniedPath(path.join(real, name), homedir)) continue;
       if (lower && !name.toLowerCase().startsWith(lower)) continue;
       const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : !!e.isDirectory;
       out.push({ text: dir + name + (isDir ? '/' : ''), kind: isDir ? 'dir' : 'file' });

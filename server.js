@@ -32,6 +32,7 @@ const { pipeline } = require('stream/promises');
 const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || process.env.SERVER_HOST || '127.0.0.1';
 const SERVER_TOKEN = process.env['SERVER_TOKEN'] || '';
+const { safeEqual } = require('./lib/safe-equal');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 // p19: SERVER_SOCKET set → listen on that UNIX socket and open NO TCP port, so no other local user
 // can bind the endpoint first and collect SERVER_TOKEN from the tunnel. A bad value refuses to start
@@ -307,7 +308,7 @@ function authed(req, u) {
   const bearer = h.startsWith('Bearer ') ? h.slice(7) : '';
   const alt = req.headers['x-app-token'] || '';
   const q = u.searchParams.get('token') || '';   // for EventSource, which can't set headers
-  return bearer === SERVER_TOKEN || alt === SERVER_TOKEN || q === SERVER_TOKEN
+  return safeEqual(bearer, SERVER_TOKEN) || safeEqual(alt, SERVER_TOKEN) || safeEqual(q, SERVER_TOKEN)
     || !!(pairing.verifyKey(bearer) || pairing.verifyKey(alt) || pairing.verifyKey(q));   // p41 device key
 }
 

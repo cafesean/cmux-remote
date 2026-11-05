@@ -25,6 +25,7 @@
 // naming anything else is refused rather than obeyed. This is the only place the "never two
 // writers" law can actually be enforced, because it is the only place that runs at dispatch time.
 const { resolveRoute } = require('./eligibility');
+const { safeEqual } = require('../lib/safe-equal');
 
 const ERRORS = {
   DISABLED: 'dispatch_disabled',
@@ -111,7 +112,7 @@ function createDispatcher(deps) {
         };
       }
       const token = d.authorityToken ? await d.authorityToken() : null;
-      if (!token || body.authorityToken !== token) {
+      if (!token || !safeEqual(body.authorityToken, token)) {
         return { status: 403, payload: { error: ERRORS.AUTHORITY, detail: 'operator authority token missing or wrong' } };
       }
     }

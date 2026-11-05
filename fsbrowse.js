@@ -17,6 +17,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const { isDeniedPath } = require('./lib/secret-paths');
 
 const MAX_PATH_LEN = 4096;
 const MAX_DEPTH = 64;              // defensive stop for pathological firmlink chains that survive realpath
@@ -26,7 +27,7 @@ const ROOTS_TTL = 30000;
 
 const ERR_STATUS = {
   bad_path: 400, not_a_dir: 400, not_a_file: 400, too_deep: 400,
-  outside_root: 403, tcc_denied: 403,
+  outside_root: 403, tcc_denied: 403, denied: 403,
   not_found: 404, read_failed: 500,
 };
 
@@ -211,6 +212,7 @@ function imageDataUri(file) {
 }
 
 function createFsBrowse(opts = {}) {
+  const homedir = opts.homedir || os.homedir();
   const rootsSpec = opts.rootsSpec != null ? opts.rootsSpec : (process.env.FS_ROOTS || 'workspace-cwds');
   const workspaceCwds = opts.workspaceCwds || (async () => []);
   const readMax = Number(opts.readMax || process.env.FS_READ_MAX || 1048576);
@@ -249,8 +251,12 @@ function createFsBrowse(opts = {}) {
     let real;
     try { real = await fsp.realpath(rawPath); } catch (e) { mapErrno(e); }
     if (real.split(path.sep).filter(Boolean).length > MAX_DEPTH) fail('too_deep');
-    for (const r of await _resolvedRoots()) if (within(r, real)) return real;
-    fail('outside_root');
+    let inside = false;
+    for (const r of await _resolvedRoots()) if (within(r, real)) { inside = true; break; }
+    if (!inside) fail('outside_root');
+    // S2-0: credential paths stay out even inside a root (checked on the realpath, so links can't dodge it).
+    if (isDeniedPath(real, homedir)) fail('denied');
+    return real;
   }
 
   // Landing screen. Configured roots first; then the well-known places, but ONLY those that are
@@ -262,7 +268,7 @@ function createFsBrowse(opts = {}) {
     const out = [];
     const seen = new Set();
     const push = (kind, label, p) => {
-      if (!p || seen.has(p)) return;
+      if (!p || seen.has(p) || isDeniedPath(p, homedir)) return;
       seen.add(p);
       out.push({ kind, label, path: p });
     };
@@ -303,6 +309,9 @@ function createFsBrowse(opts = {}) {
     // Filter after the cache, never before — one cached readdir serves both toggle states.
     const showHidden = opts.hidden !== false;
     if (!showHidden) names = names.filter((e) => !e.name.startsWith('.'));
+    // S2-0: never show credential paths. Lexical on the realpath'd dir; a symlink entry that points
+    // into one is still refused by the jail on open.
+    names = names.filter((e) => !isDeniedPath(path.join(dir, e.name), homedir));
 
     const total = names.length;
     const lim = Math.min(Math.max(1, Math.trunc(Number(limit)) || 200), pageMax);
