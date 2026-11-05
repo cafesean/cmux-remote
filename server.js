@@ -40,7 +40,10 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // here, before anything is bound — never a silent fall back to TCP. Unset = TCP exactly as before.
 const unixListen = require('./lib/unix-listen');
 // p41: QR pairing. Device keys are an equal credential to SERVER_TOKEN (see authed below).
-const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '' });
+// D40: /api/pair/hello names the machine on this Mac (unix: socket or loopback http bridge), read per
+// request because MACHINES is built below.
+const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '',
+  localMachine: () => { const m = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl)); return m ? m.id : null; } });
 const { parseUnixBaseUrl, unixFetch } = require('./lib/unix-fetch');
 let SERVER_SOCKET = '';
 try { SERVER_SOCKET = unixListen.socketSetting('SERVER_SOCKET', process.env, emptyShadowed); }
