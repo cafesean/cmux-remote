@@ -22,6 +22,8 @@ One terminal, agent or browser surface on one machine.
   the tab title only when it is not a process/wrapper/shell/prompt title (`cswap`, `zsh`, `user@host:~`).
   The id never depends on the title, the account, the Claude config dir or the wrapper. One transcript
   sessionId is one row: a tmux session also shown by a cmux surface is listed once, as the cmux surface.
+- `aliases`: optional string[]. Ids of rows this one replaced (same transcript session, e.g. a tmux-only row
+  and the cmux surface attached to it). The app moves pins and unread state from an alias id to this id.
 - `status`: one of `needs-you` (waiting on a person), `working`, `finished`, `idle`, `your-turn` (the
   agent replied and the next move is yours).
 - `preview`: string. One short line of the latest activity.

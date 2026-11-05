@@ -148,7 +148,7 @@ function createSessionRoutes(deps) {
     // pane closed) are listed too, under a `tmux` workspace, so they never silently drop off the list.
     if (backend === 'cmux') {
       let orphans = [];
-      try { orphans = await procs.orphanTmuxTabs(new Set(out.map((x) => x.tab.id)), { home, procSnapshot: sharedSnapshot }); } catch (_) { orphans = []; }
+      try { orphans = await procs.orphanTmuxTabs(new Set(out.map((x) => x.tab.id)), { liveTtys: out.map((x) => x.tab.tty).filter(Boolean), home, procSnapshot: sharedSnapshot }); } catch (_) { orphans = []; }
       const tw = { ref: 'tmux', id: 'tmux', title: 'tmux', tabs: orphans };
       for (const t of orphans) out.push({ ws: tw, tab: t });
     }
@@ -253,16 +253,20 @@ function createSessionRoutes(deps) {
     // (attach client) can also surface as a tmux-only orphan; keep the cmux surface entry (it takes
     // input best), else the first. Keyed by the transcript sessionId, never by surface/title.
     const keep = new Map();
+    const keyOf = (r) => r.session.kind === 'claude' && r.join && r.join.sessionId;
     for (const r of results) {
-      const k = r.session.kind === 'claude' && r.join && r.join.sessionId;
+      const k = keyOf(r);
       if (!k) continue;
       const cur = keep.get(k);
       if (!cur || (cur.session.reach !== 'cmux' && r.session.reach === 'cmux')) keep.set(k, r);
     }
-    const sessions = results.filter((r) => {
-      const k = r.session.kind === 'claude' && r.join && r.join.sessionId;
-      return !k || keep.get(k) === r;
-    }).map((r) => r.session);
+    // The survivor lists the ids it replaced (aliases), so the app can move pins and unread to it.
+    for (const r of results) {
+      const k = keyOf(r);
+      const w = k && keep.get(k);
+      if (w && w !== r) (w.session.aliases = w.session.aliases || []).push(r.session.id);
+    }
+    const sessions = results.filter((r) => { const k = keyOf(r); return !k || keep.get(k) === r; }).map((r) => r.session);
     send(res, 200, { machineId, sessions });
   }
 

@@ -103,4 +103,27 @@ test('dedupe: one tmux session + one cmux surface attached to it + same transcri
   assert.equal(l.sessions[0].surface, 'surface:264');
   assert.equal(l.sessions[0].title, 'x-chief-1103');
   assert.equal(l.sessions[0].reach, 'cmux');
+  assert.deepEqual(l.sessions[0].aliases, ["mini:" + orphan.id]);
+});
+
+test('orphanTmuxTabs: a tmux session a cmux surface is attached to (client tty) is never an orphan, claude or not', async () => {
+  const table = procs.parsePs([' 10 1 -zsh', ' 11 10 claude --resume', ' 20 1 -zsh', ' 21 20 codex'].join('\n'));
+  const mkSession = (name, pid, tty) => ({ socket: '/s', name, attached: tty ? 1 : 0, epoch: 1, created: 1, surfaceId: null, clientTtys: tty ? [tty] : [],
+    panes: [{ id: name === 'c' ? '%1' : name === 'x' ? '%2' : '%3', pid, active: true, cwd: '/w' }] });
+  const snap = { table, sessions: [mkSession('c', 10, 'ttys007'), mkSession('x', 20, 'ttys008'), mkSession('free', 10, null)] };
+  const tabs = await procs.orphanTmuxTabs(new Set(['surface:1', 'surface:2']), { liveTtys: ['/dev/ttys007', 'ttys008'], procSnapshot: async () => snap });
+  assert.deepEqual(tabs.map((t) => t.title), ['free']);   // 'c' (claude) and 'x' (codex, no join) are shown by their surfaces
+});
+
+test('stale pid file in a swap dir (written before the process began) does not bind; newest valid wins', async () => {
+  const files = {
+    '/h/.claude/sessions/9.json': { pid: 9, sessionId: 'new', cwd: '/w', startedAt: 2_000_000 },
+    '/h/.claude-swap-backup/sessions/2-a/sessions/9.json': { pid: 9, sessionId: 'stale', cwd: '/w', startedAt: 500_000 },
+  };
+  const d = { home: '/h', readdir: async () => ['2-a'], readFile: async (p) => { if (!files[p]) throw new Error('ENOENT'); return JSON.stringify(files[p]); }, procStartMs: async () => 1_999_000 };
+  assert.equal((await procs.claudeTranscriptOf(9, d)).sessionId, 'new');
+  delete files['/h/.claude/sessions/9.json'];
+  assert.equal(await procs.claudeTranscriptOf(9, d), null);   // only the stale one: refused
+  files['/h/.claude-swap-backup/sessions/2-a/sessions/9.json'].startedAt = 2_000_500;
+  assert.equal((await procs.claudeTranscriptOf(9, d)).sessionId, 'stale');   // valid swap-dir file binds
 });

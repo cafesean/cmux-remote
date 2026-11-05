@@ -23,6 +23,7 @@ const path = require('path');
 const { kindOfCommand } = require('./detect');
 const tmuxCli = require('../lib/tmux-cli');
 const tmuxIds = require('../lib/tmux-ids');
+const { SWAP } = require('./join');
 
 // Every limit this module adds (LIMITS.md rows).
 const LIMITS = {
@@ -32,6 +33,7 @@ const LIMITS = {
   psTimeoutMs: 3000,
   tmuxTimeoutMs: 3000,
   sessionFileMaxBytes: 64 * 1024,
+  pidFileSkewMs: 30 * 1000,  // a pid file may predate its process start by this much (clock/rounding) before it is called stale
   tmuxSubmitSettleMs: 150,   // pause between pasted text and Enter (same paste-burst rule as cmuxSend)
 };
 
@@ -117,11 +119,20 @@ async function tmuxSocketState(tmux, socket) {
     let s = sessions.get(f[0]);
     if (!s) {
       if (sessions.size >= LIMITS.tmuxSessionsMax) continue;
-      s = { socket, name: f[0], attached: Number(f[5]) || 0, epoch: Number(f[6]) || 0, created: Number(f[8]) || 0, panes: [], surfaceId: null };
+      s = { socket, name: f[0], attached: Number(f[5]) || 0, epoch: Number(f[6]) || 0, created: Number(f[8]) || 0, panes: [], surfaceId: null, clientTtys: [] };
       sessions.set(f[0], s);
     }
     s.panes.push({ id: f[1], pid: Number(f[2]), active: f[3] === '1' && f[4] === '1', cwd: f[7] || null });
   }
+  // Client ttys per session (`tmux attach` clients): a session a cmux surface is attached to is shown by it.
+  try {
+    const cl = await tmux(socket, ['list-clients', '-F', ['#{session_name}', '#{client_tty}'].join(SEP)]);
+    for (const line of String(cl || '').split('\n')) {
+      const f = line.split(SEP);
+      const s = f.length >= 2 && sessions.get(f[0]);
+      if (s && f[1]) s.clientTtys.push(f[1].replace(/^\/dev\//, ''));
+    }
+  } catch (_) { /* no clients / old tmux: attached count still stands */ }
   await Promise.all([...sessions.values()].map(async (s) => {
     try {
       const env = await tmux(socket, ['show-environment', '-t', `=${s.name}`, 'CMUX_SURFACE_ID']);
@@ -192,20 +203,32 @@ async function agentFor(surface, deps) {
 async function claudeTranscriptOf(pid, deps) {
   const d = deps || {};
   const home = d.home || os.homedir();
-  // ~/.claude first, then each `cswap run` account dir (its CLAUDE_CONFIG_DIR): the pid file lives
-  // under whichever config dir the process runs with, so the env of the process is never read.
+  // ~/.claude plus each `cswap run` account dir (its CLAUDE_CONFIG_DIR); the process env is never read.
+  // Config: join.SWAP (dir, maxAccounts). The pid file is validated and the newest valid one wins, so a
+  // stale file left by a recycled pid in some other config dir cannot bind the wrong transcript.
   const configDirs = [path.join(home, '.claude')];
   try {
-    const base = path.join(home, '.claude-swap-backup', 'sessions');
-    for (const n of (await (d.readdir || ((p) => fsp.readdir(p)))(base)).slice(0, 64)) configDirs.push(path.join(base, n));
+    const base = path.join(home, ...SWAP.dir);
+    for (const n of (await (d.readdir || ((p) => fsp.readdir(p)))(base)).slice(0, SWAP.maxAccounts)) configDirs.push(path.join(base, n));
   } catch (_) { /* no swap dirs */ }
+  let procStart = null;
+  try { procStart = await (d.procStartMs || defaultProcStartMs)(pid); } catch (_) { procStart = null; }
+  let best = null;
   for (const cfg of configDirs) {
     let j;
     try { j = JSON.parse(await (d.readFile || defaultReadFile)(path.join(cfg, 'sessions', `${Number(pid)}.json`))); } catch (_) { continue; }
     if (!j || Number(j.pid) !== Number(pid) || typeof j.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(j.sessionId) || typeof j.cwd !== 'string') continue;
-    return { sessionId: j.sessionId, transcriptPath: path.join(cfg, 'projects', slugOf(j.cwd), `${j.sessionId}.jsonl`) };
+    const at = Number(j.startedAt) || 0;
+    if (procStart && at && at < procStart - LIMITS.pidFileSkewMs) continue;   // written before this process began: a recycled pid's leftover
+    if (!best || at > best.at) best = { at, sessionId: j.sessionId, transcriptPath: path.join(cfg, 'projects', slugOf(j.cwd), `${j.sessionId}.jsonl`) };
   }
-  return null;
+  return best ? { sessionId: best.sessionId, transcriptPath: best.transcriptPath } : null;
+}
+// `ps -o lstart=` of the live pid -> epoch ms (null when unknown: the check then does not apply).
+async function defaultProcStartMs(pid) {
+  const out = await run('/bin/ps', ['-o', 'lstart=', '-p', String(Number(pid))], LIMITS.psTimeoutMs);
+  const t = Date.parse(String(out).trim());
+  return Number.isFinite(t) ? t : null;
 }
 
 // The tmux session name a surface lives in: a pane id `%N`, or a cmux surface id (its attached
@@ -230,8 +253,11 @@ async function orphanTmuxTabs(liveIds, deps) {
   const snap = await (deps && deps.procSnapshot ? deps.procSnapshot() : snapshot(deps));
   if (!snap || !snap.table) return [];
   const out = [];
+  const liveTtys = new Set([...((deps && deps.liveTtys) || [])].map((t) => String(t).replace(/^\/dev\//, '')));
   for (const s of snap.sessions || []) {
     if (s.surfaceId && liveIds.has(s.surfaceId) && ownerOf(snap.sessions, s.surfaceId) === s) continue;   // shown by that cmux pane
+    // Attached by a cmux surface (its tty is a client tty of this session): that surface is the row.
+    if (liveTtys.size && (s.clientTtys || []).some((t) => liveTtys.has(t))) continue;
     const p = activePane(s);
     if (!p || !findAgent(snap.table, p.pid)) continue;
     const n = Number(String(p.id).slice(1));
