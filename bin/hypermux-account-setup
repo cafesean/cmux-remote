@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# hypermux-account-setup <name> [--replace]
+# Add a named Claude account on this Mac: confirm here, run `claude setup-token`, keep the token off the
+# screen, store it in the login Keychain. The token never touches argv, files or output.
+NAME="${1:-}"; REPLACE="${2:-}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SECURITY="${HYPERMUX_SECURITY_BIN:-/usr/bin/security}"
+NODE="${HYPERMUX_NODE:-node}"
+
+if ! [[ "$NAME" =~ ^[a-z][a-z0-9]{0,5}$ ]] || [ "$NAME" = a ]; then
+  echo "bad account name" >&2; exit 2
+fi
+if [ -n "$REPLACE" ] && [ "$REPLACE" != "--replace" ]; then
+  echo "usage: hypermux-account-setup <name> [--replace]" >&2; exit 2
+fi
+if ! command -v "$NODE" >/dev/null 2>&1; then
+  echo "node not found - set HYPERMUX_NODE or fix PATH" >&2; exit 2
+fi
+# Keychain unlocked? (3 s cap, no GNU timeout)
+if ! perl -e 'alarm 3; exec @ARGV' "$SECURITY" show-keychain-info >/dev/null 2>&1; then
+  echo "this Mac's Keychain is locked — accounts need a logged-in Mac" >&2; exit 2
+fi
+EXISTS=0
+"$SECURITY" find-generic-password -a "$USER" -s "cos-claude-account-$NAME" >/dev/null 2>&1 && EXISTS=1
+if [ "$EXISTS" = 1 ] && [ -z "$REPLACE" ]; then
+  echo "$NAME already exists on this Mac" >&2; exit 1
+fi
+if [ -n "$REPLACE" ]; then VERB=Replace; else VERB=Add; fi
+printf '%s Claude account %s on this Mac? [y/N] ' "$VERB" "$NAME"
+ANS=""; read -r ANS || true
+case "$ANS" in y|Y) ;; *) echo "cancelled"; exit 1;; esac
+
+unset BROWSER
+exec "$NODE" "$HERE/lib/account-setup.js" "$NAME" ${REPLACE:+"$REPLACE"}

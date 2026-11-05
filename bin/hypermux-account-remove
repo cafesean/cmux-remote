@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# hypermux-account-remove <name> — remove a named Claude account from this Mac (confirmed here).
+NAME="${1:-}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SECURITY="${HYPERMUX_SECURITY_BIN:-/usr/bin/security}"
+NODE="${HYPERMUX_NODE:-node}"
+
+if ! [[ "$NAME" =~ ^[a-z][a-z0-9]{0,5}$ ]] || [ "$NAME" = a ]; then
+  echo "bad account name" >&2; exit 2
+fi
+if ! command -v "$NODE" >/dev/null 2>&1; then
+  echo "node not found - set HYPERMUX_NODE or fix PATH" >&2; exit 2
+fi
+if ! perl -e 'alarm 3; exec @ARGV' "$SECURITY" show-keychain-info >/dev/null 2>&1; then
+  echo "this Mac's Keychain is locked — accounts need a logged-in Mac" >&2; exit 2
+fi
+if ! "$SECURITY" find-generic-password -a "$USER" -s "cos-claude-account-$NAME" >/dev/null 2>&1; then
+  echo "no account $NAME on this Mac" >&2; exit 1
+fi
+printf 'Remove %s from this Mac? Chief-of-staff workers on this Mac use it too. Running sessions keep working until they exit. This does not revoke the token — revoke it at claude.ai if it may be exposed. [y/N] ' "$NAME"
+ANS=""; read -r ANS || true
+case "$ANS" in y|Y) ;; *) echo "cancelled"; exit 1;; esac
+
+"$SECURITY" delete-generic-password -a "$USER" -s "cos-claude-account-$NAME" >/dev/null 2>&1
+"$NODE" "$HERE/lib/accounts-meta.js" remove "$NAME" >/dev/null 2>&1
+echo "Removed $NAME"
+sleep "${HYPERMUX_CLOSE_DELAY_S:-5}"
+exit 0
