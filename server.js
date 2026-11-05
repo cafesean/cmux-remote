@@ -24,13 +24,14 @@
 //       accessId/accessSecret (still accepted). Missing var -> no headers + a startup note naming the var.
 //     CMUX_CONFIG     — path to a gitignored JSON file { "machines": [ ... ] } (extends/overrides)
 const { emptyShadowed } = require('./loadenv');
-// p62 S2: HYPERMUX_SECRETS_ON_STDIN=1 -> read the secrets line first, then run this file for real
-// (re-required once loaded, so every const below sees them). Unset -> no-op, today's behaviour.
+// p62 S2: HYPERMUX_SECRETS_ON_STDIN=1 -> read the secrets line first, then run main()
+// (main() runs once loaded, so every const in it sees them). Unset -> no-op, today's behaviour.
 const secretsIn = require('./lib/secrets-stdin');
-if (secretsIn.pending()) {
-  secretsIn.loadSecrets().then(() => { delete require.cache[__filename]; require(__filename); });
-  return;
-}
+// D62: the body is main(), not a top-level `return` + self re-require: `bun build --compile` drops a
+// top-level return (the body ran before the secrets were read, so auth was open). Same order on node.
+if (secretsIn.pending()) secretsIn.loadSecrets().then(main);
+else main();
+function main() {
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -43,7 +44,7 @@ const HOST = process.env.HOST || process.env.SERVER_HOST || '127.0.0.1';
 const SERVER_TOKEN = secretsIn.get('SERVER_TOKEN');
 const { safeEqual } = require('./lib/safe-equal');
 const { redactTokens } = require('./lib/redact-tokens');
-const PUBLIC_DIR = path.join(__dirname, 'public');
+const PUBLIC_DIR = path.join(require('./lib/pkg-root').pkgRoot(), 'public');   // D62: not the baked build path under bun
 // p19: SERVER_SOCKET set → listen on that UNIX socket and open NO TCP port, so no other local user
 // can bind the endpoint first and collect SERVER_TOKEN from the tunnel. A bad value refuses to start
 // here, before anything is bound — never a silent fall back to TCP. Unset = TCP exactly as before.
@@ -1039,3 +1040,4 @@ graceful.install(() => { if (radar) radar.stop(); });
 // D52 defense in depth: an unhandled rejection in one relay must not take every session's send down
 // with it (each crash = a launchd restart = cloudflared 502s). Log the cause (no message, no secret).
 process.on('unhandledRejection', (e) => { try { console.error(`unhandled_rejection ${JSON.stringify({ cause: relayFail.classify(e) })}`); } catch (_) {} });
+}

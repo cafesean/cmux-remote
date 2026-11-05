@@ -23,12 +23,13 @@
 //   BACKEND        cmux (default) | tmux — tmux drives a headless tmux server through lib/tmux-cli.js
 //   TMUX_BIN / TMUX_SOCKET / TMUX_SESSION   the tmux backend's binary, server socket, default session
 const { emptyShadowed } = require('./loadenv');
-// p62 S2: see server.js: stdin secrets first, then this file runs for real. Unset -> no-op.
+// p62 S2: see server.js: stdin secrets first, then main() runs. Unset -> no-op.
 const secretsIn = require('./lib/secrets-stdin');
-if (secretsIn.pending()) {
-  secretsIn.loadSecrets().then(() => { delete require.cache[__filename]; require(__filename); });
-  return;
-}
+// D62: the body is main(), not a top-level `return` + self re-require: `bun build --compile` drops a
+// top-level return (the body ran before the secrets were read, so auth was open). Same order on node.
+if (secretsIn.pending()) secretsIn.loadSecrets().then(main);
+else main();
+function main() {
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
@@ -2321,7 +2322,7 @@ function cmuxNotifications(res) {
 // private "Claude accounts" workspace (S2p gate: the phone can neither see nor type into it), and the
 // person at the Mac confirms there. Every refusal is a code; no stderr, no Keychain output.
 const accountsLib = require('./lib/accounts').createAccounts();
-const ACCOUNT_BIN_DIR = process.env.HYPERMUX_BIN_DIR || path.join(__dirname, 'bin');
+const ACCOUNT_BIN_DIR = process.env.HYPERMUX_BIN_DIR || path.join(require('./lib/pkg-root').pkgRoot(), 'bin');   // D62
 // The pane command is shell-quoted (shq), so spaces are fine — releases live under
 // "~/Library/Application Support/…". Quotes, backslashes and control chars are still refused as a
 // second line of defence (no legitimate install path has them).
@@ -2658,4 +2659,5 @@ if (SOCKET) {
     }
     afterListen();
   });
+}
 }
