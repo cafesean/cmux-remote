@@ -1,0 +1,58 @@
+{
+ "meta": {
+  "note": "SYNTHETIC AskUserQuestion input matching synthetic-review-narrow.grid.json"
+ },
+ "input": {
+  "questions": [
+   {
+    "question": "Sample form 1/3 — which fruit should the demo basket hold first on the plain test day, before lunch?",
+    "header": "Fruit",
+    "multiSelect": false,
+    "options": [
+     {
+      "label": "Apple, crisp and fresh fruit (Recommended)",
+      "description": "A sample description about apples for the test."
+     },
+     {
+      "label": "Pear",
+      "description": "A sample description about pears."
+     }
+    ]
+   },
+   {
+    "question": "Sample form 2/3 — which colour should the demo banner use, given any shade is fine for the plain test page?",
+    "header": "Colour",
+    "multiSelect": false,
+    "options": [
+     {
+      "label": "Blue like a clear summer sky (Recommended)",
+      "description": "Sample text about blue."
+     },
+     {
+      "label": "Green",
+      "description": "Sample text about green."
+     },
+     {
+      "label": "Red",
+      "description": "Sample text about red."
+     }
+    ]
+   },
+   {
+    "question": "Sample form 3/3 — which shape should the demo logo take when it is drawn on the plain welcome card?",
+    "header": "Shape",
+    "multiSelect": false,
+    "options": [
+     {
+      "label": "Circle, auto sized (Recommended)",
+      "description": "Sample text about circles."
+     },
+     {
+      "label": "Square, fixed size",
+      "description": "Sample text about squares."
+     }
+    ]
+   }
+  ]
+ }
+}

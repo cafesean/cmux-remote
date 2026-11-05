@@ -1,0 +1,31 @@
+────────────────────────────────────
+←  ☒ Frui… ☒ Colo… ☒      ✔ Submit →
+                  Shap…
+
+Review your answers
+
+ │ ● Sample form 1/3 — which fruit
+ │   should the demo basket hold
+ │   first on the plain test day,
+ │   before lunch?
+   → Apple, crisp and fresh fruit
+   (Recommended)
+ │ ● Sample form 2/3 — which colour
+ │   should the demo banner use,
+ │   given any shade is fine for
+ │   the plain test page?
+   → Blue like a clear summer sky
+   (Recommended)
+ │ ● Sample form 3/3 — which shape
+ │   should the demo logo take
+ │   when it is drawn on the plain
+ │   welcome card?
+   → Circle, auto sized
+   (Recommended)
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+─────────────────── sample-pane-01 ─
+

@@ -1,7 +1,7 @@
 'use strict';
 // p41 A17 — askForm: answer a multi-question / multi-select AskUserQuestion (sessions/choice.js).
-// Fixtures: test/fixtures/askform/live-* are READ-ONLY live captures (x-example-hub1 review step + its
-// transcript input). The question tabs are HAND-BUILT below from Claude Code's selector layout
+// Fixtures: test/fixtures/askform/synthetic-* = invented text on the geometry of a read-only live capture
+// of a review step. The question tabs are HAND-BUILT below from Claude Code's selector layout
 // (test/fixtures/grids/a14-ask.json) plus the tab bar seen live — the fake terminal renders them.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,8 +14,8 @@ LIMITS.choiceReadbackPollMs = 1;
 LIMITS.askFormStepTimeoutMs = 60;
 
 const FIX = path.join(__dirname, 'fixtures', 'askform');
-const live = JSON.parse(fs.readFileSync(path.join(FIX, 'live-form-input.json'), 'utf8')).input;
-const reviewGrid = JSON.parse(fs.readFileSync(path.join(FIX, 'live-review-narrow.grid.json'), 'utf8')).grid;
+const live = JSON.parse(fs.readFileSync(path.join(FIX, 'synthetic-form-input.json'), 'utf8')).input;
+const reviewGrid = JSON.parse(fs.readFileSync(path.join(FIX, 'synthetic-review-narrow.grid.json'), 'utf8')).grid;
 
 // Transcript messages exactly as transcript-claude.js emits them for one AskUserQuestion tool_use.
 const msgsOf = (input, uuid = 'u1:0') => input.questions.map((q, k) => ({
@@ -117,9 +117,9 @@ test('askForm shape: N questions of one pending AskUserQuestion, stable choiceId
   assert.match(current.choiceId, /^[0-9a-f]{16}$/);
   assert.deepEqual(current.options, []);
   assert.equal(current.questions.length, 3);
-  assert.deepEqual(current.questions[2], { header: 'Signer!', question: live.questions[2].question, multiSelect: false, options: [
-    { label: 'Yes, auto in step 1 (Recommended)', description: live.questions[2].options[0].description },
-    { label: 'Manual for now', description: live.questions[2].options[1].description }] });
+  assert.deepEqual(current.questions[2], { header: 'Shape', question: live.questions[2].question, multiSelect: false, options: [
+    { label: 'Circle, auto sized (Recommended)', description: live.questions[2].options[0].description },
+    { label: 'Square, fixed size', description: live.questions[2].options[1].description }] });
   const again = await setup(live);
   assert.equal(again.current.choiceId, current.choiceId);
   const other = await setup({ questions: [live.questions[0], { ...live.questions[1], question: 'changed' }, live.questions[2]] });
@@ -136,7 +136,7 @@ test('askForm only for the trailing tool_use; single single-select question stay
   assert.equal(await r.choiceFor({ status: 'working', surface: 'S1', lastMsgs: msgsOf(live) }), null);
 });
 
-test('LIVE review fixture (x-example-hub1, 36 cols): located as the review step with every answer readable', () => {
+test('review fixture (synthetic text on live 36-col geometry): located as the review step with every answer readable', () => {
   const qs = askFormOf(msgsOf(live)).questions;
   const at = formAt(reviewGrid, qs);
   assert.equal(at.review, true);
@@ -144,7 +144,7 @@ test('LIVE review fixture (x-example-hub1, 36 cols): located as the review step 
   assert.deepEqual(at.menu.items.map((i) => i.text), ['Submit answers', 'Cancel']);
   assert.equal(at.menu.markedIndex, 0);
   for (const q of qs) assert.ok(at.reviewText.includes(q.options[0].label.replace(/\s+/g, '')), q.header);
-  assert.ok(!at.reviewText.includes('Manualfornow'));
+  assert.ok(!at.reviewText.includes('Square,fixedsize'));
 });
 
 test('planAnswers: every question once, single = one pick, Other text checked, no control chars', () => {
@@ -166,7 +166,7 @@ test('choose drives N questions with readback, then verifies the review and subm
     answers: [{ q: 0, picks: [1] }, { q: 1, picks: [2] }, { q: 2, picks: [0] }] }, f.io);
   assert.deepEqual(res, { code: 200, body: { ok: true } });
   assert.equal(f.s.submitted, true);
-  assert.deepEqual(f.s.answers, ['Separate database', 'One group for all', 'Yes, auto in step 1 (Recommended)']);
+  assert.deepEqual(f.s.answers, ['Pear', 'Red', 'Circle, auto sized (Recommended)']);
   assert.deepEqual(f.s.keys, ['down', 'enter', 'down', 'down', 'enter', 'enter', 'enter']);
 });
 
@@ -208,7 +208,7 @@ test('a key that does nothing -> 409 no_confirmation, never submitted', async ()
 
 test('review not showing an answer -> 409 at review, Submit never pressed', async () => {
   const { f, r, current } = await setup(live, { onKey: (k, s) => {
-    if (s.tab === 2 && k === 'enter') { s.answers[2] = 'Manual for now'; s.tab = 3; s.seq++; return 'swallow'; }
+    if (s.tab === 2 && k === 'enter') { s.answers[2] = 'Square, fixed size'; s.tab = 3; s.seq++; return 'swallow'; }
     return null;
   } });
   const res = await r.commitForm({ current, choiceId: current.choiceId, surface: 'S1',
