@@ -85,3 +85,14 @@ test('CLI get-fp / set / remove and validation', () => {
   assert.strictEqual(r.status, 0);
   assert.strictEqual(cli(file, 'get-fp', 'acme').stdout, '');
 });
+
+test('corrupt file: set/remove refuse (exit 2) and leave file untouched', () => {
+  const { file } = tmp();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{"acme":{"fp":"abcdef012345"');
+  const before = fs.readFileSync(file, 'utf8');
+  assert.strictEqual(cli(file, 'set', 'other', '--fp', '0123456789ab').status, 2);
+  assert.strictEqual(cli(file, 'remove', 'acme').status, 2);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
+  assert.strictEqual(fs.existsSync(file + '.lock'), false);
+});

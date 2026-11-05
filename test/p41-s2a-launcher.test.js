@@ -13,7 +13,7 @@ const OVR = path.join(ROOT, 'lib', 'settings-override.js');
 const TOKEN = 'sk-ant-oat01-testXXXXXXXXXXXXYYYYYYYYYYYYXXXXXXXXXXXXYYYY';
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
-function rig({ token = TOKEN, locked = false } = {}) {
+function rig({ token = TOKEN, locked = false, hang = false } = {}) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 's2a-l-'));
   const home = path.join(d, 'home'); const cwd = path.join(d, 'proj');
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
@@ -21,8 +21,9 @@ function rig({ token = TOKEN, locked = false } = {}) {
   const sec = path.join(d, 'security');
   fs.writeFileSync(sec, `#!/bin/bash
 case "$1" in
-  show-keychain-info) ${locked ? 'exit 36' : 'exit 0'} ;;
-  find-generic-password) ${token === null ? 'exit 44' : `printf '%s\\n' '${token}'`} ;;
+  show-keychain-info) ${hang ? 'sleep 5; exit 0' : locked ? 'exit 36' : 'exit 0'} ;;
+  find-generic-password) [ "$*" = "find-generic-password -a tester -s cos-claude-account-acme -w" ] || exit 44
+    ${token === null ? 'exit 44' : `printf '%s\\n' '${token}'`} ;;
 esac
 `, { mode: 0o755 });
   const claude = path.join(d, 'claude');
@@ -182,4 +183,49 @@ test('hooks: cmux inject-settings output passed as --settings, 0600; silent outs
   assert.ok(o.cmuxPid);
   assert.strictEqual(fs.statSync(o.argv[1]).mode & 0o777, 0o600);
   noToken(res);
+});
+
+test('hooks cmux CLI runs before the token is exported (token absent from its env)', () => {
+  const r = rig();
+  const cmux = path.join(r.d, 'cmux'); const rec = path.join(r.d, 'rec');
+  fs.writeFileSync(cmux, `#!/bin/bash
+[ -n "\${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo present >"${rec}" || echo absent >"${rec}"
+echo '{"hooks":{"Stop":[]}}'
+`, { mode: 0o755 });
+  const res = run(r, ['acme'], { CMUX_SURFACE_ID: 's1', CMUX_BUNDLED_CLI_PATH: cmux });
+  assert.strictEqual(res.status, 0, res.stderr);
+  assert.strictEqual(fs.readFileSync(rec, 'utf8').trim(), 'absent');
+  assert.strictEqual(JSON.parse(res.stdout).hasToken, true);
+});
+
+test('hung show-keychain-info -> exit 2 within ~4s', () => {
+  const r = rig({ hang: true });
+  const t0 = Date.now();
+  const res = run(r, ['acme']);
+  assert.strictEqual(res.status, 2);
+  assert.ok(Date.now() - t0 < 4500, 'took too long');
+  assert.match(res.stderr, /Keychain is locked/);
+});
+
+test('node missing -> exit 2 (fail closed)', () => {
+  const r = rig();
+  const res = run(r, ['acme'], { HYPERMUX_NODE: path.join(r.d, 'no-such-node') });
+  assert.strictEqual(res.status, 2);
+  assert.strictEqual(res.stdout.includes('hasToken'), false);
+});
+
+test('node crashes on override check -> exit 2', () => {
+  const r = rig();
+  const bad = path.join(r.d, 'badnode'); fs.writeFileSync(bad, '#!/bin/bash\nexit 1\n', { mode: 0o755 });
+  const res = run(r, ['acme'], { HYPERMUX_NODE: bad });
+  assert.strictEqual(res.status, 2);
+  assert.strictEqual(res.stdout.includes('hasToken'), false);
+});
+
+test('meta write failure (unwritable path) -> exit 2, claude not run', () => {
+  const r = rig();
+  const blocker = path.join(r.d, 'blocker'); fs.writeFileSync(blocker, 'x');
+  const res = run(r, ['acme'], { HYPERMUX_ACCOUNTS_FILE: path.join(blocker, 'accounts.json') });
+  assert.strictEqual(res.status, 2);
+  assert.strictEqual(res.stdout.includes('hasToken'), false);
 });
