@@ -2034,13 +2034,10 @@ function cmuxBrowserInfo(res, surface) {
 // terminal.replay (the cadence lesson above); a byte cap (BROWSER_SHOT_MAX_BYTES, 413) bounds the reply.
 const BROWSER_SHOT_MIN_MS = Math.max(0, Number(process.env.BROWSER_SHOT_MIN_MS) || 1500);
 const BROWSER_SHOT_MAX_BYTES = Math.max(1, Number(process.env.BROWSER_SHOT_MAX_BYTES) || 1536 * 1024);
-const browserShotLast = new Map();   // surface -> Date.now() of the last accepted one-shot
+const browserShotLimiter = require('./lib/shot-limiter').createShotLimiter({ minMs: BROWSER_SHOT_MIN_MS });
 function cmuxBrowserShot(res, surface) {
-  const now = Date.now();
-  const last = browserShotLast.get(surface);
-  if (last != null && now - last < BROWSER_SHOT_MIN_MS) return send(res, 429, { error: 'rate_limited', retryMs: BROWSER_SHOT_MIN_MS - (now - last) });
-  browserShotLast.set(surface, now);
-  if (browserShotLast.size > 256) browserShotLast.delete(browserShotLast.keys().next().value);
+  const gate = browserShotLimiter.take(surface);
+  if (!gate.ok) return send(res, 429, { error: 'rate_limited', retryMs: gate.retryMs });
   browserShot(surface).then((shot) => {
     if (!shot || !shot.buf || !shot.buf.length) return send(res, 502, { error: 'cmux_failed' });
     if (shot.buf.length > BROWSER_SHOT_MAX_BYTES) return send(res, 413, { error: 'too_large', limit: BROWSER_SHOT_MAX_BYTES });
