@@ -136,7 +136,11 @@ if (RADAR_ENABLED && SOCKET_MODE) {
     console.error(`radar: failed to start, continuing WITHOUT it: ${(e && e.message) || e}`);
   }
 }
-const findMachine = (id) => (id ? MACHINES.find((m) => m.id === id) : MACHINES[0]) || null;
+// BUG2: a registry id first (PWA, unchanged); else the bridge machineId the sessions list reports
+// (the native app sends session.machine) via the map lib/sessions-proxy.js learns. Callers that can
+// miss it await ensureMachine(id) first (readBody / handleApi below).
+const findMachine = (id) => (id ? MACHINES.find((m) => m.id === id) || sessionsProxy.lookup(id) : MACHINES[0]) || null;
+const ensureMachine = async (id) => { if (id && !MACHINES.some((m) => m.id === id)) await sessionsProxy.ensure(id); };
 
 // Cloudflare Access service-token headers, for machines reached over a named tunnel gated by CF Access.
 // Empty accessId/accessSecret → no headers (LAN / quick-tunnel machines).
@@ -231,7 +235,13 @@ async function relay(res, upstreamPromise) {
 function readBody(req, cb, cap = 256 * 1024) {
   let body = '';
   req.on('data', (c) => { body += c; if (body.length > cap) req.destroy(); });
-  req.on('end', () => { try { cb(JSON.parse(body || '{}')); } catch (_) { cb(null); } });
+  req.on('end', () => {
+    let b;
+    try { b = JSON.parse(body || '{}'); } catch (_) { return cb(null); }
+    // BUG2: a body naming a machine we cannot find yet may name a bridge machineId — learn it first.
+    const mid = b && typeof b.machine === 'string' ? b.machine : '';
+    (mid ? ensureMachine(mid).catch(() => {}) : Promise.resolve()).then(() => cb(b));
+  });
 }
 
 // ---- download tickets -------------------------------------------------------
@@ -338,6 +348,11 @@ async function handleApi(req, res, u) {
   // code is the credential), so it is dispatched before the SERVER_TOKEN gate and checks for itself.
   if (p.startsWith('/api/pair/')) return pairing.handle(req, res, u);
   if (!authed(req, u)) return sendJson(res, 401, { error: 'unauthorized' });
+  // BUG2: GET/query routes carry ?machine=; same bridge-machineId learning as readBody does for bodies.
+  if (p.startsWith('/api/cmux/') && !p.startsWith('/api/cmux/fs/download')) {
+    const qm = u.searchParams.get('machine');
+    if (qm) await ensureMachine(qm).catch(() => {});
+  }
 
   // ----- radar (p5) — mounted only when RADAR_ENABLED is set; `radar &&` is the whole switch -----
   // Wrapped here even though radar-server.js has its own error boundary, because handleApi is

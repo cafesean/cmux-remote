@@ -22,6 +22,13 @@ async function fakeBridge(mid, secret) {
     if (req.headers['x-bridge-secret'] !== secret) return send(401, { error: 'unauthorized' });
     const u = new URL(req.url, 'http://x');
     const pre = `/cmux/sessions/${encodeURIComponent(mid + ':surface:1')}`;
+    if (req.method === 'POST' && (u.pathname === '/cmux/send' || u.pathname === '/cmux/key')) {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => { rec.body = body; send(200, { ok: true, via: mid }); });
+      return;
+    }
+    if (req.method === 'GET' && u.pathname === '/cmux/layout') return send(200, { via: mid });
     if (u.pathname === '/cmux/sessions') return send(200, { machineId: mid, sessions: [sess(mid, 'surface:1')] });
     if (u.pathname === `${pre}/thread`) {
       if (u.searchParams.get('before') === 'bad') return send(400, { error: 'bad_cursor' });
@@ -162,4 +169,29 @@ test('?machine= on the list: unknown machine is 404', async () => {
   assert.equal((await call(server.base, 'GET', '/api/sessions?machine=nope', { token: TOKEN })).status, 404);
   const r = await call(server.base, 'GET', '/api/sessions?machine=b', { token: TOKEN });
   assert.deepEqual(r.json.sessions.map((x) => x.id), ['air:surface:1']);
+});
+
+test('BUG2: /api/cmux/send|key and query routes accept the bridge machineId (session.machine)', async () => {
+  const s2 = await bootServer({ env: {
+    SERVER_TOKEN: TOKEN,
+    CMUX_MACHINES: JSON.stringify([{ id: 'a', label: 'A', baseUrl: ba.url, secret: 'sa' }, { id: 'b', label: 'B', baseUrl: bb.url, secret: 'sb' }]),
+  } });   // fresh server: the id map is EMPTY, so the first send must learn it itself
+  try {
+    const n0 = bb.log.length;
+    const send = await call(s2.base, 'POST', '/api/cmux/send', { token: TOKEN, body: { machine: 'air', surface: 'surface:1', text: 'hi', submit: true } });
+    assert.equal(send.status, 200);
+    assert.equal(send.json.via, 'air', 'reached the air bridge');
+    const sent = bb.log.slice(n0).find((x) => x.url === '/cmux/send');
+    assert.equal(sent.secret, 'sb');
+    assert.deepEqual(JSON.parse(sent.body), { surface: 'surface:1', text: 'hi', submit: true });
+    const key = await call(s2.base, 'POST', '/api/cmux/key', { token: TOKEN, body: { machine: 'mini', surface: 'surface:1', key: 'enter' } });
+    assert.equal(key.json.via, 'mini');
+    const lay = await call(s2.base, 'GET', '/api/cmux/layout?machine=air&workspace=w', { token: TOKEN });
+    assert.equal(lay.json.via, 'air');
+    // registry ids keep working (PWA)
+    assert.equal((await call(s2.base, 'POST', '/api/cmux/send', { token: TOKEN, body: { machine: 'b', surface: 'surface:1', text: 'x' } })).json.via, 'air');
+    // unknown machine -> 404
+    assert.equal((await call(s2.base, 'POST', '/api/cmux/send', { token: TOKEN, body: { machine: 'ghost', surface: 's', text: 'x' } })).status, 404);
+    assert.equal((await call(s2.base, 'GET', '/api/cmux/layout?machine=ghost', { token: TOKEN })).status, 404);
+  } finally { await s2.stop(); }
 });
