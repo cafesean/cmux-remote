@@ -19,6 +19,7 @@ const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const { isAllowedTranscriptPath } = require('./join');
+const { AGENT_ID_RE } = require('./transcript-claude');
 
 const LIMITS = {
   subagentsMax: 100,               // sub-agents returned by one list (newest first); `total` still counts all
@@ -27,11 +28,15 @@ const LIMITS = {
   subagentMetaMaxBytes: 64 * 1024, // a meta.json larger than this is ignored
   subagentEdgeBytes: 64 * 1024,    // bytes read at each end of a sub-agent transcript (start time, last record)
   subagentPreviewMax: 200,
-  agentIdMax: 80,
+  subagentCountTtlIdleMs: 30000,   // ...and this long when nothing was running and no file appeared since
+  subagentConcurrency: 4,          // sub-agent files opened at once (list, count)
+  subagentCountOpenMax: 16,        // most files a count opens; more live ones count as running unread
+  agentIdMapMax: 1000,             // toolUseId -> agentId entries kept per session
+  cacheSessionsMax: 256,           // sessions kept in the count and agentId caches
 };
 // Real ids: `a` + 17 hex (plain Agent calls) or `a<name>-<16 hex>` (named teammates, e.g.
 // `adeploy-test-send-2de020c0d2623678`). Letters, digits and `-` only: never `.`, `/` or `\`.
-const AGENT_ID_RE = new RegExp(`^a[A-Za-z0-9][A-Za-z0-9-]{4,${LIMITS.agentIdMax - 2}}$`);
+// (AGENT_ID_RE is defined once, in transcript-claude.js.)
 const FILE_RE = /^agent-(.+)\.jsonl$/;
 const isAgentId = (s) => typeof s === 'string' && AGENT_ID_RE.test(s);
 
@@ -98,6 +103,16 @@ function statusOf(meta, last, mtimeMs, now) {
   return now - mtimeMs <= LIMITS.subagentLiveMs ? 'running' : 'done';
 }
 
+// Run fn over items, at most n at once.
+async function mapLimit(items, n, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  const worker = async () => { while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); } };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+  return out;
+}
+const cachePut = (m, k, v) => { m.delete(k); m.set(k, v); if (m.size > LIMITS.cacheSessionsMax) m.delete(m.keys().next().value); };
+
 // Regular-file entries of the session's subagents dir, newest mtime first. A symlinked dir or entry is skipped.
 async function entries(transcriptPath) {
   const dir = subagentsDirOf(transcriptPath);
@@ -143,22 +158,46 @@ async function listSubagents(transcriptPath, deps) {
   d.now = typeof d.now === 'function' ? d.now() : (d.now || Date.now());
   const { dir, list } = await entries(transcriptPath);
   const top = list.slice(0, LIMITS.subagentsMax);
-  const out = (await Promise.all(top.map((e) => describeOne(transcriptPath, dir, e.agentId, d)))).filter(Boolean);
+  const out = (await mapLimit(top, LIMITS.subagentConcurrency, (e) => describeOne(transcriptPath, dir, e.agentId, d))).filter(Boolean);
   out.sort((a, b) => b.startedAt - a.startedAt || b.lastActivity - a.lastActivity);
   return { total: list.length, subagents: out };
 }
 
-const countCache = new Map();   // transcriptPath -> {at, p}
+// {running, total} for a Session row: readdir + lstat; a file not written within the live window is done
+// without being opened; only live files are opened (bounded). Cached per session for subagentCountTtlMs,
+// or subagentCountTtlIdleMs when nothing was live; a changed dir mtime (a new sub-agent) drops the entry.
+const countCache = new Map();   // transcriptPath -> {at, dirMtime, ttl, p}
+async function countLive(transcriptPath, dir, live, d) {
+  const toOpen = live.slice(0, LIMITS.subagentCountOpenMax);
+  const st = await mapLimit(toOpen, LIMITS.subagentConcurrency, async (e) => {
+    const o = await openSubagent(transcriptPath, e.agentId, d);
+    if (!o) return 'gone';
+    try {
+      const meta = await readMeta(dir, e.agentId);
+      const { last } = await edges(o.fh, o.st.size);
+      return statusOf(meta, last, o.st.mtimeMs, d.now);
+    } finally { await o.fh.close().catch(() => {}); }
+  });
+  return st.filter((x) => x === 'running').length + (live.length - toOpen.length);
+}
 async function countSubagents(transcriptPath, deps) {
   const now = Date.now();
+  const d = { home: os.homedir(), ...(deps || {}), now };
   const hit = countCache.get(transcriptPath);
   if (hit && now - hit.at < LIMITS.subagentCountTtlMs) return hit.p;
-  const p = listSubagents(transcriptPath, deps)
-    .then((r) => ({ running: r.subagents.filter((s) => s.status === 'running').length, total: r.total }))
-    .catch(() => ({ running: 0, total: 0 }));
-  countCache.set(transcriptPath, { at: now, p });
-  if (countCache.size > 512) countCache.delete(countCache.keys().next().value);
-  return p;
+  let dirMtime = 0;
+  try { dirMtime = (await fsp.lstat(subagentsDirOf(transcriptPath))).mtimeMs; } catch (_) { dirMtime = 0; }
+  if (hit && hit.dirMtime === dirMtime && now - hit.at < hit.ttl) return hit.p;
+  const entry = { at: now, dirMtime, ttl: LIMITS.subagentCountTtlMs, p: null };
+  entry.p = (async () => {
+    const { dir, list } = await entries(transcriptPath);
+    const live = list.filter((e) => now - e.mtimeMs <= LIMITS.subagentLiveMs);
+    const running = live.length ? await countLive(transcriptPath, dir, live, d) : 0;
+    if (!live.length) entry.ttl = LIMITS.subagentCountTtlIdleMs;   // nothing live: only a new file (dir mtime) can change it soon
+    return { running, total: list.length };
+  })().catch(() => ({ running: 0, total: 0 }));
+  cachePut(countCache, transcriptPath, entry);
+  return entry.p;
 }
 
 async function openSubagent(transcriptPath, agentId, deps) {
@@ -185,16 +224,45 @@ async function openSubagent(transcriptPath, agentId, deps) {
 }
 
 // toolUseId -> agentId from the meta files, for linking a main-thread Agent/Task row to its sub-agent.
+// Cached per session; a changed dir mtime (a new sub-agent or meta file) reads only the ids not seen yet.
+// At most agentIdMapMax entries per session (the newest files first).
+const idCache = new Map();   // transcriptPath -> {dirMtime, seen: Set<agentId>, p}
 async function agentIdMap(transcriptPath) {
-  const { dir, list } = await entries(transcriptPath);
-  const map = new Map();
-  await Promise.all(list.map(async (e) => {
-    const m = await readMeta(dir, e.agentId);
-    if (m && typeof m.toolUseId === 'string' && m.toolUseId) map.set(m.toolUseId, e.agentId);
-  }));
-  return map;
+  let dirMtime = 0;
+  try { dirMtime = (await fsp.lstat(subagentsDirOf(transcriptPath))).mtimeMs; } catch (_) { dirMtime = 0; }
+  const hit = idCache.get(transcriptPath);
+  if (hit && hit.dirMtime === dirMtime) return hit.p;
+  const prev = hit ? await hit.p.catch(() => null) : null;
+  const seen = new Set(hit ? hit.seen : []);
+  const map = new Map(prev || []);
+  const p = (async () => {
+    const { dir, list } = await entries(transcriptPath);
+    const fresh = list.filter((e) => !seen.has(e.agentId)).slice(0, Math.max(0, LIMITS.agentIdMapMax - map.size));
+    await mapLimit(fresh, LIMITS.subagentConcurrency, async (e) => {
+      const m = await readMeta(dir, e.agentId);
+      if (m) seen.add(e.agentId);   // no meta yet: read again on the next dir change
+      if (m && typeof m.toolUseId === 'string' && m.toolUseId) map.set(m.toolUseId, e.agentId);
+    });
+    return map;
+  })().catch(() => map);
+  cachePut(idCache, transcriptPath, { dirMtime, seen, p });
+  return p;
+}
+
+// A sync toolUseId -> agentId lookup for a live tail: answers from the cached map and, on a miss, refreshes
+// it in the background (cheap: keyed by dir mtime), so the row's re-send at its tool_result links.
+function agentIdLookup(transcriptPath) {
+  let map = new Map();
+  let busy = false;
+  const refresh = () => {
+    if (busy) return;
+    busy = true;
+    agentIdMap(transcriptPath).then((m) => { map = m; }, () => {}).finally(() => { busy = false; });
+  };
+  refresh();
+  return (toolUseId) => { const a = map.get(toolUseId); if (!a) refresh(); return a; };
 }
 
 const subagentMeta = (tp, agentId) => (isAgentId(agentId) ? readMeta(subagentsDirOf(tp), agentId) : Promise.resolve(null));
 
-module.exports = { subagentMeta, listSubagents, countSubagents, openSubagent, agentIdMap, isAgentId, AGENT_ID_RE, LIMITS };
+module.exports = { subagentMeta, listSubagents, countSubagents, openSubagent, agentIdMap, agentIdLookup, isAgentId, AGENT_ID_RE, LIMITS };

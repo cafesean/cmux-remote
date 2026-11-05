@@ -40,6 +40,10 @@ const POLL_MS = 1000;
 const IMAGE_MARK = Buffer.from('"type":"image"');
 const NL = 10;
 
+// A Claude Code sub-agent id (A10): `a` + hex, or a named teammate `a<name>-<16 hex>`. Never `.`, `/`, `\\`.
+// The one definition: sessions/subagents.js and lib/sessions-proxy.js use this.
+const AGENT_ID_RE = /^a[A-Za-z0-9][A-Za-z0-9-]{4,78}$/;
+
 const REAL_FS = { open: (...a) => fs.promises.open(...a) };
 
 // The page cursor names the oldest message of a page and where its record starts in the file, so the
@@ -196,7 +200,7 @@ class Normaliser {
     const tr = rec && rec.toolUseResult;
     let a = tr && typeof tr === 'object' && typeof tr.agentId === 'string' ? tr.agentId : null;
     if (!a && this.agentIdFor) { try { a = this.agentIdFor(tool.id); } catch (_) { a = null; } }
-    if (typeof a === 'string' && /^a[A-Za-z0-9-]{5,79}$/.test(a)) tool.agentId = a;
+    if (typeof a === 'string' && AGENT_ID_RE.test(a)) tool.agentId = a;
   }
 
   toolResult(b, changed, rec) {
@@ -509,4 +513,4 @@ async function* tailThread(p, fromOffset, opts = {}) {
   }
 }
 
-module.exports = { readThread, tailThread, readAttachment, BadCursorError };
+module.exports = { readThread, tailThread, readAttachment, BadCursorError, AGENT_ID_RE };

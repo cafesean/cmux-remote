@@ -315,16 +315,14 @@ function createSessionRoutes(deps) {
     if (closed) return;
     if (first && first.session.kind === 'codex') { emit({ type: 'unsupported', unsupported: 'codex' }); return; }
     if (first) lastStatus = first.session.status;
-    let amap = new Map();
-    const refreshAgents = async () => { if (path0) { try { amap = await subagents.agentIdMap(path0); } catch (_) { /* keep */ } } };
     const startTail = (p) => {
       if (tailAbort) tailAbort.abort();
       const ac = new AbortController();
       tailAbort = ac;
+      const agentIdFor = subagents.agentIdLookup(p);   // cached per session; never re-read on a status tick
       (async () => {
-        await refreshAgents();
         try {
-          for await (const msg of tailThread(p, null, { signal: ac.signal, sessionId: id, fs: guardedFs, agentIdFor: (tu) => amap.get(tu), onReset: () => emit({ type: 'reset' }) })) {
+          for await (const msg of tailThread(p, null, { signal: ac.signal, sessionId: id, fs: guardedFs, agentIdFor, onReset: () => emit({ type: 'reset' }) })) {
             if (ac.signal.aborted) break;
             emit({ type: 'msg', msg });
           }
@@ -349,7 +347,6 @@ function createSessionRoutes(deps) {
         const now = await findTab(id);
         if (closed || now === null) return;            // tree read failed: try again next poll
         if (!now) { emit({ type: 'gone' }); res.end(); done(); return; }
-        await refreshAgents();
         const { session } = await describe(now, requestDeps(), await unreadFor(now.tab));
         if (!closed && session.status !== lastStatus) {
           emit({ type: 'status', status: session.status });

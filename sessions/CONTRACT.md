@@ -129,8 +129,10 @@ image bytes. New routes are additive; no existing bridge route changes shape.
 
 Claude Code sub-agents of a session (its Agent/Task calls). Additive: a client that ignores them is unaffected.
 
-- `Session.subagents`: `{running: number, total: number}`, on Claude sessions with a transcript only. Cached
-  per session for `LIMITS.subagentCountTtlMs`.
+- `Session.subagents`: `{running: number, total: number}`, on Claude sessions with a transcript only. Counted
+  from a readdir + lstat; only files written within `LIMITS.subagentLiveMs` are opened (at most
+  `LIMITS.subagentCountOpenMax`, `LIMITS.subagentConcurrency` at once). Cached per session for
+  `LIMITS.subagentCountTtlMs` (`subagentCountTtlIdleMs` when none is live); a new sub-agent file drops the cache.
 - List: `{subagents: Subagent[], total}`, newest `startedAt` first, at most `LIMITS.subagentsMax` entries;
   `total` counts all. A non-Claude session answers `{subagents: [], total: 0}`.
 - `Subagent`: `{agentId, description, agentType, model, toolUseId, status: 'running'|'done', startedAt,
@@ -139,7 +141,7 @@ Claude Code sub-agents of a session (its Agent/Task calls). Additive: a client t
   pending; otherwise `running` while the file was written within `LIMITS.subagentLiveMs`, else `done`.
   (A parent tool_result is NOT used: a background agent gets one at launch.)
 - `agentId` matches `^a[A-Za-z0-9][A-Za-z0-9-]{4,78}$` (plain `a`+hex, or a named teammate
-  `a<name>-<16 hex>`). Anything else is 400 `bad_agent_id`; an unknown or refused sub-agent is 404.
+  `a<name>-<16 hex>`). Anything else is 400 `bad_agent_id` (bridge and server alike); an unknown or refused sub-agent is 404.
 - Thread and stream: the same Thread and Stream event shapes as the session's own, with an opaque cursor.
   Stream events carry `agentId` beside `session`; types are `msg`, `reset`, `gone` (no `status`).
 - `Tool.agentId` (optional): set on an `Agent`/`Task` tool when its sub-agent is known (the result's

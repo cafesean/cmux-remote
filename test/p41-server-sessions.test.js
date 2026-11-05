@@ -40,6 +40,13 @@ async function fakeBridge(mid, secret) {
       res.write('data: {"type":"status","status":"working","session":"x"}\n\n');
       return;   // left open
     }
+    if (u.pathname === `${pre}/subagents`) return send(200, { subagents: [{ agentId: 'a1111111111111111', status: 'running' }], total: 1 });
+    if (u.pathname === `${pre}/subagents/a1111111111111111/thread`) return send(200, { title: 'S', messages: [], cursor: null, q: u.search });
+    if (u.pathname === `${pre}/subagents/a1111111111111111/thread-stream`) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"type":"msg","session":"x","agentId":"a1111111111111111"}\n\n');
+      return;   // left open
+    }
     if (u.pathname === `${pre}/attachment/0`) { res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length }); return res.end(PNG); }
     return send(404, { error: 'not_found' });
   });
@@ -235,4 +242,34 @@ test('BUG2 r1: many unknown machine ids cause at most one list sweep per debounc
     for (let i = 0; i < 5; i++) assert.equal((await call(s2.base, 'GET', `/api/cmux/layout?machine=nope${i}`, { token: TOKEN })).status, 404);
     assert.equal(lists(), 1, 'within the debounce window, still one sweep');
   } finally { await s2.stop(); await fa.close(); }
+});
+
+test('A10: /api/sessions/:id/subagents* pass through; bad agentId is 400 before the bridge', async () => {
+  const pre = `/api/sessions/${enc('mini:surface:1')}/subagents`;
+  const l = await call(server.base, 'GET', pre, { token: TOKEN });
+  assert.equal(l.status, 200, l.text);
+  assert.deepEqual(l.json, { subagents: [{ agentId: 'a1111111111111111', status: 'running' }], total: 1 });
+  const t = await call(server.base, 'GET', `${pre}/a1111111111111111/thread?before=c9&limit=5&x=evil`, { token: TOKEN });
+  assert.equal(t.status, 200, t.text);
+  assert.equal(t.json.q, '?before=c9&limit=5', 'only before/limit reach the bridge');
+  const n0 = ba.log.length;
+  for (const bad of ['..%2Fx', 'notanid', 'a1', 'a1111.jsonl']) {
+    const r = await call(server.base, 'GET', `${pre}/${bad}/thread`, { token: TOKEN });
+    assert.equal(r.status, 400, bad);
+    assert.deepEqual(r.json, { error: 'bad_agent_id' });
+  }
+  assert.equal(ba.log.length, n0, 'refused ids never reach the bridge');
+  const nf = await call(server.base, 'GET', `${pre}/a1111111111111111/other`, { token: TOKEN });
+  assert.equal(nf.status, 404);
+  await new Promise((resolve, reject) => {
+    const req = http.get(`${server.base}${pre}/a1111111111111111/thread-stream`, { headers: { authorization: `Bearer ${TOKEN}` } }, (res) => {
+      assert.equal(res.statusCode, 200);
+      assert.match(res.headers['content-type'], /text\/event-stream/);
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { buf += c; if (buf.includes('"agentId":"a1111111111111111"')) { req.destroy(); resolve(); } });
+    });
+    req.on('error', (e) => { if (!/socket hang up|aborted/.test(String(e))) reject(e); });
+    setTimeout(() => reject(new Error('no subagent SSE frame')), 8000);
+  });
 });
