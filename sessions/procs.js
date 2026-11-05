@@ -192,10 +192,36 @@ async function agentFor(surface, deps) {
 async function claudeTranscriptOf(pid, deps) {
   const d = deps || {};
   const home = d.home || os.homedir();
-  let j;
-  try { j = JSON.parse(await (d.readFile || defaultReadFile)(path.join(home, '.claude', 'sessions', `${Number(pid)}.json`))); } catch (_) { return null; }
-  if (!j || Number(j.pid) !== Number(pid) || typeof j.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(j.sessionId) || typeof j.cwd !== 'string') return null;
-  return { sessionId: j.sessionId, transcriptPath: path.join(home, '.claude', 'projects', slugOf(j.cwd), `${j.sessionId}.jsonl`) };
+  // ~/.claude first, then each `cswap run` account dir (its CLAUDE_CONFIG_DIR): the pid file lives
+  // under whichever config dir the process runs with, so the env of the process is never read.
+  const configDirs = [path.join(home, '.claude')];
+  try {
+    const base = path.join(home, '.claude-swap-backup', 'sessions');
+    for (const n of (await (d.readdir || ((p) => fsp.readdir(p)))(base)).slice(0, 64)) configDirs.push(path.join(base, n));
+  } catch (_) { /* no swap dirs */ }
+  for (const cfg of configDirs) {
+    let j;
+    try { j = JSON.parse(await (d.readFile || defaultReadFile)(path.join(cfg, 'sessions', `${Number(pid)}.json`))); } catch (_) { continue; }
+    if (!j || Number(j.pid) !== Number(pid) || typeof j.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(j.sessionId) || typeof j.cwd !== 'string') continue;
+    return { sessionId: j.sessionId, transcriptPath: path.join(cfg, 'projects', slugOf(j.cwd), `${j.sessionId}.jsonl`) };
+  }
+  return null;
+}
+
+// The tmux session name a surface lives in: a pane id `%N`, or a cmux surface id (its attached
+// owner session). null when not tmux-hosted.
+function tmuxNameFor(snap, surface) {
+  const id = surface && surface.id;
+  if (!id || !snap || !snap.sessions) return null;
+  if (/^%\d+$/.test(id)) {
+    for (const s of snap.sessions) {
+      if (surface.socket && s.socket !== surface.socket) continue;
+      if (s.panes.some((p) => p.id === id)) return s.name;
+    }
+    return null;
+  }
+  const o = ownerOf(snap.sessions, id);
+  return o ? o.name : null;
 }
 
 // tmux sessions running an agent that no cmux surface in `liveIds` shows (detached, or whose cmux
@@ -267,4 +293,4 @@ async function tmuxSend(target, opts, deps) {
   return { ok: true };
 }
 
-module.exports = { agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxSend, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+module.exports = { tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxSend, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };

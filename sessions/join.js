@@ -39,14 +39,29 @@ const isCodexPath = (p) => /[\\/]\.codex[\\/]sessions[\\/]/.test(String(p));
 // A transcript path is served to the phone later, and a hook event is just a line in a log any local
 // writer can append to. So a path is used only when it is a `.jsonl` file that, once symlinks and
 // `..` are resolved, sits inside the agents' own transcript roots.
+// A11: also the per-account config dirs `cswap run` makes: ~/.claude-swap-backup/sessions/<n-email>/projects.
+// Nothing else is added to the allow-list.
+const SWAP = { dir: ['.claude-swap-backup', 'sessions'], maxAccounts: 64 };   // LIMITS.md row: maxAccounts
 const rootsOf = (home) => [path.join(home, '.claude', 'projects'), path.join(home, '.codex', 'sessions')];
+const swapBase = (home) => path.join(home, ...SWAP.dir);
+const isSwapProjects = (home, r) => {
+  const b = swapBase(home) + path.sep;
+  if (!r.startsWith(b)) return false;
+  const parts = r.slice(b.length).split(path.sep);
+  return parts.length > 2 && parts[0] && parts[1] === 'projects';
+};
+async function swapRoots(home, fs) {
+  let names = [];
+  try { names = await fs.readdir(swapBase(home)); } catch (_) { return []; }
+  return names.slice(0, SWAP.maxAccounts).map((n) => path.join(swapBase(home), n, 'projects'));
+}
 const within = (root, p) => p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
 
 // Cheap lexical screen (no disk): string, absolute, `.jsonl`, inside a root after `..` is collapsed.
 function lexicallyAllowed(p, home) {
   if (typeof p !== 'string' || !path.isAbsolute(p) || !p.endsWith('.jsonl')) return false;
   const r = path.resolve(p);
-  return rootsOf(home).some((root) => within(root, r));
+  return rootsOf(home).some((root) => within(root, r)) || isSwapProjects(home, r);
 }
 
 // The real, symlink-free path when `p` is allowed, else null. A missing file or root is not allowed.
@@ -58,7 +73,7 @@ async function allowedRealPath(p, deps) {
   try {
     const real = await fs.realpath(path.resolve(p));
     if (!real.endsWith('.jsonl')) return null;
-    for (const root of rootsOf(home)) {
+    for (const root of [...rootsOf(home), ...(await swapRoots(home, fs))]) {
       let realRoot;
       try { realRoot = await fs.realpath(root); } catch (_) { continue; }
       if (within(realRoot, real)) return real;
@@ -110,14 +125,19 @@ async function mtimeOf(fs, p) { try { return (await fs.stat(p)).mtimeMs; } catch
 
 async function claudeByCwd(cwd, since, deps) {
   const fs = deps.fs || defaultFs;
-  const dir = path.join(deps.home || os.homedir(), '.claude', 'projects', slugOf(cwd));
+  const home = deps.home || os.homedir();
+  // ~/.claude plus every `cswap run` account dir; the newest matching transcript across them wins.
+  const dirs = [path.join(home, '.claude', 'projects', slugOf(cwd))];
+  for (const r of await swapRoots(home, fs)) dirs.push(path.join(r, slugOf(cwd)));
   let best = null;
-  for (const name of await list(fs, dir)) {
-    if (!name.endsWith('.jsonl') || name.startsWith('agent-')) continue;   // agent-*: sub-agent side threads
-    const p = path.join(dir, name);
-    const mtime = await mtimeOf(fs, p);
-    if (mtime < since || (best && mtime <= best.mtime)) continue;
-    best = { kind: 'claude', path: p, sessionId: name.slice(0, -'.jsonl'.length), mtime };
+  for (const dir of dirs) {
+    for (const name of await list(fs, dir)) {
+      if (!name.endsWith('.jsonl') || name.startsWith('agent-')) continue;   // agent-*: sub-agent side threads
+      const p = path.join(dir, name);
+      const mtime = await mtimeOf(fs, p);
+      if (mtime < since || (best && mtime <= best.mtime)) continue;
+      best = { kind: 'claude', path: p, sessionId: name.slice(0, -'.jsonl'.length), mtime };
+    }
   }
   return best;
 }
@@ -221,4 +241,4 @@ function watchJoin(surface, onChange, deps) {
   return function stop() { stopped = true; stopTimer(timer); };
 }
 
-module.exports = { transcriptFor, watchJoin, isAllowedTranscriptPath, WATCH_POLL_MS };
+module.exports = { SWAP, transcriptFor, watchJoin, isAllowedTranscriptPath, WATCH_POLL_MS };

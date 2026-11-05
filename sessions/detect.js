@@ -28,7 +28,7 @@ const CODEX_RE = /^codex(\.js|\.mjs|\.cjs)?$/;
 const CLAUDE_PKG = /@anthropic-ai[\\/]claude-code/;
 const CODEX_PKG = /@openai[\\/]codex/;
 // Where each agent keeps its transcripts: a hint only, used when the foreground command is unknown.
-const CLAUDE_TRANSCRIPT = /[\\/]\.claude[\\/]projects[\\/]/;
+const CLAUDE_TRANSCRIPT = /[\\/]\.claude[\\/]projects[\\/]|[\\/]\.claude-swap-backup[\\/]sessions[\\/][^\\/]+[\\/]projects[\\/]/;
 const CODEX_TRANSCRIPT = /[\\/]\.codex[\\/]sessions[\\/]/;
 
 const PS_TIMEOUT = 3000;
