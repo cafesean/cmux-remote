@@ -160,6 +160,7 @@ const ensureMachine = async (id) => { if (id && !MACHINES.some((m) => m.id === i
 // A row may name env vars (accessIdEnv / accessSecretEnv) instead of carrying values; lib/cf-access.js
 // resolves either form and sends nothing to unix: socket bridges.
 const cfAccess = require('./lib/cf-access');
+const relayFail = require('./lib/relay-fail');   // p41 D52
 const accessHeaders = (m) => cfAccess.accessHeadersFor(m, process.env);
 
 // p19: the one way this file reaches a bridge. http(s): the global fetch, exactly as before.
@@ -172,7 +173,10 @@ function upstream(m, pathAndQuery, init) {
 const sessionsProxy = require('./lib/sessions-proxy').createSessionsProxy({ machines: MACHINES, upstream, accessHeaders, findMachine });
 
 // Fetch a bridge endpoint with its secret (+ CF Access token if set) and a hard timeout.
-async function bridge(m, pathAndQuery, opt = {}) {
+// D52: ONE retry when the connect itself was refused (no byte reached the bridge, so no double send;
+// a bridge mid-restart looks exactly like this). Any other failure is not retried. A failure carries
+// err.relay = { machine, path, cause, ms, attempts } for relay()'s log line and status choice.
+async function bridgeOnce(m, pathAndQuery, opt) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opt.timeout || 15000);
   try {
@@ -182,6 +186,22 @@ async function bridge(m, pathAndQuery, opt = {}) {
       signal: ctrl.signal,
     });
   } finally { clearTimeout(timer); }
+}
+async function bridge(m, pathAndQuery, opt = {}) {
+  const t0 = Date.now();
+  let attempts = 1;
+  try {
+    try { return await bridgeOnce(m, pathAndQuery, opt); } catch (e) {
+      const replayable = opt.body == null || typeof opt.body === 'string' || Buffer.isBuffer(opt.body);
+      if (!replayable || !relayFail.isConnectRefused(e)) throw e;
+      await new Promise((r) => setTimeout(r, relayFail.LIMITS.connectRetryDelayMs));
+      attempts = 2;
+      return await bridgeOnce(m, pathAndQuery, opt);
+    }
+  } catch (e) {
+    try { e.relay = { machine: m.id, path: pathAndQuery, cause: relayFail.classify(e), ms: Date.now() - t0, attempts }; } catch (_) {}
+    throw e;
+  }
 }
 
 // p20 phone alerts: cmux notifications -> Web Push. On by default; PUSH_ENABLED=0 turns it off.
@@ -231,7 +251,9 @@ function sendJson(res, code, obj) {
 }
 
 // Pass a bridge JSON response straight through (status + body).
-async function relay(res, upstreamPromise) {
+// D52: opt.restarting -> a connect-refused answers 503 bridge_restarting + Retry-After (send only; the
+// other routes keep their 502 bridge_unreachable contract).
+async function relay(res, upstreamPromise, opt = {}) {
   try {
     const r = await upstreamPromise;
     const body = await r.json().catch(() => ({ error: 'bad_upstream' }));
@@ -243,7 +265,18 @@ async function relay(res, upstreamPromise) {
       'surrogate-control': 'no-store',
     });
     res.end(redactTokens(JSON.stringify(body)));   // S2r
-  } catch (_) { sendJson(res, 502, { error: 'bridge_unreachable' }); }
+  } catch (e) {
+    // D52: say WHY (one structured line, no secret/body/query) and tell a restart apart from a fault.
+    const info = (e && e.relay) || { cause: relayFail.classify(e) };
+    relayFail.log(info);
+    if (opt.restarting && relayFail.isConnectRefused(e)) {
+      if (res.headersSent) { try { res.end(); } catch (_) {} return; }
+      res.setHeader('retry-after', String(relayFail.LIMITS.retryAfterSec));
+      return sendJson(res, 503, { error: 'bridge_restarting', retryAfterMs: relayFail.LIMITS.retryAfterSec * 1000 });
+    }
+    if (res.headersSent) { try { res.end(); } catch (_) {} return; }
+    sendJson(res, 502, { error: 'bridge_unreachable' });
+  }
 }
 
 const readBody = require('./lib/read-body').createReadBody({ ensureMachine, sendJson });
@@ -693,7 +726,7 @@ async function handleApi(req, res, u) {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     try {
       const reader = up.body.getReader();
-      res.on('close', () => { try { reader.cancel(); } catch (_) {} });   // A18: graceful end / client gone
+      res.on('close', () => { try { reader.cancel().catch(() => {}); } catch (_) {} });   // A18: graceful end / client gone. D52: cancel() of an errored upstream REJECTS; unhandled, it killed the server
       for (;;) { const { done, value } = await reader.read(); if (done || res.writableEnded) break; res.write(Buffer.from(value)); }
     } catch (_) { /* client or upstream closed */ }
     try { res.end(); } catch (_) {}
@@ -714,7 +747,7 @@ async function handleApi(req, res, u) {
       relay(res, bridge(m, '/cmux/send', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ surface: b.surface, text: b.text, submit: b.submit }),
-      }));
+      }), { restarting: true });
     });
   }
   // p41 A14: answer a Session.choice atomically (the bridge re-reads and refuses a stale pick).
@@ -896,7 +929,7 @@ async function handleApi(req, res, u) {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     try {
       const reader = up.body.getReader();
-      res.on('close', () => { try { reader.cancel(); } catch (_) {} });   // A18: graceful end / client gone
+      res.on('close', () => { try { reader.cancel().catch(() => {}); } catch (_) {} });   // A18: graceful end / client gone. D52: cancel() of an errored upstream REJECTS; unhandled, it killed the server
       for (;;) { const { done, value } = await reader.read(); if (done || res.writableEnded) break; res.write(Buffer.from(value)); }
     } catch (_) { /* client or upstream closed */ }
     try { res.end(); } catch (_) {}
@@ -996,3 +1029,6 @@ if (SERVER_SOCKET) {
 // p41 A18: SIGTERM/SIGINT -> every open SSE stream gets `event: restarting`, then a short drain and
 // exit. Radar's timers (if enabled) are stopped first.
 graceful.install(() => { if (radar) radar.stop(); });
+// D52 defense in depth: an unhandled rejection in one relay must not take every session's send down
+// with it (each crash = a launchd restart = cloudflared 502s). Log the cause (no message, no secret).
+process.on('unhandledRejection', (e) => { try { console.error(`unhandled_rejection ${JSON.stringify({ cause: relayFail.classify(e) })}`); } catch (_) {} });
