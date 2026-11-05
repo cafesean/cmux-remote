@@ -1544,6 +1544,88 @@ function cmuxDropSurface(req, res) {
   });
 }
 
+// POST /cmux/move-pane { workspace, pane, target, edge } — move a WHOLE pane (every tab) to one side
+// of another pane: the native app's Move left/right/up/down, which re-orients panes the way cmux's own
+// drag does. cmux has no move-pane, so it is built from the drop-surface path above:
+//
+//   1. the first tab: `move-surface` into the target pane, then `drag-surface-to-split <edge>` — this
+//      creates the new pane on that side of the target
+//   2. every other tab: `move-surface --after|--before <a tab already moved>` — joins the new pane
+//      (the pane is found through its tab, so the new pane's id is never needed), in original order
+//
+// The pane's ACTIVE tab is moved last (placed at its original position), because cmux selects the
+// tab it just moved — so the moved pane shows the same tab it showed before.
+//
+// Failure: 502 cmux_failed with `moved` / `remaining` (surface ids). If the split itself failed, the
+// one tab already parked in the target pane is moved back beside its old neighbours (best effort;
+// `rolledBack` says whether that worked). A failure after the split leaves two intact panes — the
+// moved tabs in the new pane, the rest where they were — never a half-moved tab.
+//
+// The private-surface gate runs in cmuxReadBody (pane / target / workspace keys); a pane holding a
+// private surface is itself private, so its tabs can never be moved by this route.
+const MOVE_EDGES = new Set(['left', 'right', 'up', 'down']);
+function cmuxMovePane(req, res) {
+  cmuxReadBody(req, (b) => {
+    if (!b) return send(res, 400, { error: 'bad_json' });
+    movePane(res, b).catch((e) => { if (!res.headersSent) send(res, 502, { error: 'cmux_failed', detail: String(e && e.message || e).slice(0, 400) }); });
+  });
+}
+async function movePane(res, b) {
+  const pane = String(b.pane || ''), target = String(b.target || '');
+  if (!PANE_RE.test(pane) || !PANE_RE.test(target)) return send(res, 400, { error: 'bad_pane' });
+  const edge = String(b.edge || '');
+  if (!MOVE_EDGES.has(edge)) return send(res, 400, { error: 'bad_edge' });
+  const workspace = String(b.workspace || '');
+  if (!WORKSPACE_RE.test(workspace)) return send(res, 400, { error: 'bad_workspace' });
+
+  const tree = await loadTree();
+  if (!tree) return send(res, 502, { error: 'cmux_failed', detail: 'tree unavailable' });
+  const ws = tree.find((w) => w.id === workspace || w.ref === workspace);
+  const find = (ref) => ws && (ws.panes || []).find((pn) => pn.id === ref || pn.ref === ref);
+  const src = find(pane), dst = find(target);
+  if (!src || !dst || !(src.tabs || []).length) return send(res, 404, { error: 'no_such_pane' });
+  if (src.id === dst.id) return send(res, 400, { error: 'bad_pane', detail: 'pane and target are the same pane' });
+
+  const tabs = src.tabs.slice();
+  const active = tabs.includes(src.selected) ? src.selected : null;
+  const order = tabs.filter((t) => t !== active).concat(active ? [active] : []);
+  const moved = [];
+  const call = (args) => new Promise((resolve) =>
+    cmux(args, (err, stdout, stderr) => resolve(err ? String(stderr || err.message || 'failed') : null), 15000));
+  const fail = (detail, extra) => send(res, 502, Object.assign({
+    error: 'cmux_failed', detail: String(detail || '').slice(0, 400),
+    moved: moved.slice(), remaining: tabs.filter((t) => !moved.includes(t)),
+  }, extra || {}));
+  // Where a tab goes, relative to tabs in `pool`: after its nearest original predecessor in the pool,
+  // else before its nearest original successor.
+  const placement = (sf, pool) => {
+    const i = tabs.indexOf(sf);
+    for (let j = i - 1; j >= 0; j--) if (pool.includes(tabs[j])) return ['--after', tabs[j]];
+    for (let j = i + 1; j < tabs.length; j++) if (pool.includes(tabs[j])) return ['--before', tabs[j]];
+    return null;
+  };
+
+  const first = order[0];
+  let e = await call(['move-surface', '--surface', first, '--pane', dst.id, '--workspace', workspace, '--focus', 'false']);
+  if (e) return fail(e);
+  e = await call(['drag-surface-to-split', '--surface', first, edge, '--workspace', workspace, '--focus', 'false']);
+  if (e) {
+    // the tab sits in the target pane as a tab: put it back beside its old neighbours
+    const home = placement(first, tabs.filter((t) => t !== first));
+    const back = home && !(await call(['move-surface', '--surface', first, '--workspace', workspace, ...home, '--focus', 'false']));
+    return fail(e, { moved: [], remaining: tabs.slice(), rolledBack: !!back, ...(back ? {} : { strayed: [first] }) });
+  }
+  moved.push(first);
+  for (const sf of order.slice(1)) {
+    const at = placement(sf, moved);
+    e = await call(['move-surface', '--surface', sf, '--workspace', workspace, ...at, '--focus', 'false']);
+    if (e) return fail(e, { rolledBack: false });
+    moved.push(sf);
+  }
+  const [workspaces, layout] = await Promise.all([treePayload(), layoutPayload(workspace)]);
+  send(res, 200, { ok: true, moved, workspaces: workspaces || [], layout });
+}
+
 // POST /cmux/reorder-tab { workspace, surface, target, place } — p23: drag a tab left/right in the
 // strip. `place` is 'before' | 'after' the target tab. move-surface (not reorder-surface) so a target
 // in another pane also works; cmux selects the moved tab in its pane. Answers the fresh tree.
@@ -2424,6 +2506,7 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'POST' && p === '/cmux/new-pane') return cmuxNewPane(req, res);
   if (req.method === 'POST' && p === '/cmux/split-off') return cmuxSplitOff(req, res);
   if (req.method === 'POST' && p === '/cmux/drop-surface') return cmuxDropSurface(req, res);
+  if (req.method === 'POST' && p === '/cmux/move-pane') return cmuxMovePane(req, res);
   if (req.method === 'POST' && p === '/cmux/reorder-tab') return cmuxReorderTab(req, res);
   if (p === '/cmux/chrome-prompt' && (req.method === 'GET' || req.method === 'POST')) return cmuxChromePrompt(req, res);
   if (req.method === 'POST' && p === '/cmux/close-pane') return cmuxClosePane(req, res);
