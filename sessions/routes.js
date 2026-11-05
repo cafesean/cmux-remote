@@ -564,6 +564,7 @@ function createSessionRoutes(deps) {
     const entry = await findTab(b.sessionId);
     if (entry === null) return { code: 502, body: { error: 'cmux_failed' } };
     if (!entry) return { code: 404, body: { error: 'not_found' } };
+    if ((await privateCheck([entry.tab.id]))(entry.tab.id)) return { code: 423, body: { error: 'private' } };   // S2p
     const d = requestDeps();
     let join = null;
     if (entry.tab.type !== 'browser') { try { join = await transcriptFor(joinSurface(entry.tab), d); } catch (_) { join = null; } }

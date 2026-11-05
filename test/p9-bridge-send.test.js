@@ -66,6 +66,14 @@ function finish() {
     return process.exit(0);
   }
   if (op === 'read-screen') { process.stdout.write('a plain screen line\n'); return process.exit(0); }
+  // p41 S2p: the private-surface gate reads the tree; both surfaces sit in an ordinary workspace.
+  if (op === 'tree') {
+    const sf = (id, n) => ({ id: id, ref: 'surface:' + n, title: 't' + n, type: 'terminal', selected: n === 1, selected_in_pane: true });
+    const pane = (id, n, s) => ({ id: id, ref: 'pane:' + n, index: n - 1, focused: n === 1, selected_surface_id: s.id, surfaces: [s] });
+    process.stdout.write(JSON.stringify({ windows: [{ id: 'w1', ref: 'window:1', workspaces: [{ id: 'ws1', ref: 'workspace:1', title: 'work', selected: true,
+      panes: [pane('p1', 1, sf('11111111-2222-4333-8444-555555555555', 1)), pane('p2', 2, sf('99999999-8888-4777-8666-555555555555', 2))] }] }] }));
+    return process.exit(0);
+  }
   process.exit(0);
 }
 // A rendezvous, so a concurrency claim never rests on a stopwatch: hold until the log shows N
@@ -161,6 +169,14 @@ async function post(body, raw) {
 }
 
 const OK_PLAN = { grid: { mode: 'ok', seq: 7 }, 'send-text': {}, 'send-key': {} };
+
+// p41 S2p: the private-surface gate needs a tree it read recently. A PRE-DISPATCH case removes the
+// binary, so the gate's own tree read fails too — read one first (any surface-addressed route), so
+// the gate clears SURFACE from that recent tree and the send itself meets the broken binary.
+async function warmGate() {
+  plan(OK_PLAN);
+  await (await fetch(bridge.base + '/cmux/screen?surface=' + SURFACE)).text();
+}
 
 // ---- the seq precondition ------------------------------------------------------------------------
 
@@ -312,6 +328,7 @@ test('AC4 — the chain is PER SURFACE: two surfaces make progress concurrently'
 // ---- the three-way write-phase split -----------------------------------------------------------
 
 test('AC7 — PRE-DISPATCH spawn failure (ENOENT: the binary is gone) is 502 send_failed, Enter never attempted', async () => {
+  await warmGate();
   plan(OK_PLAN);
   await fsp.rename(binPath, binPath + '.parked');
   try {
@@ -325,6 +342,7 @@ test('AC7 — PRE-DISPATCH spawn failure (ENOENT: the binary is gone) is 502 sen
 });
 
 test('AC7 — PRE-DISPATCH spawn failure (EACCES: no execute bit) is 502 send_failed, Enter never attempted', async () => {
+  await warmGate();
   plan(OK_PLAN);
   await fsp.chmod(binPath, 0o644);
   try {

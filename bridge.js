@@ -221,16 +221,25 @@ function p41ProcSnapshotKnob() {
 // lib/private-surfaces.js: the "Claude accounts" workspace + the mark file. Gate: handleCmux (query
 // params) and cmuxReadBody (JSON bodies) answer 423 `private`; tree, notifications, panes-stream and
 // the sessions list drop private surfaces.
-const privacy = require('./lib/private-surfaces').createPrivacy({ loadTree: () => loadTree() });
+const privateSurfaces = require('./lib/private-surfaces');
+const PRIVATE_GATE_TREE_MS = privateSurfaces.GATE_TIMEOUT_MS;
+const privacy = privateSurfaces.createPrivacy({ loadTree: () => loadTree(true) });
 const privateRes = new WeakMap();   // req -> res, for the body gate in cmuxReadBody
 const PRIVATE_QUERY_KEYS = ['surface', 'pane', 'workspace', 'target', 'id', 'tab'];
 const PRIVATE_BODY_KEYS = ['surface', 'pane', 'paneA', 'paneB', 'workspace', 'target', 'tab'];
 function privateBodyRefs(b) {
   if (!b || typeof b !== 'object') return [];
   const out = [];
-  for (const k of PRIVATE_BODY_KEYS) if (typeof b[k] === 'string' && b[k]) out.push(b[k]);
-  if (Array.isArray(b.surfaces)) for (const v of b.surfaces) if (typeof v === 'string' && v) out.push(v);
-  return out;
+  // Routes coerce with String(b.x), and String(['id']) === 'id' — so any non-string value is gated in
+  // its coerced form (and an array element by element too).
+  const add = (v) => {
+    if (v == null || v === '') return;
+    if (Array.isArray(v)) v.forEach((x) => { if (x != null && typeof x !== 'object') out.push(String(x)); });
+    out.push(String(v));
+  };
+  for (const k of PRIVATE_BODY_KEYS) add(b[k]);
+  add(b.surfaces);
+  return out.filter(Boolean);
 }
 const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   machineId: MACHINE_ID,
@@ -457,11 +466,13 @@ function cmuxFsDownload(req, res, rawPath) {
 // strip and every surface-addressed op use) and `panes` (the split grouping, each carrying the ids of
 // the tabs that live in it). The flat list is the same array of objects, so a tab object is shared,
 // not copied — `pane` on a tab and `tabs` on a pane are two views of one thing.
-async function loadTree() {
+// `gate` (p41 S2p): the private-surface gate's read — short timeout, no retry; a stall must refuse
+// fast rather than hold every send/screen behind a 24 s tree read.
+async function loadTree(gate) {
   // `cmux tree` can briefly stall while a surface tears down (e.g. closing a tab an agent was mid-prompt on).
   // Retry once with a longer timeout so a transient stall doesn't hard-fail the whole UI ("tree failed").
-  let out = await cmuxP(['tree', '--all', '--json', '--id-format', 'both'], 12000);
-  if (out == null) { await new Promise((r) => setTimeout(r, 400)); out = await cmuxP(['tree', '--all', '--json', '--id-format', 'both'], 12000); }
+  let out = await cmuxP(['tree', '--all', '--json', '--id-format', 'both'], gate ? PRIVATE_GATE_TREE_MS : 12000);
+  if (out == null && !gate) { await new Promise((r) => setTimeout(r, 400)); out = await cmuxP(['tree', '--all', '--json', '--id-format', 'both'], 12000); }
   if (out == null) return null;
   let data;
   try { data = JSON.parse(out); } catch (_) { return null; }

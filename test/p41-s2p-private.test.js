@@ -271,3 +271,75 @@ test('bridge: a marked surface in a normal workspace -> 423; after expiry -> not
   const r2 = await get('/cmux/screen?surface=' + S3);
   assert.equal(r2.status, 200);
 });
+
+// ---------------------------------------------------------------- fix round 1
+test('fail closed: a failed tree read makes every ref private (no tree = cannot prove a ref is not in the private workspace)', async () => {
+  let ok = false; let t = 0;
+  const p = priv.createPrivacy({ loadTree: async () => (ok ? bridgeTree() : null), file: fresh('failclosed'), now: () => t });
+  assert.equal(await p.isPrivateSurface(S2), true, 'first read failed');
+  const isP = await p.snapshot([S2]);
+  assert.equal(isP(S2), true);
+  ok = true; t = 2000;
+  assert.equal(await p.isPrivateSurface(S2), false, 'recovers on the next good read');
+  ok = false; t = 4000;
+  assert.equal(await p.isPrivateSurface(S2), false, 'a recent (<= 5 s) good tree still clears a ref it knows');
+  assert.equal(await p.isPrivateSurface(S1), true, 'and still marks the private workspace private');
+  assert.equal(await p.isPrivateSurface('surface:77'), true, 'a ref it does not know (created since) is private');
+  t = 8000;
+  assert.equal(await p.isPrivateSurface(S2), true, 'a stale good tree clears nothing');
+});
+
+test('gate tree read has its own short timeout; a stalled read refuses', async () => {
+  const p = priv.createPrivacy({ loadTree: () => new Promise(() => {}), file: fresh('stall'), timeoutMs: 150 });
+  const t0 = Date.now();
+  assert.equal(await p.isPrivateSurface(S2), true);
+  assert.ok(Date.now() - t0 < 1000, 'answered at the gate timeout, not the route timeout');
+});
+
+test('forced reloads for unknown refs are capped at <= 1/s', async () => {
+  let calls = 0; let t = 0;
+  const p = priv.createPrivacy({ loadTree: async () => { calls++; return bridgeTree(); }, file: fresh('cap'), now: () => t });
+  await p.isPrivateSurface(S2);                      // initial read
+  for (let i = 1; i <= 4; i++) { t = i * 200; await p.isPrivateSurface('surface:9' + i); }
+  assert.equal(calls, 2, 'one initial + one forced reload in 800 ms');
+});
+
+test('bridge: non-string gated body values (arrays) are gated, never typed', async () => {
+  const before = cmuxCalls().length;
+  const r = await post('/cmux/send', { surface: [S1], text: 'probe', submit: false });
+  assert.equal(r.status, 423);
+  assert.equal(cmuxCalls().slice(before).some((a) => a[0] === 'send' || a[0] === 'send-key'), false);
+  assert.equal((await post('/cmux/key', { surface: [S1], key: 'enter' })).status, 423);
+  assert.equal((await post('/cmux/new-surface', { workspace: [WS_P] })).status, 423);
+  assert.equal((await post('/cmux/close-pane', { workspace: WS_N, pane: [PANE_P] })).status, 423);
+  assert.equal((await post('/cmux/resize-pane', { workspace: WS_N, paneA: [PANE_P], paneB: PANE_N1, axis: 'x', target: 0.5 })).status, 423);
+  assert.equal((await post('/cmux/reorder-tab', { workspace: WS_N, surface: S2, target: [S1], place: 'after' })).status, 423);
+});
+
+test('bridge: session-name on a private session -> 423, nothing renamed', async () => {
+  const l = await get('/cmux/sessions');
+  const r = await post('/cmux/session-name', { sessionId: l.json.machineId + ':' + S1, name: 'x' });
+  assert.equal(r.status, 423);
+  assert.deepEqual(r.json, { error: 'private' });
+});
+
+test('bridge: tree read failing -> gate refuses (423), notifications drop unresolvable entries', async () => {
+  const treeFile = path.join(dir, 'tree.json');
+  fs.writeFileSync(treeFile, 'not json');
+  try {
+    await new Promise((res) => setTimeout(res, 1100));   // past the gate's tree cache
+    // recent good tree (<= 5 s): refs it knows keep their verdict; a ref it does not know is refused
+    assert.equal((await get('/cmux/screen?surface=' + S1)).status, 423);
+    assert.equal((await get('/cmux/screen?surface=surface:42')).status, 423, 'unresolvable + no tree -> private');
+    await new Promise((res) => setTimeout(res, 4500));   // past STALE_MAX_MS: nothing is cleared
+    assert.equal((await get('/cmux/screen?surface=' + S2)).status, 423);
+    assert.equal((await post('/cmux/send', { surface: S2, text: 'x' })).status, 423);
+    const n = await get('/cmux/notifications');
+    assert.equal(n.status, 200);
+    assert.deepEqual(n.json.notifications, []);
+  } finally {
+    fs.writeFileSync(treeFile, JSON.stringify(RAW_TREE()));
+  }
+  await new Promise((res) => setTimeout(res, 1100));
+  assert.equal((await get('/cmux/screen?surface=' + S2)).status, 200, 'recovers');
+});
