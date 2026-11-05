@@ -168,3 +168,41 @@ test('secret-paths: env files, shell history and common credential files denied;
     assert.equal(isDeniedPath(path.join(h, rel), h), false, rel);
   }
 });
+
+// ---- review r2 P2: widths are display cells, not UTF-16 units ---------------------------------------
+test('redactRows: a ZWJ emoji row does not stop full rows from joining', () => {
+  const W = 30;
+  const emoji = '🧑🏻‍💻';                                   // 2 cells, 7 UTF-16 units
+  const rows = [(emoji + ' ').repeat(5), ...wrap('key ' + TOK, W), '$'];   // emoji row: 15 cells, 40 UTF-16 units > W
+  const r = redactRows(rows);
+  assert.ok(!r.join('').includes(BODY.slice(0, 12)), r.join('\n'));
+  assert.equal(r[r.length - 1], '$');
+});
+
+test('redactGrid: CJK before a token still lets a full row join the next', () => {
+  const cols = 20;
+  const cjk = '日本語テスト';                                   // 6 chars, 12 cells
+  const head = TOK.slice(0, 8);                                // fills the row to 20 cells
+  const grid = { columns: cols, rows: 3, styles: [], cursor: null, spans: [
+    { row: 0, column: 0, style_id: 0, text: cjk, cell_width: 12 },
+    { row: 0, column: 12, style_id: 1, text: head, cell_width: 8 },
+    { row: 1, column: 0, style_id: 1, text: TOK.slice(8, 28), cell_width: 20 },
+    { row: 2, column: 0, style_id: 1, text: TOK.slice(28), cell_width: TOK.length - 28 } ] };
+  const g = redactGrid(grid);
+  assert.ok(!JSON.stringify(g.spans).includes(BODY.slice(0, 8)), JSON.stringify(g.spans));
+  assert.equal(g.spans[0].text, cjk);
+});
+
+test('redactGrid: CJK width known only from the text (no cell_width) also joins', () => {
+  const grid = { columns: 20, rows: 2, styles: [], cursor: null, spans: [
+    { row: 0, column: 0, style_id: 0, text: '日本語テスト' + TOK.slice(0, 8) },
+    { row: 1, column: 0, style_id: 0, text: TOK.slice(8) } ] };
+  assert.ok(!JSON.stringify(redactGrid(grid).spans).includes(BODY.slice(0, 8)));
+});
+
+test('redactText: emoji before a token on the same row masks the token, not a shifted slice', () => {
+  const t = '🧑🏻‍💻 key ' + TOK;
+  const r = redactText(t);
+  assert.ok(!r.includes(BODY.slice(0, 12)), r);
+  assert.ok(r.startsWith('🧑🏻‍💻 key sk-ant-*'), r);
+});
