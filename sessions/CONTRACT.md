@@ -140,7 +140,7 @@ a running tool call becomes a finished one).
   `{label, description}`. `multi` is true when more than one option may be chosen.
 - `todos`: set for `todo`. A list of `{text, done}`. The newest `todo` message is the current list.
 - `attachment`: set for `attachment`. `{mime, name, url}`. `url` is `/api/sessions/:id/attachment/:n`, where `n` is the 0-based index of this attachment among the attachments of the thread, oldest first. It is relative to the server base URL.
-  D57: an image the human uploaded and whose path they typed (inside the bridge's `UPLOAD_DIR`, extension png/jpg/jpeg/gif/webp/heic) is also an `attachment`, after the message text with that path token removed; its `url` is `/api/sessions/:id/upload/:rel` (`rel` = the path relative to `UPLOAD_DIR`, one URI-encoded segment). The route serves only a regular file whose real path is inside `UPLOAD_DIR`, up to 20 MB.
+  D57: an image the human uploaded and whose path they typed (inside the bridge's `UPLOAD_DIR`, extension png/jpg/jpeg/gif/webp/heic) is also an `attachment`, after the message text with that path token removed; its `url` is `/api/sessions/:id/upload/:rel` (`rel` = the path relative to `UPLOAD_DIR`, one URI-encoded segment). The route serves only a regular file whose real path is inside `UPLOAD_DIR`, up to 20 MB. D65: the bare `url` (`?size=thumb`, the default) serves a JPEG thumbnail (long edge ≤ 1280 px, q 75, made by macOS `sips`, cached in `UPLOAD_DIR/.thumbs`, `cache-control: private, max-age=31536000, immutable`); `attachment.fullUrl` (`?size=full`) serves the original. No thumbnail possible: the original when ≤ 2 MB, else 415 `thumb_unsupported` (no sips) / 502 `thumb_failed`. Any other `size` is 400 `bad_size`. `.thumbs` is never an upload.
 
 ## Tool
 

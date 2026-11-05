@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { splitUploadImages, readUpload, uploadUrl } = require('../sessions/uploads.js');
+const { splitUploadImages, readUpload, uploadUrl, uploadFullUrl } = require('../sessions/uploads.js');
 const { readThread, tailThread } = require('../sessions/transcript-claude.js');
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'p41-d57-')));
@@ -104,7 +104,7 @@ test('readThread: a typed upload path is an attachment with an upload url; the t
   const { messages } = await readThread(p, { sessionId: 's1', uploadRoot: root });
   assert.deepStrictEqual(messages.map((m) => m.kind), ['user', 'attachment', 'attachment', 'user']);
   assert.strictEqual(messages[0].text, 'what is this');
-  assert.deepStrictEqual(messages[1].attachment, { mime: 'image/png', name: 'pasted-1.png', url: uploadUrl('s1', '2026-11-05/pasted-1.png') });
+  assert.deepStrictEqual(messages[1].attachment, { mime: 'image/png', name: 'pasted-1.png', url: uploadUrl('s1', '2026-11-05/pasted-1.png'), fullUrl: uploadFullUrl('s1', '2026-11-05/pasted-1.png') });
   assert.strictEqual(messages[1].attachment.url, '/api/sessions/s1/upload/2026-11-05%2Fpasted-1.png');
   assert.strictEqual(messages[3].text, `plain ${outside}`);
   assert.ok(!('upload' in JSON.parse(JSON.stringify(messages[1]))));

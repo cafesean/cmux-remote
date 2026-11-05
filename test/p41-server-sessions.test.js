@@ -47,7 +47,7 @@ async function fakeBridge(mid, secret) {
       res.write('data: {"type":"msg","session":"x","agentId":"a1111111111111111"}\n\n');
       return;   // left open
     }
-    if (u.pathname === `${pre}/upload/2026-11-05%2Fpasted-1.png`) { res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length }); return res.end(PNG); }   // D57
+    if (u.pathname === `${pre}/upload/2026-11-05%2Fpasted-1.png`) { const body = u.search ? Buffer.from(u.search) : PNG; res.writeHead(200, { 'content-type': 'image/png', 'content-length': body.length }); return res.end(body); }   // D57; D65 a query is echoed as the body
     if (u.pathname === `${pre}/attachment/0`) { res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length }); return res.end(PNG); }
     return send(404, { error: 'not_found' });
   });
@@ -105,6 +105,16 @@ test('D57: upload image bytes pass through as one encoded segment; token require
   assert.deepEqual(at.body, PNG);
   assert.equal((await call(server.base, 'GET', p)).status, 401);
   assert.equal((await call(server.base, 'GET', `/api/sessions/${enc('air:surface:1')}/upload/a/b`, { token: TOKEN })).status, 404);
+});
+
+test('D65: upload ?size=full reaches the bridge; thumb/absent sends no query; other sizes 400; other params dropped', async () => {
+  const p = `/api/sessions/${enc('air:surface:1')}/upload/${enc('2026-11-05/pasted-1.png')}`;
+  assert.deepEqual((await call(server.base, 'GET', p, { token: TOKEN })).body, PNG);
+  assert.deepEqual((await call(server.base, 'GET', `${p}?size=thumb&x=1`, { token: TOKEN })).body, PNG);
+  assert.equal((await call(server.base, 'GET', `${p}?size=full&x=1`, { token: TOKEN })).body.toString(), '?size=full');
+  const bad = await call(server.base, 'GET', `${p}?size=huge`, { token: TOKEN });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error, 'bad_size');
 });
 
 test('an unreachable machine is reported, the rest still list', async () => {

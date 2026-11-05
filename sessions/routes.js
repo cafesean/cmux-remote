@@ -25,6 +25,7 @@ const path = require('path');
 const { detectKind, foregroundCommand, latestSurfaceEvent } = require('./detect');
 const { readThread, tailThread, readAttachment, uploadRefs, BadCursorError } = require('./transcript-claude');
 const uploads = require('./uploads');
+const thumbs = require('./thumbs');
 const { transcriptFor, watchJoin, isAllowedTranscriptPath, WATCH_POLL_MS } = require('./join');
 const { statusFor, contextUsage } = require('./status');
 const eventlog = require('../radar/eventlog');
@@ -55,6 +56,7 @@ const LIMITS = {
   ...names.LIMITS,                    // A16 session-name limits (sessions/names.js)
   ...subagents.LIMITS,                // A10 sub-agent limits (sessions/subagents.js)
   ...uploads.LIMITS,                  // D57 inline upload images (sessions/uploads.js)
+  ...thumbs.LIMITS,                   // D65 upload thumbnails (sessions/thumbs.js)
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 
@@ -90,6 +92,7 @@ function createSessionRoutes(deps) {
   const home = deps.home || os.homedir();
   const loadTree = deps.loadTree;
   // D57: the bridge's upload directory (a getter: bridge.js defines it after this module is built).
+  const thumbStore = thumbs.createThumbs({ resize: deps.thumbResize, limits: deps.thumbLimits });   // D65
   const uploadRoot = () => { try { return (typeof deps.uploadRoot === 'function' ? deps.uploadRoot() : deps.uploadRoot) || null; } catch (_) { return null; } };
   // p41 S2p: (refs) -> Promise<(ref) -> 'private' | 'unavailable' | null>. A private (or unproven)
   // surface is never listed; its thread/stream/attachment/subagents/rename answer 423 `private`
@@ -404,9 +407,13 @@ function createSessionRoutes(deps) {
   // real path is inside the upload directory, with an image extension, under the size cap.
   // M1: and only a rel THIS session's transcript (human messages) references; a rel another session
   // (a private one included) typed is 404 here.
-  async function upload(res, entry, relRaw) {
+  // D65: the default (?size=thumb) is a JPEG thumbnail (sessions/thumbs.js), immutable-cached; ?size=full
+  // is the original. Same session binding and containment for both.
+  async function upload(res, entry, relRaw, u) {
     let rel;
     try { rel = decodeURIComponent(relRaw); } catch (_) { return send(res, 400, { error: 'bad_path' }); }
+    const size = (u && u.searchParams.get('size')) || 'thumb';
+    if (size !== 'thumb' && size !== 'full') return send(res, 400, { error: 'bad_size' });
     const root = uploadRoot();
     const { session, join } = await describe(entry, requestDeps(), null);
     const o = root && join && session.kind === 'claude' && await safeOpen(join.path);
@@ -414,6 +421,17 @@ function createSessionRoutes(deps) {
     let refs = null;
     try { refs = await referencedUploads(join.path, o, root); } catch (_) { refs = null; }
     if (!refs || !refs.has(rel)) return send(res, 404, { error: 'not_found' });
+    if (size === 'thumb') {
+      const read = (r, rt, o2) => uploads.readUpload(r, rt, { ...(o2 || {}), maxBytes: LIMITS.uploadMaxBytes });
+      const t = await thumbStore.get(rel, root, read);
+      if (!t) return send(res, 404, { error: 'not_found' });
+      if (t.kind === 'error') return send(res, t.status, { error: t.code });
+      const thumb = t.kind === 'thumb';
+      res.writeHead(200, { 'content-type': thumb ? 'image/jpeg' : t.mime, 'content-length': t.data.length,
+        'cache-control': thumb ? 'private, max-age=31536000, immutable' : 'no-store', 'x-content-type-options': 'nosniff',
+        'x-cmux-thumb': thumb ? (t.cached ? 'hit' : 'miss') : 'fallback' });
+      return res.end(t.data);
+    }
     const a = await uploads.readUpload(rel, root, { maxBytes: LIMITS.uploadMaxBytes });
     if (!a) return send(res, 404, { error: 'not_found' });
     if (a.tooLarge) return send(res, 413, { error: 'too_large' });
@@ -598,7 +616,7 @@ function createSessionRoutes(deps) {
       if (await refusePrivate(res, entry)) return;
       if (m[2] === 'thread') return thread(res, entry, u);
       if (m[2] === 'thread-stream') return stream(req, res, entry);
-      if (m[4] != null) return upload(res, entry, m[4]);
+      if (m[4] != null) return upload(res, entry, m[4], u);
       return attachment(res, entry, m[3]);
     })().catch(() => { if (!res.headersSent) send(res, 500, { error: 'sessions_failed' }); });
     return true;
