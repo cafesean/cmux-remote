@@ -37,6 +37,7 @@ const PORT = Number(process.env.BRIDGE_PORT || 8799);
 const HOST = process.env.BRIDGE_HOST || '127.0.0.1';
 const SECRET = process.env.BRIDGE_SECRET || '';
 const { safeEqual } = require('./lib/safe-equal');
+const { redactTokens } = require('./lib/redact-tokens');
 // p19: BRIDGE_SOCKET set → listen on that UNIX socket and open NO TCP port. On a shared Mac any user
 // can bind a free loopback port before we do and collect BRIDGE_SECRET from the server; a socket in a
 // 0700 directory of ours cannot be bound or reached by them. A bad value refuses to start here, before
@@ -127,7 +128,7 @@ function send(res, code, obj) {
     expires: '0',
     'surrogate-control': 'no-store',
   });
-  res.end(JSON.stringify(obj));
+  res.end(redactTokens(JSON.stringify(obj)));   // S2r: no sk-ant- token leaves the Mac
 }
 // Older cmux builds (e.g. 0.62.x) reject flags newer ones accept: `--id-format` is global-only there
 // (must precede the subcommand), and `new-surface`/`new-workspace` have no `--focus`. Rather than pin a
@@ -663,7 +664,7 @@ function cmuxLayoutStream(req, res, workspace, ifHash) {
       if (!alive) return;
       if (!l) { res.write('event: error\ndata: cmux_failed\n\n'); return schedule(); }
       const h = payloadHash(l);
-      if (h !== lastHash) { lastHash = h; idle = 0; res.write('data: ' + JSON.stringify({ ...l, h }) + '\n\n'); }
+      if (h !== lastHash) { lastHash = h; idle = 0; res.write('data: ' + redactTokens(JSON.stringify({ ...l, h })) + '\n\n'); }
       else idle++;
       schedule();
     });
@@ -743,7 +744,7 @@ function cmuxGridStream(req, res, surface, ifHash) {
       if (!alive) return;
       if (!obj) { res.write('event: error\ndata: cmux_failed\n\n'); return schedule(); }
       const h = payloadHash(obj);
-      if (h !== lastHash) { lastHash = h; idle = 0; res.write('data: ' + JSON.stringify({ ...obj, h }) + '\n\n'); }
+      if (h !== lastHash) { lastHash = h; idle = 0; res.write('data: ' + redactTokens(JSON.stringify({ ...obj, h })) + '\n\n'); }
       else idle++;
       schedule();
     });
@@ -780,7 +781,7 @@ function cmuxPanesStream(req, res, surfaces, hashes) {
       const h = payloadHash(obj);
       if (h !== last.get(surface)) {
         last.set(surface, h); quietRounds = 0;
-        res.write('data: ' + JSON.stringify({ surface, ...obj, h }) + '\n\n');
+        res.write('data: ' + redactTokens(JSON.stringify({ surface, ...obj, h })) + '\n\n');
       } else quietRounds++;
       schedule();
     });
@@ -1035,7 +1036,7 @@ function cmuxStream(req, res, surface) {
       const screen = stdout || '';
       if (screen !== last) {
         last = screen;
-        res.write('data: ' + Buffer.from(screen, 'utf8').toString('base64') + '\n\n');
+        res.write('data: ' + Buffer.from(redactTokens(screen), 'utf8').toString('base64') + '\n\n');
       }
     }, 5000);
   };

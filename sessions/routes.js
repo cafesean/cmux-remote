@@ -18,6 +18,7 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
+const { redactTokens } = require('../lib/redact-tokens');
 const path = require('path');
 
 const { detectKind, foregroundCommand, latestSurfaceEvent } = require('./detect');
@@ -56,7 +57,7 @@ const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 
 function send(res, code, obj) {
   res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-  res.end(JSON.stringify(obj));
+  res.end(redactTokens(JSON.stringify(obj)));   // S2r
 }
 
 function createSessionRoutes(deps) {
@@ -349,7 +350,7 @@ function createSessionRoutes(deps) {
     let stopJoin = () => {};
     let sentUnsupported = false;
     let st = null;
-    const emit = (ev) => { if (!closed) res.write(`data: ${JSON.stringify({ ...ev, session: id })}\n\n`); };
+    const emit = (ev) => { if (!closed) res.write(`data: ${redactTokens(JSON.stringify({ ...ev, session: id }))}\n\n`); };
     const done = () => {
       if (closed) return;
       closed = true;
@@ -446,7 +447,7 @@ function createSessionRoutes(deps) {
     const id = session.id;
     let closed = false;
     const ac = new AbortController();
-    const emit = (ev) => { if (!closed) res.write(`data: ${JSON.stringify({ ...ev, session: id, agentId })}\n\n`); };
+    const emit = (ev) => { if (!closed) res.write(`data: ${redactTokens(JSON.stringify({ ...ev, session: id, agentId }))}\n\n`); };
     const done = () => {
       if (closed) return;
       closed = true;
