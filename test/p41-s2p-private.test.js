@@ -60,6 +60,10 @@ test('title constant is verbatim', () => {
   assert.equal(priv.PRIVATE_WORKSPACE_TITLE, 'Claude accounts');
 });
 
+test('gate tree timeout is 5 s (loaded-Mac spawn latency; still far below loadTree 12 s + retry)', () => {
+  assert.equal(priv.GATE_TIMEOUT_MS, 5000);
+});
+
 test('title rule: every surface, pane and the workspace titled "Claude accounts" is private', async () => {
   const p = priv.createPrivacy({ loadTree: async () => bridgeTree(), file: fresh('title') });
   assert.equal(await p.isPrivateSurface(S1), true);
