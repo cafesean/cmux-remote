@@ -22,7 +22,10 @@ ANS=""; read -r ANS || true
 case "$ANS" in y|Y) ;; *) echo "cancelled"; exit 1;; esac
 
 "$SECURITY" delete-generic-password -a "$USER" -s "cos-claude-account-$NAME" >/dev/null 2>&1
-"$NODE" "$HERE/lib/accounts-meta.js" remove "$NAME" >/dev/null 2>&1
+if "$SECURITY" find-generic-password -a "$USER" -s "cos-claude-account-$NAME" >/dev/null 2>&1; then
+  echo "remove failed — $NAME is still on this Mac" >&2; sleep "${HYPERMUX_CLOSE_DELAY_S:-5}"; exit 1
+fi
+"$NODE" "$HERE/lib/accounts-meta.js" remove "$NAME" >/dev/null 2>&1 || echo "warning: account metadata could not be updated (the Keychain item is gone)" >&2
 echo "Removed $NAME"
 sleep "${HYPERMUX_CLOSE_DELAY_S:-5}"
 exit 0

@@ -24,9 +24,10 @@ const split = (s) => (s.match(/"[^"]*"|\\S+/g) || []).map((x) => x.replace(/^"|"
 const opts = (a) => { const o = {}; for (let i = 0; i < a.length; i++) { if (a[i] === '-U') o.U = true; else if (a[i].startsWith('-')) o[a[i][1]] = a[++i]; } return o; };
 function run(args) {
   const cmd = args[0]; const o = opts(args.slice(1)); const k = o.a + '|' + o.s; const db = load();
+  if (process.env.FAKE_LOG) fs.appendFileSync(process.env.FAKE_LOG, cmd + (o.U ? ' -U' : '') + '\\n');
   if (cmd === 'show-keychain-info') return process.env.FAKE_LOCKED ? 36 : 0;
   if (cmd === 'find-generic-password') return k in db ? 0 : 44;
-  if (cmd === 'delete-generic-password') { if (!(k in db)) return 44; delete db[k]; save(db); return 0; }
+  if (cmd === 'delete-generic-password') { if (process.env.FAKE_DELETE_FAIL) return 1; if (!(k in db)) return 44; delete db[k]; save(db); return 0; }
   if (cmd === 'add-generic-password') {
     if (process.env.FAKE_WRITE_FAIL) return 1;
     if (k in db && !o.U) return 45;
@@ -52,6 +53,17 @@ const T = process.env.FAKE_TOKEN;
     claude: Object.keys(process.env).some((k) => /^(CLAUDE|ANTHROPIC)/i.test(k)),
   }));
   const mode = process.env.FAKE_MODE || 'normal';
+  if (mode === 'onechunk') {
+    w('Opening browser...\\r\\nVisit: https://claude.example.test/oauth/authorize?code=true\\r\\n\\x1b[1mYour OAuth token (valid for 1 year):\\x1b[0m\\r\\n' + T.slice(0, 70) + '\\r\\n' + T.slice(70) + '\\r\\n');
+    return;
+  }
+  if (mode === 'osc') {
+    w('Visit: https://claude.example.test/x\\r\\n');
+    await sleep(80);
+    w('\\r\\nYour OAuth token (valid for 1 year):\\r\\n' + T.slice(0, 70) + '\\x1b]8;;\\x1b\\\\' + T.slice(70) + '\\r\\nall done.\\r\\n');
+    return;
+  }
+  if (mode === 'hangterm') { process.on('SIGTERM', () => {}); await sleep(30000); return; }
   w('Opening browser to sign in...\\r\\n');
   w('Visit: https://claude.example.test/oauth/authorize?code=true&client_id=fake\\r\\n');
   await sleep(80);
@@ -68,6 +80,7 @@ const T = process.env.FAKE_TOKEN;
 })();
 `;
 const FAKE_SCRIPT = `#!/bin/bash
+[ -n "$FAKE_SCRIPT_ARGS" ] && printf '%s\\n' "$@" > "$FAKE_SCRIPT_ARGS"
 shift 2
 exec "$@"
 `;
@@ -85,12 +98,14 @@ function rig(opts = {}) {
     PATH: process.env.PATH, HOME: path.join(d, 'home'), USER: 'tester',
     HYPERMUX_SECURITY_BIN: sec, HYPERMUX_SCRIPT_BIN: script, HYPERMUX_SETUP_CMD: setup,
     HYPERMUX_ACCOUNTS_FILE: accounts, HYPERMUX_CLOSE_DELAY_S: '0',
+    FAKE_LOG: path.join(d, 'sec.log'), FAKE_SCRIPT_ARGS: path.join(d, 'script.args'),
     FAKE_KEYCHAIN: kc, FAKE_SIDE: side, FAKE_TOKEN: TOKEN,
     BROWSER: '/bin/true', CLAUDE_FOO: 'x', ANTHROPIC_API_KEY: 'sk-ant-api03-fakeXXXXYYYY',
     ...opts,
   };
   const keychain = () => { try { return JSON.parse(fs.readFileSync(kc, 'utf8')); } catch { return {}; } };
-  return { d, env, kc, accounts, side, keychain };
+  const log = () => { try { return fs.readFileSync(path.join(d, 'sec.log'), 'utf8').trim().split('\n'); } catch { return []; } };
+  return { d, env, kc, accounts, side, keychain, log };
 }
 const run = (bin, r, args, input = '', extra = {}) =>
   spawnSync('bash', [bin, ...args], { env: { ...r.env, ...extra }, input, encoding: 'utf8', timeout: 20000 });
@@ -275,4 +290,101 @@ test('--also-on bad/missing label -> exit 2, nothing runs', () => {
     assert.strictEqual(res.status, 2, JSON.stringify(a));
   }
   assert.ok(!fs.existsSync(r.side));
+});
+
+test('I1: setup command runs under stty cols 500 wrapper', () => {
+  const r = rig();
+  assert.strictEqual(run(SETUP, r, ['acme'], 'y\n').status, 0);
+  const a = fs.readFileSync(path.join(r.d, 'script.args'), 'utf8');
+  assert.match(a, /stty cols 500/);
+});
+
+test('I2: --replace deletes old item then adds WITHOUT -U; plain path never -U', () => {
+  const r = rig();
+  fs.writeFileSync(r.kc, JSON.stringify({ [KEY('acme')]: 'old' }));
+  assert.strictEqual(run(SETUP, r, ['acme', '--replace'], 'y\n').status, 0);
+  const l = r.log();
+  const di = l.indexOf('delete-generic-password'), ai = l.indexOf('add-generic-password');
+  assert.ok(di >= 0 && ai > di, l.join(','));
+  assert.ok(!l.some((x) => x.includes(' -U')), l.join(','));
+  assert.strictEqual(r.keychain()[KEY('acme')], TOKEN);
+  const r2 = rig();
+  assert.strictEqual(run(SETUP, r2, ['acme'], 'y\n').status, 0);
+  assert.ok(r2.log().includes('add-generic-password'));
+  assert.ok(!r2.log().some((x) => x.includes(' -U') || x.startsWith('delete')), r2.log().join(','));
+});
+
+test('I2: replace whose delete fails -> exit 1, old item kept, no meta', () => {
+  const r = rig({ FAKE_DELETE_FAIL: '1' });
+  fs.writeFileSync(r.kc, JSON.stringify({ [KEY('acme')]: 'old' }));
+  const res = run(SETUP, r, ['acme', '--replace'], 'y\n');
+  assert.strictEqual(res.status, 1);
+  assert.strictEqual(r.keychain()[KEY('acme')], 'old');
+  assert.ok(!fs.existsSync(r.accounts));
+  noLeak(res);
+});
+
+test('I3: remove with failing delete -> exit 1 "still on this Mac", meta kept', () => {
+  const r = rig({ FAKE_DELETE_FAIL: '1' });
+  fs.writeFileSync(r.kc, JSON.stringify({ [KEY('acme')]: TOKEN }));
+  fs.mkdirSync(path.dirname(r.accounts), { recursive: true });
+  fs.writeFileSync(r.accounts, JSON.stringify({ acme: { addedAt: new Date().toISOString() } }));
+  const res = run(REMOVE, r, ['acme'], 'y\n');
+  assert.strictEqual(res.status, 1);
+  assert.match(res.stdout + res.stderr, /remove failed — acme is still on this Mac/);
+  assert.ok(!/Removed acme/.test(res.stdout));
+  assert.ok('acme' in JSON.parse(fs.readFileSync(r.accounts, 'utf8')));
+});
+
+test('I3: remove with corrupt meta -> warns, Keychain result decides (exit 0)', () => {
+  const r = rig();
+  fs.writeFileSync(r.kc, JSON.stringify({ [KEY('acme')]: TOKEN }));
+  fs.mkdirSync(path.dirname(r.accounts), { recursive: true });
+  fs.writeFileSync(r.accounts, '{not json');
+  const res = run(REMOVE, r, ['acme'], 'y\n');
+  assert.strictEqual(res.status, 0, res.stderr);
+  assert.match(res.stdout + res.stderr, /metadata/i);
+  assert.deepStrictEqual(r.keychain(), {});
+});
+
+test('URL + header + token in ONE chunk: URL shown, no token fragment', () => {
+  const r = rig({ FAKE_MODE: 'onechunk' });
+  const res = run(SETUP, r, ['acme'], 'y\n');
+  assert.strictEqual(res.status, 0, res.stderr + res.stdout);
+  assert.match(res.stdout, /https:\/\/claude\.example\.test\/oauth\/authorize/);
+  assert.ok(!/OAuth token|valid for/i.test(res.stdout.replace(/Token captured/, '')));
+  noLeak(res);
+  assert.strictEqual(r.keychain()[KEY('acme')], TOKEN);
+});
+
+test('OSC-8 (ST-terminated) inside the token is stripped before capture', () => {
+  const r = rig({ FAKE_MODE: 'osc' });
+  const res = run(SETUP, r, ['acme'], 'y\n');
+  assert.strictEqual(res.status, 0, res.stderr + res.stdout);
+  assert.strictEqual(r.keychain()[KEY('acme')], TOKEN);
+  noLeak(res);
+});
+
+test('SIGTERM-ignoring child is SIGKILLed after the timeout', () => {
+  const r = rig({ FAKE_MODE: 'hangterm', HYPERMUX_SETUP_TIMEOUT_MS: '300' });
+  const res = run(SETUP, r, ['acme'], 'y\n');
+  assert.strictEqual(res.status, 1);
+  assert.match(res.stdout + res.stderr, /timed out — nothing stored/);
+});
+
+test('failure waits HYPERMUX_CLOSE_DELAY_S before exit', () => {
+  const r = rig({ FAKE_MODE: 'none', HYPERMUX_CLOSE_DELAY_S: '1' });
+  const t = Date.now();
+  const res = run(SETUP, r, ['acme'], 'y\n');
+  assert.strictEqual(res.status, 1);
+  assert.ok(Date.now() - t >= 950, 'exited too fast');
+});
+
+test('HYPERMUX_SETUP_CMD accepts a JSON array (path with space)', () => {
+  const r = rig();
+  const dir = path.join(r.d, 'with space'); fs.mkdirSync(dir);
+  const cmd = path.join(dir, 'setupcmd'); fs.copyFileSync(r.env.HYPERMUX_SETUP_CMD, cmd); fs.chmodSync(cmd, 0o755);
+  const res = run(SETUP, r, ['acme'], 'y\n', { HYPERMUX_SETUP_CMD: JSON.stringify([cmd]) });
+  assert.strictEqual(res.status, 0, res.stderr + res.stdout);
+  assert.strictEqual(r.keychain()[KEY('acme')], TOKEN);
 });
