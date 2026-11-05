@@ -2274,8 +2274,13 @@ function cmuxNotifications(res) {
 // private "Claude accounts" workspace (S2p gate: the phone can neither see nor type into it), and the
 // person at the Mac confirms there. Every refusal is a code; no stderr, no Keychain output.
 const accountsLib = require('./lib/accounts').createAccounts();
-const ACCOUNT_BIN_DIR = path.join(__dirname, 'bin');
-const ACCOUNT_BIN_DIR_OK = /^[A-Za-z0-9/._-]+$/.test(ACCOUNT_BIN_DIR);   // safe inside '…' in --command
+const ACCOUNT_BIN_DIR = process.env.HYPERMUX_BIN_DIR || path.join(__dirname, 'bin');
+// The pane command is shell-quoted (shq), so spaces are fine — releases live under
+// "~/Library/Application Support/…". Quotes, backslashes and control chars are still refused as a
+// second line of defence (no legitimate install path has them).
+const ACCOUNT_BIN_DIR_OK = /^[^\x00-\x1f\x7f'"\\]+$/.test(ACCOUNT_BIN_DIR);
+// POSIX single-quote: 'a'\''b' — same as gitpanel shellQuote.
+const shq = (v) => "'" + String(v).split("'").join("'\\''") + "'";
 const ACCOUNTS_MAX = 32;                     // accountsMax
 const ACCOUNT_SETUP_TIMEOUT_MS = 600000;     // accountSetupTimeoutMs (pane flag)
 const ACCOUNT_MARK_TTL_MS = 660000;          // private mark: setup timeout + kill grace + close delay
@@ -2284,7 +2289,7 @@ const ACCOUNT_LABEL_RE = /^[A-Za-z0-9 ._-]{1,40}$/;
 const ACCOUNT_NAME_RE = require('./lib/accounts').NAME_RE;
 let accountPane = null;      // { surface, until } — accountSetupOpen: 1 per Mac at a time
 let accountOpening = false;  // a setup/remove request is between its checks and its pane
-if (!ACCOUNT_BIN_DIR_OK) console.log('WARNING: bridge path has characters unsafe in a pane command — Claude account routes disabled');
+if (!ACCOUNT_BIN_DIR_OK) console.log('WARNING: bridge path has a quote, backslash or control character — Claude account setup/remove disabled');
 
 async function accountPaneOpen() {
   if (!accountPane) return false;
@@ -2336,7 +2341,6 @@ async function accountOpen(res, cmdline) {
 function cmuxAccounts(req, res, u, p) {
   if (!SECRET) return send(res, 503, { error: 'not_secured' });
   if (tmuxCli) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
-  if (!ACCOUNT_BIN_DIR_OK) return send(res, 503, { error: 'accounts_disabled' });
   const fail = (code, error) => () => { if (!res.headersSent) send(res, code, { error }); };
   if (req.method === 'GET' && p === '/cmux/accounts') {
     return accountsLib.list({ fresh: u.searchParams.get('fresh') === '1' })
@@ -2348,6 +2352,8 @@ function cmuxAccounts(req, res, u, p) {
     accountOpening = true;
     try { await body(); } finally { accountOpening = false; }
   };
+  // listing never runs a script; only setup/remove need a safe bin path
+  if (req.method !== 'GET' && !ACCOUNT_BIN_DIR_OK) return send(res, 503, { error: 'accounts_disabled' });
   if (req.method === 'POST' && p === '/cmux/accounts/setup') {
     return cmuxReadBody(req, (b) => {
       if (!b) return send(res, 400, { error: 'bad_json' });
@@ -2362,9 +2368,9 @@ function cmuxAccounts(req, res, u, p) {
         if (await accountPaneOpen()) return send(res, 429, { error: 'setup_open' });
         const names = await accountsLib.listNames();
         if (!names.includes(name) && names.length >= ACCOUNTS_MAX) return send(res, 409, { error: 'too_many' });
-        let cmd = `'${ACCOUNT_BIN_DIR}/hypermux-account-setup' ${name}`;
+        let cmd = `${shq(ACCOUNT_BIN_DIR + '/hypermux-account-setup')} ${name}`;
         if (replace) cmd += ' --replace';
-        if (alsoOn !== null) cmd += ` --also-on '${alsoOn}'`;
+        if (alsoOn !== null) cmd += ` --also-on ${shq(alsoOn)}`;
         await accountOpen(res, cmd);
       }).catch(fail(502, 'accounts_failed'));
     }, ACCOUNT_BODY_MAX);
@@ -2377,7 +2383,7 @@ function cmuxAccounts(req, res, u, p) {
     return guarded(name, async () => {
       if (!(await accountsLib.exists(name))) return send(res, 404, { error: 'not_found' });
       if (await accountPaneOpen()) return send(res, 429, { error: 'setup_open' });
-      await accountOpen(res, `'${ACCOUNT_BIN_DIR}/hypermux-account-remove' ${name}`);
+      await accountOpen(res, `${shq(ACCOUNT_BIN_DIR + '/hypermux-account-remove')} ${name}`);
     }).catch(fail(502, 'accounts_failed'));
   }
   return send(res, 404, { error: 'not_found' });

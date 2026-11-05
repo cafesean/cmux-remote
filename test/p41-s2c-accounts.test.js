@@ -400,3 +400,40 @@ test('server: the per-caller key is the credential that AUTHENTICATED (junk bear
     assert.equal(fb.seen.pop().url, '/cmux/accounts', 'fresh throttle holds across junk bearers');
   } finally { await s.stop(); await fb.close(); }
 });
+
+// ---- live bug 2026-11-05: releases live under "~/Library/Application Support/…" (a space) ----------
+async function bridgeWithBin(binDir) {
+  return bootBridge({ cwd: dir, env: {
+    BRIDGE_SECRET: SECRET, CMUX_BIN: path.join(dir, 'fake-cmux'), FAKE_CMUX_TREE: treeFile, FAKE_CMUX_LOG: cmuxLog,
+    HYPERMUX_SECURITY_BIN: path.join(sec, 'security'), FAKE_SEC_DIR: sec, USER: 'tester',
+    HYPERMUX_ACCOUNTS_FILE: path.join(dir, 'accounts.json'), HYPERMUX_PRIVATE_FILE: path.join(dir, 'private-b.json'),
+    P41_PROCS_FIXTURE: path.join(dir, 'procs.json'), NODE_ENV: 'test', COMPLETIONS_ENABLED: '0',
+    HYPERMUX_BIN_DIR: binDir,
+  } });
+}
+
+test('bridge: bin dir with a space (Application Support) -> list works, setup command quotes the path', async () => {
+  const bin = path.join(dir, 'Application Support', 'cmux-remote', 'releases', 'abc', 'bin');
+  const b3 = await bridgeWithBin(bin);
+  try {
+    await new Promise((res) => setTimeout(res, 1100));
+    const l = await call('GET', '/cmux/accounts', undefined, SECRET, b3.base);
+    assert.equal(l.status, 200, l.text);
+    const r = await call('POST', '/cmux/accounts/setup', { name: 'spc', alsoOn: 'mini 2' }, SECRET, b3.base);
+    assert.equal(r.status, 200, r.text);
+    const cmd = cmuxCalls().filter((a) => a[0] === 'new-workspace' || a[0] === 'new-surface').pop();
+    assert.equal(cmd[cmd.length - 1], `'${bin}/hypermux-account-setup' spc --also-on 'mini 2'`);
+  } finally { await b3.stop(); }
+});
+
+test('bridge: bin dir with a quote char -> list still 200, setup/delete refused 503 accounts_disabled', async () => {
+  const bin = path.join(dir, "it's", 'bin');
+  const b4 = await bridgeWithBin(bin);
+  try {
+    assert.equal((await call('GET', '/cmux/accounts', undefined, SECRET, b4.base)).status, 200);
+    const s = await call('POST', '/cmux/accounts/setup', { name: 'qq' }, SECRET, b4.base);
+    assert.equal(s.status, 503); assert.deepEqual(s.json, { error: 'accounts_disabled' });
+    const d = await call('DELETE', '/cmux/accounts/acme', undefined, SECRET, b4.base);
+    assert.equal(d.status, 503); assert.deepEqual(d.json, { error: 'accounts_disabled' });
+  } finally { await b4.stop(); }
+});
