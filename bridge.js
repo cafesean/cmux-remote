@@ -2250,11 +2250,16 @@ function handleCmux(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  if (req.url === '/healthz') return graceful.health(res);
   if (req.url && req.url.startsWith('/cmux/')) return handleCmux(req, res);
   return send(res, 404, { error: 'not_found' });
 });
+// p41 A18: SIGTERM -> `event: restarting` on every open SSE stream, short drain, exit.
+const graceful = require('./lib/graceful').createGraceful(server);
+graceful.install();
 // What both listen paths print and do once the bridge is reachable.
 function afterListen() {
+  graceful.markReady();
   if (!SECRET) console.log('WARNING: BRIDGE_SECRET empty → /cmux/* is open. Only run on a trusted LAN.');
   console.log(`backend: ${BACKEND}`);
   if (!tmuxCli) {

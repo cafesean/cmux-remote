@@ -71,6 +71,23 @@ One terminal, agent or browser surface on one machine.
   Limits (`sessions/choice.js`): choiceScreenTailRows 40, choiceScreenTimeoutMs 1500, choiceScreenTtlMs 1500
   (one screen read per surface shared by list + streams; the parse is cached by screen hash), choiceCacheMax 64,
   choiceOptionsMax 9, choiceLabelMax 200, choiceReadbackTimeoutMs 4000, choiceReadbackPollMs 150.
+  A17 `askForm` (checked BEFORE `menu`): the pending AskUserQuestion (trailing `question` messages of one tool_use)
+  when it has more than one question or any multi-select question:
+  `{choiceId, source:'askForm', question: <first question>, options: [], questions:[{header, question, multiSelect,
+  options:[{label, description}]}]}`. `choiceId` = hash of ('askForm', every header/question/multiSelect/label).
+  Answer ALL questions in one call: `POST /api/cmux/choose {machine, surface, choiceId, answers:[{q, picks:[i…]} |
+  {q, other:'text'}]}` (bridge `POST /cmux/choose {surface, choiceId, answers}`). Every question exactly once;
+  single-select = one pick; `other` only on single-select (1..askFormOtherMax chars, no control chars).
+  - `choiceId` differs / no askForm now -> `409 {error:'stale', step:'choice', choice}` before any key;
+    screen is not this form -> `409 {error:'stale', step:'locate'}`; bad answers -> `400 bad_answers|bad_other|other_multi_unsupported`.
+  - The bridge locates the tab on screen (question text + every option label), goes back to question 1 with ←,
+    then per question: arrows from the CURRENT highlight + readback, Enter (single) / space toggles verified per
+    checkbox then Next row or → (multi) / arrows to "Type something." + typed text read back + Enter (Other);
+    each step waits for the next tab on a fresh screen. On the review step every answer must be on screen, then
+    arrows to `Submit answers` + readback + Enter. Any mismatch -> `409 {error:'selection_moved'|'no_confirmation', step}`
+    (`q:<i>[:pick|:toggle:<j>|:other|:next]`, `tab:<t>`, `review[:q:<i>]`, `submit`); Submit is never pressed then.
+  Limits: askFormQuestionsMax 8, askFormOtherMax 500, askFormLookbackRows 16, askFormStepTimeoutMs 4000
+  (server relay timeout 90 s for an askForm choose).
 - `reach`: `cmux` or `tmux`. How input reaches the pane. On a cmux host, a tmux session that runs
   claude or codex but that no cmux pane shows (detached, or its cmux pane was closed) is still listed,
   under workspace `tmux`, with `reach: 'tmux'` and a minted tmux surface id (`lib/tmux-ids.js`). The
@@ -230,3 +247,18 @@ app sends one JSON frame per action:
   shapes were used (user and assistant messages, `function_call` and `function_call_output` pairs,
   an image view). Re-check this fixture against a real rollout when the Codex normaliser (task A2) lands.
 - `stream.ndjson`: Stream events, one per line, including a replaced message and a `reset`.
+
+## Graceful restart (p41 A18)
+
+On SIGTERM/SIGINT the server (`server.js`) and bridge (`bridge.js`) tell every open SSE stream
+(sessions list/thread, cmux layout/panes/grid/stream, browser stream, radar) a final frame, then end it:
+
+    retry: <retryMs>
+    event: restarting
+    data: {"retryMs":500}
+
+Clients must treat `restarting` as "reconnect now (after ~retryMs, reset backoff)", not as an error.
+Then in-flight non-stream requests get a drain window (`RESTART_DRAIN_MS`, default 3000) and the process
+exits 0. Hint is `RESTART_RETRY_MS` (default 500). Defaults live in `lib/graceful.js` LIMITS.
+`GET /healthz` (no auth) returns `{ok,ready,draining}`: 200 once listening, 503 while draining.
+The server listens before any slow work; nothing blocks startup.

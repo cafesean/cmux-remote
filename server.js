@@ -662,8 +662,8 @@ async function handleApi(req, res, u) {
       if (!m) return sendJson(res, 404, { error: 'no_machine' });
       relay(res, bridge(m, '/cmux/choose', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ surface: b.surface, choiceId: b.choiceId, index: b.index, label: b.label }),
-        timeout: 20000,
+        body: JSON.stringify({ surface: b.surface, choiceId: b.choiceId, index: b.index, label: b.label, answers: b.answers }),
+        timeout: Array.isArray(b.answers) ? 90000 : 20000,   // A17 askForm walks every question with readback
       }));
     });
   }
@@ -848,6 +848,7 @@ async function handleApi(req, res, u) {
 }
 
 const httpServer = http.createServer((req, res) => {
+  if (req.url === '/healthz') return graceful.health(res);
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { res.writeHead(400); return res.end(); }
   if (u.pathname.startsWith('/api/')) return handleApi(req, res, u);
   if (u.pathname === '/' || u.pathname === '/index.html') return serveStatic(req, res, 'index.html');
@@ -885,6 +886,7 @@ const httpServer = http.createServer((req, res) => {
 
 // What both listen paths print once the server is reachable.
 function afterListen() {
+  graceful.markReady();
   // id, label and host only — never the secret. This is the first place a two-Mac setup can be
   // checked: a machine missing here was never parsed out of CMUX_MACHINES / CMUX_CONFIG.
   for (const m of MACHINES) {
@@ -895,6 +897,7 @@ function afterListen() {
   }
   if (!SERVER_TOKEN) console.log('WARNING: SERVER_TOKEN empty → UI/API open. Set it before exposing outside a trusted LAN.');
 }
+const graceful = require('./lib/graceful').createGraceful(httpServer);
 if (SERVER_SOCKET) {
   // lib/unix-listen.js checks the directory (real path, 0700, ours, safe ancestors), refuses a live
   // socket at the path, removes a stale one, listens, then chmods the socket 0600.
@@ -916,15 +919,6 @@ if (SERVER_SOCKET) {
   });
 }
 
-// Radar's timers go when the process is asked to leave. Installing a signal handler REPLACES the
-// default terminate-on-SIGTERM, so this exits explicitly — and it is installed ONLY when radar is
-// enabled, so with radar off the process's signal behaviour is byte-for-byte what it always was.
-if (radar) {
-  const shutdown = () => {
-    try { radar.stop(); } catch (_) { /* leaving anyway */ }
-    try { httpServer.close(); } catch (_) {}
-    process.exit(0);
-  };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
-}
+// p41 A18: SIGTERM/SIGINT -> every open SSE stream gets `event: restarting`, then a short drain and
+// exit. Radar's timers (if enabled) are stopped first.
+graceful.install(() => { if (radar) radar.stop(); });

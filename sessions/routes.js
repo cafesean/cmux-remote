@@ -528,7 +528,8 @@ function createSessionRoutes(deps) {
   async function choose(b, io) {
     const surface = String((b && b.surface) || '');
     const index = b && Number.isInteger(b.index) ? b.index : -1;
-    if (!b || typeof b.choiceId !== 'string' || typeof b.label !== 'string' || index < 0) return { code: 400, body: { error: 'bad_json' } };
+    const form = !!b && Array.isArray(b.answers);   // A17 askForm: {choiceId, answers:[{q, picks}|{q, other}]}
+    if (!b || typeof b.choiceId !== 'string' || (!form && (typeof b.label !== 'string' || index < 0))) return { code: 400, body: { error: 'bad_json' } };
     const tabs = await treeTabs();
     if (!tabs) return { code: 502, body: { error: 'cmux_failed' } };
     const entry = tabs.find((x) => x.tab.id === surface);
@@ -536,6 +537,7 @@ function createSessionRoutes(deps) {
     const d = requestDeps();
     d.freshChoice = true;
     const { session } = await describe(entry, d, await unreadFor(entry.tab));
+    if (form) return choices.commitForm({ current: session.choice || null, choiceId: b.choiceId, answers: b.answers, surface }, io);
     return choices.commit({ current: session.choice || null, choiceId: b.choiceId, index, label: b.label, surface }, io);
   }
 

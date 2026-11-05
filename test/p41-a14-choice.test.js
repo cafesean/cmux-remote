@@ -58,10 +58,10 @@ test('pending AskUserQuestion with no readable menu -> source ask, number typed 
     { label: 'Refactor', send: { text: '2', submit: false } }] });
 });
 
-test('multi-select AskUserQuestion gives no ask choice (one press does not answer it)', async () => {
+test('multi-select AskUserQuestion gives no ask choice (one press does not answer it) -> A17 askForm', async () => {
   const r = createChoiceReader({ readGrid: async () => null });
   const multi = { ...question, question: { ...question.question, multi: true } };
-  assert.equal(await r.choiceFor({ status: 'needs-you', surface: 'S1', lastMsgs: [multi] }), null);
+  assert.equal((await r.choiceFor({ status: 'needs-you', surface: 'S1', lastMsgs: [multi] })).source, 'askForm');
 });
 
 test('callout options in the last assistant message -> source callout, text + Enter', async () => {
