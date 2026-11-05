@@ -158,10 +158,22 @@ const cmuxP = (args, timeout) => new Promise((resolve) =>
 // wants the refusal verbatim — the CLI's own wording is what tells an operator which rule it hit.
 const cmuxErr = (args, timeout = 8000) => new Promise((resolve) =>
   cmux(args, (err, stdout, stderr) => resolve(err ? String(stderr || err.message || '') : null), timeout));
+// p41 S2p: every JSON body passes the private-surface gate here. handleCmux records each request's
+// `res` (privateRes) so a body naming a private surface/pane/workspace answers 423 `private` before
+// any route sees it — no caller changes, and a route added later is covered by construction.
 function cmuxReadBody(req, cb, cap = 256 * 1024) {
   let body = '';
   req.on('data', (c) => { body += c; if (body.length > cap) req.destroy(); });
-  req.on('end', () => { try { cb(JSON.parse(body || '{}')); } catch (_) { cb(null); } });
+  req.on('end', () => {
+    let b;
+    try { b = JSON.parse(body || '{}'); } catch (_) { return cb(null); }
+    const run = () => { try { cb(b); } catch (_) { cb(null); } };
+    const refs = privateBodyRefs(b);
+    const res = privateRes.get(req);
+    if (!refs.length || !res) return run();
+    privateGate(refs).catch(() => 503)   // a gate that cannot decide refuses
+      .then((code) => (code ? gateRefuse(res, code) : run()));
+  });
 }
 
 // ---------- filesystem browse (p4) ------------------------------------------
@@ -205,8 +217,52 @@ function p41ProcSnapshotKnob() {
     return procs.snapshot({ psAll: async () => String(fx.ps || ''), tmuxSockets: Array.isArray(fx.tmuxSockets) ? fx.tmuxSockets : [] });
   };
 }
+// ---------- p41 S2p private surfaces (one gate) ------------------------------
+// lib/private-surfaces.js: the "Claude accounts" workspace + the mark file. Gate: handleCmux (query
+// params) and cmuxReadBody (JSON bodies) answer 423 `private`; tree, notifications, panes-stream and
+// the sessions list drop private surfaces.
+const privateSurfaces = require('./lib/private-surfaces');
+const PRIVATE_GATE_TREE_MS = privateSurfaces.GATE_TIMEOUT_MS;
+const privacy = privateSurfaces.createPrivacy({ loadTree: () => loadTree(true) });
+const privateRes = new WeakMap();   // req -> res, for the body gate in cmuxReadBody
+const PRIVATE_QUERY_KEYS = ['surface', 'pane', 'workspace', 'target', 'id', 'tab'];
+const PRIVATE_BODY_KEYS = ['surface', 'pane', 'paneA', 'paneB', 'workspace', 'target', 'tab'];
+function privateBodyRefs(b) {
+  if (!b || typeof b !== 'object') return [];
+  const out = [];
+  // Routes coerce with String(b.x), and String(['id']) === 'id' — so any non-string value is gated in
+  // its coerced form (and an array element by element too).
+  const add = (v) => {
+    if (v == null || v === '') return;
+    if (Array.isArray(v)) v.forEach((x) => { if (x != null && typeof x !== 'object') out.push(String(x)); });
+    out.push(String(v));
+  };
+  for (const k of PRIVATE_BODY_KEYS) add(b[k]);
+  add(b.surfaces);
+  return out.filter(Boolean);
+}
+// -> null (clear) | 423 (a ref IS private) | 503 (a ref cannot be proven either way: the gate's tree
+// read failed or stalled, and no recent good tree knows the ref). A tmux-only session
+// id (minted, never in the cmux tree) is exempt from 503 when tmux resolves it: it is not a cmux pane.
+async function privateGate(refs) {
+  const v = await privacy.verdict(refs);
+  const vs = refs.map(v);
+  if (vs.includes('private')) return 423;
+  const unsure = refs.filter((r, i) => vs[i] === 'unavailable');
+  if (!unsure.length) return null;
+  if (tmuxCli) return 503;
+  for (const r of unsure) {
+    if (!SURFACE_RE.test(r)) return 503;
+    let tgt = null;
+    try { tgt = await sessionRoutes.tmuxTarget(r); } catch (_) { tgt = null; }
+    if (!tgt) return 503;
+  }
+  return null;
+}
+const gateRefuse = (res, code) => send(res, code, code === 423 ? { error: 'private' } : { error: 'gate_unavailable' });
 const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   machineId: MACHINE_ID,
+  privateCheck: (refs) => privacy.verdict(refs),
   backend: BACKEND,
   loadTree: () => loadTree(),
   unreadBySurface: () => (tmuxCli ? Promise.resolve(null) : unreadBySurface()),
@@ -429,11 +485,13 @@ function cmuxFsDownload(req, res, rawPath) {
 // strip and every surface-addressed op use) and `panes` (the split grouping, each carrying the ids of
 // the tabs that live in it). The flat list is the same array of objects, so a tab object is shared,
 // not copied — `pane` on a tab and `tabs` on a pane are two views of one thing.
-async function loadTree() {
+// `gate` (p41 S2p): the private-surface gate's read — short timeout, no retry; a stall must refuse
+// fast rather than hold every send/screen behind a 24 s tree read.
+async function loadTree(gate) {
   // `cmux tree` can briefly stall while a surface tears down (e.g. closing a tab an agent was mid-prompt on).
   // Retry once with a longer timeout so a transient stall doesn't hard-fail the whole UI ("tree failed").
-  let out = await cmuxP(['tree', '--all', '--json', '--id-format', 'both'], 12000);
-  if (out == null) { await new Promise((r) => setTimeout(r, 400)); out = await cmuxP(['tree', '--all', '--json', '--id-format', 'both'], 12000); }
+  let out = await cmuxP(['tree', '--all', '--json', '--id-format', 'both'], gate ? PRIVATE_GATE_TREE_MS : 12000);
+  if (out == null && !gate) { await new Promise((r) => setTimeout(r, 400)); out = await cmuxP(['tree', '--all', '--json', '--id-format', 'both'], 12000); }
   if (out == null) return null;
   let data;
   try { data = JSON.parse(out); } catch (_) { return null; }
@@ -481,6 +539,7 @@ async function loadTree() {
       });
     }
   }
+  if (!gate) privacy.prime(workspaces);   // S2p: a fresh full tree keeps the gate's cache current
   return workspaces;
 }
 
@@ -630,7 +689,7 @@ async function attachStatuses(workspaces) {
 }
 
 async function cmuxTree(res) {
-  const ws = await loadTree();
+  const ws = privacy.filterTree(await loadTree());
   if (ws == null) return send(res, 502, { error: 'cmux_failed' });
   const cov = await attachStatuses(ws);
   send(res, 200, {
@@ -1252,7 +1311,7 @@ function cmuxKey(req, res) {
 
 // ---------- lifecycle: new tab (surface) / new workspace / close tab --------
 async function treePayload() {
-  const ws = await loadTree();
+  const ws = privacy.filterTree(await loadTree());
   if (ws == null) return null;
   await attachStatuses(ws);
   return ws;
@@ -2110,10 +2169,15 @@ function cmuxNotifications(res) {
     try { list = JSON.parse(stdout); } catch (_) { return send(res, 502, { error: 'bad_cmux_output' }); }
     if (!Array.isArray(list)) list = [];
     const str = (v) => (typeof v === 'string' ? v : '');
-    send(res, 200, { notifications: list.filter((n) => n && n.id).map((n) => ({
+    const items = list.filter((n) => n && n.id).map((n) => ({
       id: str(n.id), title: str(n.title), subtitle: str(n.subtitle), body: str(n.body), created_at: str(n.created_at),
       is_read: !!n.is_read, surface_id: str(n.surface_id) || null, workspace_id: str(n.workspace_id) || null, tab_title: str(n.tab_title),
-    })) });
+    }));
+    // S2p: a private surface's notifications never leave the Mac.
+    const refs = items.flatMap((n) => [n.surface_id, n.workspace_id]).filter(Boolean);
+    privacy.snapshot(refs).then((isPriv) => send(res, 200, {
+      notifications: items.filter((n) => !isPriv(n.surface_id) && !isPriv(n.workspace_id)) }),
+    () => send(res, 502, { error: 'cmux_failed' }));
   });
 }
 
@@ -2121,6 +2185,31 @@ function cmuxNotifications(res) {
 function handleCmux(req, res) {
   if (SECRET && !safeEqual(req.headers['x-bridge-secret'], SECRET)) return send(res, 403, { error: 'forbidden' });
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { return send(res, 400, { error: 'bad_url' }); }
+  // tmux has no browser surfaces: answered before the gate, nothing is reached either way
+  if (tmuxCli && u.pathname.startsWith('/cmux/browser/')) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
+  // p41 S2p — the one private-surface gate (spec §4.5). Query params here; JSON bodies in cmuxReadBody.
+  privateRes.set(req, res);
+  const refs = PRIVATE_QUERY_KEYS.flatMap((k) => u.searchParams.getAll(k)).filter(Boolean);
+  const multi = (u.searchParams.get('surfaces') || '').split(',').map((s) => s.trim());
+  const hasMulti = multi.some(Boolean);
+  if (!refs.length && !hasMulti) return dispatchCmux(req, res, u);
+  const multiRefs = multi.filter(Boolean);
+  Promise.all([refs.length ? privateGate(refs) : null, hasMulti ? privacy.verdict(multiRefs) : null]).then(([code, mv]) => {
+    if (code) return gateRefuse(res, code);
+    if (hasMulti && multiRefs.some(mv)) {
+      // multi-surface reads (panes-stream) drop private/unproven surfaces; `h` is positional, so it follows
+      const keep = multi.map((s) => !mv(s));
+      const kept = multi.filter((_, i) => keep[i]).filter(Boolean);
+      if (!kept.length) return gateRefuse(res, multiRefs.some((s) => mv(s) === 'private') ? 423 : 503);
+      u.searchParams.set('surfaces', multi.filter((_, i) => keep[i]).join(','));
+      const h = u.searchParams.get('h');
+      if (h != null) { const hs = h.split(','); if (hs.length === multi.length) u.searchParams.set('h', hs.filter((_, i) => keep[i]).join(',')); }
+    }
+    dispatchCmux(req, res, u);
+  }, () => gateRefuse(res, 503));   // a gate that cannot decide refuses
+}
+
+function dispatchCmux(req, res, u) {
   const p = u.pathname;
   // tmux has no browser surfaces: say so plainly (the page hides these from capabilities anyway)
   if (tmuxCli && p.startsWith('/cmux/browser/')) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });

@@ -68,12 +68,19 @@ function finish() {
     process.stdout.write(JSON.stringify(body));
     return process.exit(0);
   }
+  // p41 S2p: the private-surface gate reads the tree; the surface sits in an ordinary workspace.
+  if (op === 'tree') {
+    const s = { id: '11111111-2222-4333-8444-5555555555aa', ref: 'surface:1', title: 't', type: 'terminal', selected: true, selected_in_pane: true };
+    process.stdout.write(JSON.stringify({ windows: [{ id: 'w1', ref: 'window:1', workspaces: [{ id: 'ws1', ref: 'workspace:1', title: 'work', selected: true,
+      panes: [{ id: 'p1', ref: 'pane:1', index: 0, focused: true, selected_surface_id: s.id, surfaces: [s] }] }] }] }));
+    return process.exit(0);
+  }
   process.exit(0);
 }
 function startCount() {
   try {
     return fs.readFileSync(process.env.FAKE_CMUX_LOG, 'utf8').split('\n').filter(Boolean)
-      .filter(function (l) { try { return JSON.parse(l).phase === 'start'; } catch (_) { return false; } }).length;
+      .filter(function (l) { try { const e = JSON.parse(l); return e.phase === 'start' && e.op !== 'tree'; } catch (_) { return false; } }).length;   // S2p: gate's tree probe is not a surface command
   } catch (_) { return 0; }
 }
 // Hold until N invocations have STARTED, so a concurrency claim never rests on a stopwatch: if the
@@ -117,7 +124,8 @@ function log() {
   let raw = '';
   try { raw = fs.readFileSync(logPath, 'utf8'); } catch (_) { return []; }
   // The boot-time `cmux --version` probe is not a surface command; it may land in any test's log.
-  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.op !== '--version');
+  // p41 S2p: the private-surface gate's read-only `tree` probe is no part of any send's sequence either.
+  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.op !== '--version' && e.op !== 'tree');
 }
 const starts = () => log().filter((e) => e.phase === 'start');
 

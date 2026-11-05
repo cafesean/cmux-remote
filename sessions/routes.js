@@ -65,6 +65,10 @@ function createSessionRoutes(deps) {
   const backend = deps.backend;
   const home = deps.home || os.homedir();
   const loadTree = deps.loadTree;
+  // p41 S2p: (refs) -> Promise<(ref) -> 'private' | 'unavailable' | null>. A private (or unproven)
+  // surface is never listed; its thread/stream/attachment/subagents/rename answer 423 `private`
+  // (503 `gate_unavailable` when the gate could not decide).
+  const privateCheck = deps.privateCheck || (async () => () => false);
   const unreadBySurface = deps.unreadBySurface || (async () => null);
   const sseHead = deps.sseHead;
   const joinPollMs = deps.joinPollMs || WATCH_POLL_MS;
@@ -171,6 +175,14 @@ function createSessionRoutes(deps) {
     if (!tabs) return null;
     return tabs.find((x) => x.tab.id === sf);
   }
+  // S2p: true when the 423 was sent.
+  async function refusePrivate(res, entry) {
+    const v = (await privateCheck([entry.tab.id]))(entry.tab.id);
+    if (!v) return false;
+    if (v === 'private') send(res, 423, { error: 'private' });
+    else send(res, 503, { error: 'gate_unavailable' });
+    return true;
+  }
 
   async function sessionEvents(d, sessionId) {
     if (!sessionId) return [];
@@ -267,8 +279,10 @@ function createSessionRoutes(deps) {
 
   async function list(res) {
     const d = requestDeps();
-    const tabs = await treeTabs(d.procSnapshot);
-    if (!tabs) return send(res, 502, { error: 'cmux_failed' });
+    const all = await treeTabs(d.procSnapshot);
+    if (!all) return send(res, 502, { error: 'cmux_failed' });
+    const isPriv = await privateCheck(all.map((e) => e.tab.id));
+    const tabs = all.filter((e) => !isPriv(e.tab.id));
     let by = null;
     try { by = await unreadBySurface(); } catch (_) { by = null; }
     const results = [];
@@ -496,6 +510,7 @@ function createSessionRoutes(deps) {
         const entry = await findTab(id);
         if (entry === null) return send(res, 502, { error: 'cmux_failed' });
         if (!entry) return send(res, 404, { error: 'not_found' });
+        if (await refusePrivate(res, entry)) return;
         if (agentId == null) return subagentList(res, entry);
         if (sm[3] === 'thread') return subagentThread(res, entry, agentId, u);
         return subagentStream(req, res, entry, agentId);
@@ -510,6 +525,7 @@ function createSessionRoutes(deps) {
       const entry = await findTab(id);
       if (entry === null) return send(res, 502, { error: 'cmux_failed' });
       if (!entry) return send(res, 404, { error: 'not_found' });
+      if (await refusePrivate(res, entry)) return;
       if (m[2] === 'thread') return thread(res, entry, u);
       if (m[2] === 'thread-stream') return stream(req, res, entry);
       return attachment(res, entry, m[3]);
@@ -550,6 +566,8 @@ function createSessionRoutes(deps) {
     const entry = await findTab(b.sessionId);
     if (entry === null) return { code: 502, body: { error: 'cmux_failed' } };
     if (!entry) return { code: 404, body: { error: 'not_found' } };
+    const pv = (await privateCheck([entry.tab.id]))(entry.tab.id);   // S2p
+    if (pv) return pv === 'private' ? { code: 423, body: { error: 'private' } } : { code: 503, body: { error: 'gate_unavailable' } };
     const d = requestDeps();
     let join = null;
     if (entry.tab.type !== 'browser') { try { join = await transcriptFor(joinSurface(entry.tab), d); } catch (_) { join = null; } }
