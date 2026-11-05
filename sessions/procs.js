@@ -15,7 +15,7 @@
 // The caller still runs that path through join.js's containment check before serving it.
 //
 // ps, tmux and the file read are injected (deps), so tests never touch a real process table.
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
@@ -32,6 +32,7 @@ const LIMITS = {
   psTimeoutMs: 3000,
   tmuxTimeoutMs: 3000,
   sessionFileMaxBytes: 64 * 1024,
+  tmuxSubmitSettleMs: 150,   // pause between pasted text and Enter (same paste-burst rule as cmuxSend)
 };
 
 const slugOf = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
@@ -99,13 +100,15 @@ function findAgent(table, rootPid) {
 
 // ---- tmux ----------------------------------------------------------------------------------------
 
-const SEP = '\x1f';
+// Printable: tmux escapes control characters (\x1f) in format output when the locale is not UTF-8,
+// which a launchd-started bridge's is not.
+const SEP = '|^|';
 // Every pane of every session on one socket, plus each session's CMUX_SURFACE_ID and attach count.
 async function tmuxSocketState(tmux, socket) {
   let out;
   try {
     out = await tmux(socket, ['list-panes', '-a', '-F',
-      ['#{session_name}', '#{pane_id}', '#{pane_pid}', '#{pane_active}', '#{window_active}', '#{session_attached}', '#{start_time}', '#{pane_current_path}'].join(SEP)]);
+      ['#{session_name}', '#{pane_id}', '#{pane_pid}', '#{pane_active}', '#{window_active}', '#{session_attached}', '#{start_time}', '#{pane_current_path}', '#{session_created}'].join(SEP)]);
   } catch (_) { return null; }
   const sessions = new Map();
   for (const line of String(out || '').split('\n')) {
@@ -114,7 +117,7 @@ async function tmuxSocketState(tmux, socket) {
     let s = sessions.get(f[0]);
     if (!s) {
       if (sessions.size >= LIMITS.tmuxSessionsMax) continue;
-      s = { socket, name: f[0], attached: Number(f[5]) || 0, epoch: Number(f[6]) || 0, panes: [], surfaceId: null };
+      s = { socket, name: f[0], attached: Number(f[5]) || 0, epoch: Number(f[6]) || 0, created: Number(f[8]) || 0, panes: [], surfaceId: null };
       sessions.set(f[0], s);
     }
     s.panes.push({ id: f[1], pid: Number(f[2]), active: f[3] === '1' && f[4] === '1', cwd: f[7] || null });
@@ -143,6 +146,18 @@ function snapshot(deps) {
 
 const activePane = (s) => s.panes.find((p) => p.active) || s.panes[0] || null;
 
+// A detached session keeps the CMUX_SURFACE_ID of the last surface that attached it, so two sessions
+// can name one surface. The one that surface shows is the attached one; among equals, the newest.
+function ownerOf(sessions, surfaceId) {
+  let best = null;
+  for (const s of sessions || []) {
+    if (s.surfaceId !== surfaceId) continue;
+    const a = s.attached > 0; const b = best && best.attached > 0;
+    if (!best || (a && !b) || (a === b && s.created > best.created)) best = s;
+  }
+  return best;
+}
+
 // ---- the agent a pane runs -----------------------------------------------------------------------
 
 // surface: {id} — a cmux surface uuid (cmux backend) or a tmux pane id `%N` (tmux backend / a
@@ -154,14 +169,15 @@ async function agentFor(surface, deps) {
   const snap = await (d.procSnapshot ? d.procSnapshot() : snapshot(d));
   if (!snap || !snap.table) return null;
   let pane = null;
-  for (const s of snap.sessions || []) {
-    if (/^%\d+$/.test(id)) {
+  if (/^%\d+$/.test(id)) {
+    for (const s of snap.sessions || []) {
       if (surface.socket && s.socket !== surface.socket) continue;
       pane = s.panes.find((p) => p.id === id) || null;
       if (pane) break;
-      continue;
     }
-    if (s.surfaceId === id) { pane = activePane(s); if (pane) break; }
+  } else {
+    const owner = ownerOf(snap.sessions, id);
+    pane = owner ? activePane(owner) : null;
   }
   const rootPid = pane ? pane.pid : surface.pid;
   if (!rootPid) return null;
@@ -189,7 +205,7 @@ async function orphanTmuxTabs(liveIds, deps) {
   if (!snap || !snap.table) return [];
   const out = [];
   for (const s of snap.sessions || []) {
-    if (s.surfaceId && liveIds.has(s.surfaceId) && s.attached > 0) continue;
+    if (s.surfaceId && liveIds.has(s.surfaceId) && ownerOf(snap.sessions, s.surfaceId) === s) continue;   // shown by that cmux pane
     const p = activePane(s);
     if (!p || !findAgent(snap.table, p.pid)) continue;
     const n = Number(String(p.id).slice(1));
@@ -198,4 +214,57 @@ async function orphanTmuxTabs(liveIds, deps) {
   return out;
 }
 
-module.exports = { agentFor, orphanTmuxTabs, snapshot, findAgent, parsePs, claudeTranscriptOf, LIMITS };
+// A minted tmux-only surface id (orphanTmuxTabs) -> {socket, pane} when that pane still exists on a
+// server with the id's epoch; anything else (a cmux uuid, a stale id) -> null.
+async function tmuxTargetFor(surfaceId, deps) {
+  const p = tmuxIds.parse(surfaceId);
+  if (!p || p.kind !== 4) return null;
+  const snap = await (deps && deps.procSnapshot ? deps.procSnapshot() : snapshot(deps));
+  for (const s of (snap && snap.sessions) || []) {
+    if (!tmuxIds.sameEpoch(p.epoch, s.epoch)) continue;
+    const pane = s.panes.find((x) => x.id === `%${p.n}`);
+    if (pane) return { socket: s.socket, pane: pane.id, session: s.name };
+  }
+  return null;
+}
+
+// Type into a tmux pane the way lib/tmux-cli.js verbSend does (load-buffer + paste-buffer, bracketed
+// only for multi-line text), then Enter after a settle; or press one KEYMAP key. argv only, no shell.
+function tmuxRun(socket, args, input) {
+  return new Promise((resolve) => {
+    let child;
+    try { child = spawn(tmuxCli.resolveTmuxBin(process.env.TMUX_BIN || ''), ['-S', socket, ...args], { stdio: ['pipe', 'ignore', 'pipe'] }); } catch (e) { return resolve({ code: -1, dispatched: false, detail: String(e.message) }); }
+    let err = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), LIMITS.tmuxTimeoutMs);
+    child.stderr.on('data', (b) => { err += b; });
+    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, dispatched: child.pid !== undefined, detail: String(e.message) }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, dispatched: true, detail: err.slice(0, 200) }); });
+    child.stdin.on('error', () => {});
+    child.stdin.end(input || '');
+  });
+}
+// opts: {text, submit} or {press: '<KEYMAP name>'}
+async function tmuxSend(target, opts, deps) {
+  const run = (deps && deps.tmuxRun) || tmuxRun;
+  const o = opts || {};
+  if (o.press) {
+    const mapped = tmuxCli.KEYMAP[String(o.press).toLowerCase()];
+    if (!mapped) return { error: 'bad_key' };
+    const r = await run(target.socket, ['send-keys', '-t', target.pane, mapped]);
+    return r.code === 0 ? { ok: true } : { error: 'tmux_failed', detail: r.detail };
+  }
+  if (o.text) {
+    const buf = `cmuxr-${process.pid}-${Date.now().toString(36)}`;
+    const r = await run(target.socket, ['load-buffer', '-b', buf, '-', ';', 'paste-buffer', '-d',
+      ...(o.text.includes('\n') ? ['-p'] : []), '-b', buf, '-t', target.pane], o.text);
+    if (r.code !== 0) return { error: r.dispatched ? 'text_command_unconfirmed' : 'send_failed', detail: r.detail };
+  }
+  if (o.submit) {
+    if (o.text) await new Promise((res) => setTimeout(res, (deps && deps.settleMs != null) ? deps.settleMs : LIMITS.tmuxSubmitSettleMs));
+    const r = await run(target.socket, ['send-keys', '-t', target.pane, 'Enter']);
+    if (r.code !== 0) return { error: 'submit_failed_text_inserted', detail: r.detail };
+  }
+  return { ok: true };
+}
+
+module.exports = { agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxSend, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };

@@ -24,6 +24,20 @@ One terminal, agent or browser surface on one machine.
 - `lastActivity`: number. When the session last changed.
 - `model`: string, optional. The model name, for chat kinds.
 - `contextPct`: number 0 to 100, optional. How full the model context is.
+- `reach`: `cmux` or `tmux`. How input reaches the pane. On a cmux host, a tmux session that runs
+  claude or codex but that no cmux pane shows (detached, or its cmux pane was closed) is still listed,
+  under workspace `tmux`, with `reach: 'tmux'` and a minted tmux surface id (`lib/tmux-ids.js`). The
+  app sends to it exactly as to any session (`{machine, surface}` on `/cmux/send` and `/cmux/key`); the
+  bridge resolves that id to the tmux pane and types with tmux (paste, then Enter after a settle).
+  `expect_seq` is refused there (`409 seq_unavailable`): a tmux-only pane has no grid seq.
+
+Agent detection (`sessions/procs.js`) walks the process tree: cmux surface -> the tmux session whose
+session env `CMUX_SURFACE_ID` names it (attached first, then newest) -> its active pane -> the nearest
+claude/codex descendant. A claude pid's `~/.claude/sessions/<pid>.json` names its transcript; that and
+the newest hook-event transcript compete, newest mtime wins (so a /clear still moves the thread).
+Limits (`procs.js` / `routes.js` LIMITS): procTreeDepth 6, procTreeNodes 512, tmuxSessionsMax 64,
+psTimeoutMs/tmuxTimeoutMs 3000, sessionFileMaxBytes 64 KiB, tmuxSubmitSettleMs 150,
+procSnapshotTtlMs 2000 (one ps+tmux snapshot shared by list, describe and every stream tick).
 
 ## Session list
 

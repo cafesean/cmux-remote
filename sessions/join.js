@@ -158,24 +158,30 @@ async function transcriptFor(surface, deps) {
   const id = s.id || s.ref;
   if (!id) return null;
 
-  // The live process first (sessions/procs.js, injected by routes as deps.agentFor): the claude a pane
-  // runs, found through tmux and wrappers, names its own transcript. Hook events can carry a stale
-  // surface (tmux reattach), so they come second.
-  const home0 = d.home || os.homedir();
+  // Two candidates, newest file wins (both pass the containment check): the live process's own
+  // sessions file (sessions/procs.js, injected by routes as deps.agentFor: it sees through tmux and
+  // wrappers, where hook events can carry a stale surface after a reattach) and the newest hook event
+  // for the surface (which follows a /clear or /resume as soon as its hook fires).
+  const home = d.home || os.homedir();
+  const fsx = d.fs || defaultFs;
+  const cands = [];
   if (d.agentFor) {
     let a = null;
     try { a = await d.agentFor(s); } catch (_) { a = null; }
     const real = a && a.transcriptPath && await allowedRealPath(a.transcriptPath, d);
-    if (real) return { kind: 'claude', path: real, sessionId: a.sessionId };
+    if (real) cands.push({ kind: 'claude', path: real, sessionId: a.sessionId });
   }
-
   // The lexical screen runs inside the event lookup, so a bad newest event falls back to the next
   // good one; the realpath check then decides on the winner, and a failure falls to the cwd path.
-  const home = home0;
   const ev = await latestSurfaceEvent(s, d, (e) => lexicallyAllowed(e.transcriptPath, home));
   if (ev) {
     const real = await allowedRealPath(ev.transcriptPath, d);
-    if (real) return { kind: isCodexPath(real) ? 'codex' : 'claude', path: real, sessionId: ev.sessionId };
+    if (real) cands.push({ kind: isCodexPath(real) ? 'codex' : 'claude', path: real, sessionId: ev.sessionId });
+  }
+  if (cands.length) {
+    let best = null;
+    for (const c of cands) { const m = await mtimeOf(fsx, c.path); if (!best || m > best.m) best = { c, m }; }
+    return best.c;
   }
 
   let cwd = null;

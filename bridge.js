@@ -191,6 +191,18 @@ const fsBrowse = createFsBrowse({ workspaceCwds: cmuxWorkspaceCwds });
 // ---------- p41 sessions (native app) ---------------------------------------
 // /cmux/sessions* (sessions/routes.js). Additive: no existing route changes.
 // P41_JOIN_POLL_MS is a test knob (default sessions/join.js WATCH_POLL_MS).
+// P41_PROCS_FIXTURE is a test knob: a JSON file {ps, tmuxSockets} — the process table comes from the
+// file and tmux is only asked on those sockets, so tests never read this host's real ps or tmux.
+function p41ProcSnapshotKnob() {
+  const f = process.env.P41_PROCS_FIXTURE;
+  if (!f) return undefined;
+  const procs = require('./sessions/procs');
+  return () => {
+    let fx = {};
+    try { fx = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { fx = {}; }
+    return procs.snapshot({ psAll: async () => String(fx.ps || ''), tmuxSockets: Array.isArray(fx.tmuxSockets) ? fx.tmuxSockets : [] });
+  };
+}
 const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   machineId: MACHINE_ID,
   backend: BACKEND,
@@ -198,6 +210,7 @@ const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   unreadBySurface: () => (tmuxCli ? Promise.resolve(null) : unreadBySurface()),
   sseHead: (res) => sseHead(res),
   joinPollMs: Number(process.env.P41_JOIN_POLL_MS) || undefined,
+  procSnapshot: p41ProcSnapshotKnob(),
   statusPollMs: Number(process.env.P41_JOIN_POLL_MS) || undefined,
 });
 
@@ -1124,6 +1137,13 @@ function cmuxSend(req, res) {
     let replied = false;
     const answer = (code, body) => { if (replied) return; replied = true; send(res, code, body); };
     serializeSend(surface, async () => {
+      // A tmux-only session (p41: a detached tmux worker no cmux pane shows) is typed into with tmux.
+      const tgt = tmuxCli ? null : await sessionRoutes.tmuxTarget(surface);
+      if (tgt) {
+        if (wants) return answer(409, { error: 'seq_unavailable' });   // no grid seq for a tmux-only pane
+        const r = await require('./sessions/procs').tmuxSend(tgt, { text, submit: !!b.submit });
+        return r.ok ? answer(200, { ok: true }) : answer(502, { error: r.error, detail: r.detail });
+      }
       if (wants) {
         const cur = await new Promise((resolve) => gridPayload(surface, resolve));
         // gridPayload's real failure shapes are `null` and the plain-text fallback, which carries no
@@ -1163,7 +1183,13 @@ function cmuxKey(req, res) {
     if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
     const key = String(b.key || '').toLowerCase();
     if (!CMUX_KEYS.has(key)) return send(res, 400, { error: 'bad_key' });
-    cmux(['send-key', '--surface', surface, '--', key], (e) => (e ? send(res, 502, { error: 'cmux_failed' }) : send(res, 200, { ok: true })));
+    const viaCmux = () => cmux(['send-key', '--surface', surface, '--', key], (e) => (e ? send(res, 502, { error: 'cmux_failed' }) : send(res, 200, { ok: true })));
+    if (tmuxCli) return viaCmux();
+    sessionRoutes.tmuxTarget(surface).then(async (tgt) => {
+      if (!tgt) return viaCmux();
+      const r = await require('./sessions/procs').tmuxSend(tgt, { press: key });
+      send(res, r.ok ? 200 : (r.error === 'bad_key' ? 400 : 502), r.ok ? { ok: true } : { error: r.error });
+    }).catch(() => send(res, 502, { error: 'cmux_failed' }));
   });
 }
 

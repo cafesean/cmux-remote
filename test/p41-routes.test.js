@@ -45,10 +45,18 @@ function home(rowsA) {
   return { h, dir, a };
 }
 
+// Every boot gets a process-table fixture (default: empty, no tmux sockets), so no test reads this
+// host's real ps or tmux (a real detached claude would otherwise leak into a cmux-backend list).
+function procsFixture(fx) {
+  const f = path.join(tmp(), 'procs.json');
+  fs.writeFileSync(f, JSON.stringify(fx || { ps: '', tmuxSockets: [] }));
+  return f;
+}
 async function boot(h, extra, fakeOpts) {
   const fake = writeFakeCmux(tmp(), fakeOpts);
   const sock = path.join(tmp(), 'bridge.sock');
-  return bootBridge({ cwd: h, socket: sock, env: { CMUX_BIN: fake.file, BRIDGE_SECRET: SECRET, RADAR_MACHINE_ID: MACHINE, P41_JOIN_POLL_MS: '200', ...(extra || {}) } });
+  return bootBridge({ cwd: h, socket: sock, env: { CMUX_BIN: fake.file, BRIDGE_SECRET: SECRET, RADAR_MACHINE_ID: MACHINE, P41_JOIN_POLL_MS: '200',
+    P41_PROCS_FIXTURE: procsFixture(), ...(extra || {}) } });
 }
 const idOf = (sf) => encodeURIComponent(`${MACHINE}:${sf}`);
 
@@ -311,4 +319,31 @@ test('stream on a claude pane whose join moves to a Codex rollout: reset + unsup
     assert.ok(!s.frames.some((f) => f.type === 'msg'), JSON.stringify(s.frames));
     assert.equal(s.frames.filter((f) => f.type === 'unsupported').length, 1);
   } finally { s.close(); await b.stop(); }
+});
+
+// ---- BUG1 fix round 1: a detached tmux session (no cmux pane) is listed and accepts input --------
+
+test('cmux backend: detached tmux claude session listed with reach tmux; /cmux/send + /cmux/key type into it', { skip: tmuxBinary() ? false : 'tmux not installed' }, async () => {
+  const srv = await startTmux();
+  await srv.runOk(['new-session', '-d', '-s', 'x-chief', 'cat']);
+  const panePid = Number(await srv.display('x-chief', '#{pane_pid}'));
+  const paneId = await srv.display('x-chief', '#{pane_id}');
+  const h = tmp();
+  const fx = procsFixture({ ps: `${panePid} 1 cat\n99999 ${panePid} /Users/s/.local/bin/claude -n x-chief\n`, tmuxSockets: [srv.socket] });
+  const b = await boot(h, { P41_PROCS_FIXTURE: fx, TMUX_BIN: srv.tmuxBin });
+  try {
+    const r = await call(b.socketPath, 'GET', '/cmux/sessions', { secret: SECRET });
+    assert.equal(r.status, 200, r.text);
+    const s = r.json.sessions.find((x) => x.title === 'x-chief');
+    assert.ok(s, JSON.stringify(r.json.sessions));
+    assert.equal(s.reach, 'tmux');
+    assert.equal(s.workspace, 'tmux');
+    assert.equal(s.kind, 'claude');
+    assert.ok(r.json.sessions.filter((x) => x.surface !== s.surface).every((x) => x.reach === 'cmux'));
+    const sent = await call(b.socketPath, 'POST', '/cmux/send', { secret: SECRET, body: { surface: s.surface, text: 'hello-p41', submit: true } });
+    assert.equal(sent.status, 200, sent.text);
+    const key = await call(b.socketPath, 'POST', '/cmux/key', { secret: SECRET, body: { surface: s.surface, key: 'enter' } });
+    assert.equal(key.status, 200, key.text);
+    await srv.waitFor(async () => /hello-p41\n.*hello-p41/s.test(await srv.capture(paneId)), { what: 'cat echoed the submitted line' });
+  } finally { await b.stop(); await srv.stop(); }
 });

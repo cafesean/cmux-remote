@@ -37,6 +37,7 @@ const LIMITS = {
   eventWindowMs: 6 * 60 * 60 * 1000,  // hook events read for a session's status (= detect.js EVENT_LIVE_MS)
   eventMaxPages: 20,                  // event-log pages followed per read (= detect.js MAX_EVENT_PAGES)
   markerIdMax: 128,
+  procSnapshotTtlMs: 2000,           // one ps+tmux snapshot is shared for this long (list, describe, streams)
   attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n                   // longest session id used as a ~/.claude/needs-you/<id> file name
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
@@ -59,15 +60,24 @@ function createSessionRoutes(deps) {
   // Process/tmux snapshot for the agent probe (sessions/procs.js). On tmux only the bridge's own
   // socket is looked at, so a pane id never matches another server's pane. Tests inject procSnapshot.
   const procOpts = { home };
-  if (backend === 'tmux') procOpts.tmuxSockets = [process.env.TMUX_SOCKET || require('../lib/tmux-cli').defaultSocket()];
+  if (backend === 'tmux') procOpts.tmuxSockets = [procs.defaultSockets()[0]];   // TMUX_SOCKET, else tmux's default
   const procSnapshotRaw = deps.procSnapshot || (() => procs.snapshot(procOpts));
+  // ONE snapshot shared by list, describe, findTab and every stream tick for LIMITS.procSnapshotTtlMs:
+  // each snapshot is a ps plus tmux calls, and 32 streams polling must not each spawn their own.
+  let snapCache = null;
+  const sharedSnapshot = () => {
+    const now = Date.now();
+    if (!snapCache || now - snapCache.at >= LIMITS.procSnapshotTtlMs) {
+      snapCache = { at: now, p: Promise.resolve().then(procSnapshotRaw).catch(() => null) };
+    }
+    return snapCache.p;
+  };
   let streams = 0;
-  const withAgent = (base, snap) => {
-    base.procSnapshot = snap;
-    base.agentFor = (s) => procs.agentFor(s, { home, procSnapshot: snap });
+  const withAgent = (base) => {
+    base.procSnapshot = sharedSnapshot;
+    base.agentFor = (s) => procs.agentFor(s, { home, procSnapshot: sharedSnapshot });
     return base;
   };
-  const memo = (fn) => { let p = null; return () => (p || (p = Promise.resolve().then(fn).catch(() => null))); };
 
   // One event-log read per request: the join, detect and status lookups all ask the same log.
   function requestDeps() {
@@ -78,7 +88,7 @@ function createSessionRoutes(deps) {
       if (!cache.has(k)) cache.set(k, readEventsRaw(q));
       return cache.get(k);
     };
-    const base = withAgent({ home, now: () => now, readEvents }, memo(procSnapshotRaw));
+    const base = withAgent({ home, now: () => now, readEvents });
     // The pane's OWN cwd. On cmux the tree carries none and the workspace cwd may belong to another
     // pane, so the cwd is the one the pane's own hooks recorded; no cwd -> no fallback join.
     if (backend === 'cmux') {
@@ -90,7 +100,7 @@ function createSessionRoutes(deps) {
     return base;
   }
   const liveDeps = () => {   // for long-lived watchers: a fresh clock and log on every tick
-    const d = withAgent({ home, readEvents: readEventsRaw }, () => procSnapshotRaw());
+    const d = withAgent({ home, readEvents: readEventsRaw });
     if (backend === 'cmux') d.cwdFor = async (id) => { const ev = await latestSurfaceEvent({ id }, d, (e) => !!e.cwd); return ev ? ev.cwd : null; };
     return d;
   };
@@ -132,7 +142,7 @@ function createSessionRoutes(deps) {
     // pane closed) are listed too, under a `tmux` workspace, so they never silently drop off the list.
     if (backend === 'cmux') {
       let orphans = [];
-      try { orphans = await procs.orphanTmuxTabs(new Set(out.map((x) => x.tab.id)), { home, procSnapshot: snap || memo(procSnapshotRaw) }); } catch (_) { orphans = []; }
+      try { orphans = await procs.orphanTmuxTabs(new Set(out.map((x) => x.tab.id)), { home, procSnapshot: sharedSnapshot }); } catch (_) { orphans = []; }
       const tw = { ref: 'tmux', id: 'tmux', title: 'tmux', tabs: orphans };
       for (const t of orphans) out.push({ ws: tw, tab: t });
     }
@@ -171,7 +181,8 @@ function createSessionRoutes(deps) {
     const { ws, tab } = entry;
     const id = `${machineId}:${tab.id}`;
     const s = { id, machine: machineId, workspace: ws.title || ws.ref, surface: tab.id, kind: 'terminal',
-      title: tab.title || tab.ref || tab.id, status: 'idle', preview: '', lastActivity: 0 };
+      title: tab.title || tab.ref || tab.id, status: 'idle', preview: '', lastActivity: 0,
+      reach: tab.tmuxPane || backend === 'tmux' ? 'tmux' : 'cmux' };
     if (tab.type === 'browser') { s.kind = 'browser'; return { session: s, join: null }; }
     const js = joinSurface(tab);
     const be = tab.tmuxPane ? 'tmux' : backend;
@@ -355,7 +366,14 @@ function createSessionRoutes(deps) {
     return true;
   }
 
-  return { handle };
+  // A tmux-only session's surface (a minted tmux id no cmux pane has) -> {socket, pane}, for the
+  // bridge's /cmux/send and /cmux/key to type into it with tmux. null for anything cmux owns.
+  async function tmuxTarget(surface) {
+    if (backend !== 'cmux') return null;
+    try { return await procs.tmuxTargetFor(surface, { procSnapshot: sharedSnapshot }); } catch (_) { return null; }
+  }
+
+  return { handle, tmuxTarget };
 }
 
 module.exports = { createSessionRoutes, LIMITS };

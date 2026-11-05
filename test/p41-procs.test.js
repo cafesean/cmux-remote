@@ -26,10 +26,10 @@ const PS = [
   '90000   100 zsh',
 ].join('\n');
 const PANES = [
-  ['x-cmux-native-2', '%53', '12281', '1', '1', '1', '1793000000', '/w'],
-  ['x-chief', '%48', '70405', '1', '1', '0', '1793000000', '/m'],
-  ['plain', '%60', '90000', '1', '1', '0', '1793000000', '/m'],
-].map((r) => r.join('\x1f')).join('\n');
+  ['x-cmux-native-2', '%53', '12281', '1', '1', '1', '1793000000', '/w', '1793000100'],
+  ['x-chief', '%48', '70405', '1', '1', '0', '1793000000', '/m', '1793000050'],
+  ['plain', '%60', '90000', '1', '1', '0', '1793000000', '/m', '1793000060'],
+].map((r) => r.join('|^|')).join('\n');
 const ENV = { 'x-cmux-native-2': SURF, 'x-chief': '29B341AB-0000-0000-0000-000000000000', plain: null };
 
 function fixture() {
@@ -93,4 +93,49 @@ test('stale sessions file (pid mismatch) and bounded depth are refused', async (
   const rows = []; for (let i = 1; i <= procs.LIMITS.procTreeDepth + 2; i++) rows.push(`${i + 1} ${i} sh`);
   rows.push(`${procs.LIMITS.procTreeDepth + 4} ${procs.LIMITS.procTreeDepth + 3} claude`);
   assert.strictEqual(procs.findAgent(procs.parsePs(rows.join('\n')), 1), null);
+});
+
+test('two tmux sessions naming one surface: the attached one owns it; the other is listed once as an orphan', async () => {
+  const table = procs.parsePs(PS);
+  const sessions = [
+    { socket: SOCK, name: 'old', attached: 0, created: 5, epoch: 1, surfaceId: SURF, panes: [{ id: '%48', pid: 70405, active: true }] },
+    { socket: SOCK, name: 'new', attached: 1, created: 3, epoch: 1, surfaceId: SURF, panes: [{ id: '%53', pid: 12281, active: true }] },
+  ];
+  const snap = async () => ({ table, sessions });
+  const a = await procs.agentFor({ id: SURF }, { home: os.tmpdir(), procSnapshot: snap });
+  assert.strictEqual(a.pid, 12282);
+  const tabs = await procs.orphanTmuxTabs(new Set([SURF]), { procSnapshot: snap });
+  assert.deepStrictEqual(tabs.map((t) => t.title), ['old']);
+  // neither attached: newest owns it, the older one is the orphan
+  sessions[1].attached = 0;
+  assert.strictEqual(procs.ownerOf(sessions, SURF).name, 'old');
+  assert.deepStrictEqual((await procs.orphanTmuxTabs(new Set([SURF]), { procSnapshot: snap })).map((t) => t.title), ['new']);
+});
+
+test('/clear: a fresher hook-event transcript beats the live sessions file (newest mtime wins)', async () => {
+  const { write, d, home } = fixture();
+  const oldP = write(12282, 'sess-before-clear', '/Volumes/HD/code/ai');
+  const newP = path.join(home, '.claude', 'projects', '-Volumes-HD-code-ai', 'sess-after-clear.jsonl');
+  fs.writeFileSync(newP, '{}\n');
+  const t = Date.now() / 1000;
+  fs.utimesSync(oldP, t - 60, t - 60);
+  fs.utimesSync(newP, t, t);
+  d.readEvents = async () => ({ events: [{ ts: Date.now(), sessionId: 'sess-after-clear', event: 'SessionStart', surfaceId: SURF, transcriptPath: newP }] });
+  d.now = () => Date.now();
+  assert.deepStrictEqual(await transcriptFor({ id: SURF }, d), { kind: 'claude', path: fs.realpathSync(newP), sessionId: 'sess-after-clear' });
+  // and the other way: the sessions file is fresher than a stale event (tmux reattach case)
+  fs.utimesSync(newP, t - 120, t - 120);
+  assert.strictEqual((await transcriptFor({ id: SURF }, d)).path, oldP);
+});
+
+test('tmuxSend: text pasted, Enter after; key mapped; tmux target from a minted id', async () => {
+  const calls = [];
+  const tmuxRun = async (sock, args, input) => { calls.push([args[0], input || null, args.includes('Enter') ? 'Enter' : null]); return { code: 0 }; };
+  assert.deepStrictEqual(await procs.tmuxSend({ socket: SOCK, pane: '%48' }, { text: 'hi', submit: true }, { tmuxRun, settleMs: 0 }), { ok: true });
+  assert.deepStrictEqual(calls, [['load-buffer', 'hi', null], ['send-keys', null, 'Enter']]);
+  assert.deepStrictEqual(await procs.tmuxSend({ socket: SOCK, pane: '%48' }, { press: 'nope' }, { tmuxRun }), { error: 'bad_key' });
+  const { d } = fixture();
+  const tabs = await procs.orphanTmuxTabs(new Set([SURF]), d);
+  assert.deepStrictEqual(await procs.tmuxTargetFor(tabs[0].id, d), { socket: SOCK, pane: '%48', session: 'x-chief' });
+  assert.strictEqual(await procs.tmuxTargetFor(SURF, d), null);
 });
