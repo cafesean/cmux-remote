@@ -37,7 +37,7 @@ const PORT = Number(process.env.BRIDGE_PORT || 8799);
 const HOST = process.env.BRIDGE_HOST || '127.0.0.1';
 const SECRET = process.env.BRIDGE_SECRET || '';
 const { safeEqual } = require('./lib/safe-equal');
-const { redactTokens } = require('./lib/redact-tokens');
+const { redactTokens, redactText, redactRows, redactGrid } = require('./lib/redact-tokens');
 // p19: BRIDGE_SOCKET set → listen on that UNIX socket and open NO TCP port. On a shared Mac any user
 // can bind a free loopback port before we do and collect BRIDGE_SECRET from the server; a socket in a
 // 0700 directory of ours cannot be bound or reached by them. A bad value refuses to start here, before
@@ -697,7 +697,9 @@ function sseHead(res) {
   res.write(': connected\n\n');
 }
 // Build the grid payload for one surface (replay → plain-text fallback). cb(obj) or cb(null) on failure.
-function gridPayload(surface, cb) {
+function gridPayload(surface, done) {
+  // S2r: every grid that leaves here is token-masked, wrap-aware (a token can span rows and spans).
+  const cb = (o) => done(o && o.grid ? { ...o, grid: redactGrid(o.grid) } : o);
   cmux(['rpc', 'terminal.replay', JSON.stringify({ surface_id: surface })], (err, stdout) => {
     if (!err) {
       try {
@@ -799,7 +801,7 @@ function cmuxScreen(res, surface, lines) {
   if (Number.isFinite(n) && n > 0) args.push('--scrollback', '--lines', String(Math.min(n, CMUX_SCROLLBACK_MAX)));
   cmux(args, (err, stdout, stderr) => (err
     ? send(res, 502, { error: 'cmux_failed', detail: String(stderr || (err && err.message) || '').slice(0, 400) })
-    : send(res, 200, { screen: stdout || '' })));
+    : send(res, 200, { screen: redactText(stdout || '') })));   // S2r: wrap-aware
 }
 
 // ---------- deep scrollback: the rows ABOVE the replay window -----------------
@@ -1010,7 +1012,7 @@ function cmuxHistory(res, surface, rowsParam) {
       // seam teaches it — a count-based guess is not evidence. tmux text says nothing about cmux's cap.
       if (aligned && !tmuxName) learnReplayCap(replayCap, sbRows);
       const room = Math.max(0, want - styledRows);
-      send(res, 200, { rows: lines.slice(Math.max(0, start - room), start), aligned, ...approx, ...tmuxTag, ...base, bufferRows });
+      send(res, 200, { rows: redactRows(lines).slice(Math.max(0, start - room), start), aligned, ...approx, ...tmuxTag, ...base, bufferRows });
     });
     });
   }, 10000);
@@ -1036,7 +1038,7 @@ function cmuxStream(req, res, surface) {
       const screen = stdout || '';
       if (screen !== last) {
         last = screen;
-        res.write('data: ' + Buffer.from(redactTokens(screen), 'utf8').toString('base64') + '\n\n');
+        res.write('data: ' + Buffer.from(redactText(screen), 'utf8').toString('base64') + '\n\n');
       }
     }, 5000);
   };

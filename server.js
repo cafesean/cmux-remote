@@ -33,6 +33,7 @@ const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || process.env.SERVER_HOST || '127.0.0.1';
 const SERVER_TOKEN = process.env['SERVER_TOKEN'] || '';
 const { safeEqual } = require('./lib/safe-equal');
+const { redactTokens } = require('./lib/redact-tokens');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 // p19: SERVER_SOCKET set → listen on that UNIX socket and open NO TCP port, so no other local user
 // can bind the endpoint first and collect SERVER_TOKEN from the tunnel. A bad value refuses to start
@@ -218,7 +219,7 @@ function sendJson(res, code, obj) {
     expires: '0',
     'surrogate-control': 'no-store',
   });
-  res.end(JSON.stringify(obj));
+  res.end(redactTokens(JSON.stringify(obj)));   // S2r
 }
 
 // Pass a bridge JSON response straight through (status + body).
@@ -233,7 +234,7 @@ async function relay(res, upstreamPromise) {
       expires: '0',
       'surrogate-control': 'no-store',
     });
-    res.end(JSON.stringify(body));
+    res.end(redactTokens(JSON.stringify(body)));   // S2r
   } catch (_) { sendJson(res, 502, { error: 'bridge_unreachable' }); }
 }
 

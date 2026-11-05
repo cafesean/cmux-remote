@@ -16,6 +16,7 @@
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { redactTokens } = require('./lib/redact-tokens');
 const store = require('./radar/store');
 const { loadConfig, normalizeConfig } = require('./radar/config');
 // p9 §5.5. The reply route consumes ONLY exported primitives, and it consumes them off the module
@@ -46,7 +47,7 @@ const NO_STORE = {
 
 function sendJson(res, code, obj) {
   res.writeHead(code, NO_STORE);
-  res.end(JSON.stringify(obj));
+  res.end(redactTokens(JSON.stringify(obj)));   // S2r
 }
 
 // Body reader with the §7 16 KB cap. Deliberately does NOT destroy the socket at the cap the way

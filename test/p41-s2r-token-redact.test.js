@@ -78,7 +78,7 @@ test('bridge /cmux/screen: token masked in the snapshot', async () => {
   const r = await get('/cmux/screen?surface=surface:1');
   assert.equal(r.status, 200, r.text);
   assert.ok(!r.text.includes(FAKE), 'token leaked in /cmux/screen');
-  assert.ok(r.text.includes('sk-ant-…[redacted]'));
+  assert.ok(r.text.includes('sk-ant-****'));
 });
 
 test('bridge /cmux/stream: token masked in the first screen event', async () => {
@@ -95,5 +95,76 @@ test('bridge /cmux/stream: token masked in the first screen event', async () => 
     setTimeout(() => { req.destroy(); reject(new Error('no screen event')); }, 5000);
   });
   assert.ok(!text.includes(FAKE), 'token leaked in /cmux/stream');
-  assert.ok(text.includes('sk-ant-…[redacted]'));
+  assert.ok(text.includes('sk-ant-****'));
+});
+
+// ---- review r1: wrapped rows, grids, other senders ------------------------------------------------
+const { redactRows, redactText, redactGrid } = require('../lib/redact-tokens');
+const { isDeniedPath } = require('../lib/secret-paths');
+const BODY = 'Z'.repeat(60);
+const TOK = 'sk-ant-oat01-' + BODY;
+// a terminal of width w: hard-wrap a logical line into rows
+const wrap = (line, w) => line.match(new RegExp(`.{1,${w}}`, 'g'));
+
+test('redactText: token wrapped inside the prefix is masked across rows', () => {
+  const t = [...wrap('CLAUDE_CODE_OAUTH_TOKEN=' + TOK, 32), '$ '].join('\n');   // row 1 ends in `sk-ant-o`
+  assert.ok(t.split('\n')[0].endsWith('sk-ant-o'));
+  const r = redactText(t);
+  assert.ok(!r.includes(BODY.slice(0, 20)), r);
+  assert.equal(r.split('\n').length, t.split('\n').length, 'row count kept');
+  assert.equal(r.length, t.length, 'length kept (layout)');
+});
+
+test('redactText: token wrapped inside the body is masked on both rows', () => {
+  const t = [...wrap('x ' + TOK, 32), 'done'].join('\n');
+  const r = redactText(t);
+  assert.ok(!/Z{6}/.test(r), r);
+  assert.ok(r.endsWith('\ndone'), 'a short row after the token is not masked');
+});
+
+test('redactRows: per-row array in, same shape out', () => {
+  const rows = [...wrap('a ' + TOK, 30), 'plain'];
+  const r = redactRows(rows);
+  assert.equal(r.length, rows.length);
+  assert.ok(!r.join('').includes(BODY.slice(0, 10)));
+  assert.equal(r[r.length - 1], 'plain');
+});
+
+test('redactGrid: token split over two grid rows and two spans is masked', () => {
+  const grid = { columns: 20, rows: 3, styles: [], cursor: null, spans: [
+    { row: 0, column: 0, style_id: 0, text: 'TOKEN=' }, { row: 0, column: 6, style_id: 1, text: TOK.slice(0, 14) },
+    { row: 1, column: 0, style_id: 1, text: TOK.slice(14, 34) }, { row: 2, column: 0, style_id: 1, text: TOK.slice(34) } ] };
+  const g = redactGrid(grid);
+  assert.ok(!JSON.stringify(g).includes(BODY.slice(0, 8)), JSON.stringify(g));
+  assert.equal(g.spans[0].text, 'TOKEN=');
+  g.spans.forEach((s, i) => assert.equal(s.text.length, grid.spans[i].text.length, 'cell widths kept'));
+});
+
+test('redactGrid: a row that is not full does not join the next row', () => {
+  const grid = { columns: 80, rows: 2, styles: [], cursor: null, spans: [
+    { row: 0, column: 0, style_id: 0, text: 'echo sk-ant-' }, { row: 1, column: 0, style_id: 0, text: 'docs-are-here-and-long' } ] };
+  assert.deepEqual(redactGrid(grid).spans, grid.spans);
+});
+
+test('server.js, radar-server.js sendJson + server relay + alerts payload redact', () => {
+  const src = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const fnBody = (s, name) => { const i = s.indexOf(`function ${name}(`); return s.slice(i, s.indexOf('\n}\n', i)); };
+  for (const [f, fn] of [['server.js', 'sendJson'], ['server.js', 'relay'], ['radar-server.js', 'sendJson']]) {
+    assert.match(fnBody(src(f), fn), /redactTokens\(/, `${f} ${fn}`);
+  }
+  const { createAlerts } = require('../lib/alerts');
+  const a = createAlerts({ machines: [{ id: 'm', label: 'M' }], send: async () => {}, log: () => {} });
+  const p = a._payloadFor({ id: 'm', label: 'M' }, { id: 'n', title: 'NEEDS YOU', body: 'key ' + TOK, surface_id: 's' });
+  assert.ok(!JSON.stringify(p).includes(BODY.slice(0, 10)), JSON.stringify(p));
+});
+
+test('secret-paths: env files, shell history and common credential files denied; examples allowed', () => {
+  const h = '/Users/someone';
+  for (const rel of ['proj/.env', 'proj/.env.local', 'proj/.env.production', '.zsh_history', '.bash_history', 'proj/.python_history',
+    '.netrc', '.npmrc', '.git-credentials', '.pgpass', '.aws/credentials', '.aws/config', '.docker/config.json']) {
+    assert.equal(isDeniedPath(path.join(h, rel), h), true, rel);
+  }
+  for (const rel of ['proj/.env.example', 'proj/.env.sample', 'proj/.env.template', 'proj/env.ts', 'proj/.envrc.md']) {
+    assert.equal(isDeniedPath(path.join(h, rel), h), false, rel);
+  }
 });

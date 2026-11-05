@@ -89,17 +89,18 @@ test('list: called on a file returns not_a_dir', async () => {
 
 test('list: dotfiles are included by default', async () => {
   const root = await bigFixture(2);
-  await fsp.writeFile(path.join(root, '.env'), 'SECRET=1');
+  // .env is a credential path since S2r (lib/secret-paths) — a plain dotfile stands in for it
+  await fsp.writeFile(path.join(root, '.prettierrc'), '{}');
   await fsp.mkdir(path.join(root, '.git'));
   const r = await mk(root).list(root, 0, 50);
   const names = r.entries.map((e) => e.name);
-  assert.ok(names.includes('.env'), '.env should be listed');
+  assert.ok(names.includes('.prettierrc'), '.prettierrc should be listed');
   assert.ok(names.includes('.git'), '.git should be listed');
 });
 
 test('list: hidden:false drops dotfiles and shrinks total to match', async () => {
   const root = await bigFixture(2);
-  await fsp.writeFile(path.join(root, '.env'), 'SECRET=1');
+  await fsp.writeFile(path.join(root, '.prettierrc'), '{}');
   await fsp.mkdir(path.join(root, '.git'));
   const fb = mk(root);
   const shown = await fb.list(root, 0, 50, { hidden: true });
