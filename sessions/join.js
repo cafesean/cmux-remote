@@ -158,9 +158,20 @@ async function transcriptFor(surface, deps) {
   const id = s.id || s.ref;
   if (!id) return null;
 
+  // The live process first (sessions/procs.js, injected by routes as deps.agentFor): the claude a pane
+  // runs, found through tmux and wrappers, names its own transcript. Hook events can carry a stale
+  // surface (tmux reattach), so they come second.
+  const home0 = d.home || os.homedir();
+  if (d.agentFor) {
+    let a = null;
+    try { a = await d.agentFor(s); } catch (_) { a = null; }
+    const real = a && a.transcriptPath && await allowedRealPath(a.transcriptPath, d);
+    if (real) return { kind: 'claude', path: real, sessionId: a.sessionId };
+  }
+
   // The lexical screen runs inside the event lookup, so a bad newest event falls back to the next
   // good one; the realpath check then decides on the winner, and a failure falls to the cwd path.
-  const home = d.home || os.homedir();
+  const home = home0;
   const ev = await latestSurfaceEvent(s, d, (e) => lexicallyAllowed(e.transcriptPath, home));
   if (ev) {
     const real = await allowedRealPath(ev.transcriptPath, d);

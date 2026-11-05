@@ -155,11 +155,18 @@ async function tmuxForeground(surface, deps) {
 }
 
 // surface: a loadTree tab ({id, ref, type, tty?}) on cmux, or {id: '%3'} (the pane id) on tmux.
+// deps.agentFor (sessions/procs.js, injected by routes) walks tmux and wrapper processes down to a
+// claude/codex descendant; when it finds one, that agent is the answer whatever is in front.
 async function foregroundCommand(surface, backend, deps) {
   const d = deps || {};
   const s = surface || {};
+  if (backend !== 'tmux' && backend !== 'cmux') throw new Error(`unknown backend ${JSON.stringify(backend)}`);
+  if (d.agentFor) {
+    let a = null;
+    try { a = await d.agentFor(s); } catch (_) { a = null; }
+    if (a && a.args) return a.args;
+  }
   if (backend === 'tmux') return tmuxForeground(s, d);
-  if (backend !== 'cmux') throw new Error(`unknown backend ${JSON.stringify(backend)}`);
   if (s.tty) return psForeground(d.ps || defaultPs, s.tty);
   return eventsForeground(s, d);
 }

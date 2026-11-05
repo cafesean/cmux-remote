@@ -23,6 +23,7 @@ const { transcriptFor, watchJoin, isAllowedTranscriptPath, WATCH_POLL_MS } = req
 const { statusFor, contextUsage } = require('./status');
 const eventlog = require('../radar/eventlog');
 const tmuxIds = require('../lib/tmux-ids');
+const procs = require('./procs');
 
 // Every limit this module adds (LIMITS.md rows).
 const LIMITS = {
@@ -55,7 +56,18 @@ function createSessionRoutes(deps) {
   const joinPollMs = deps.joinPollMs || WATCH_POLL_MS;
   const statusPollMs = deps.statusPollMs || LIMITS.streamStatusMs;
   const readEventsRaw = deps.readEvents || eventlog.readEvents;
+  // Process/tmux snapshot for the agent probe (sessions/procs.js). On tmux only the bridge's own
+  // socket is looked at, so a pane id never matches another server's pane. Tests inject procSnapshot.
+  const procOpts = { home };
+  if (backend === 'tmux') procOpts.tmuxSockets = [process.env.TMUX_SOCKET || require('../lib/tmux-cli').defaultSocket()];
+  const procSnapshotRaw = deps.procSnapshot || (() => procs.snapshot(procOpts));
   let streams = 0;
+  const withAgent = (base, snap) => {
+    base.procSnapshot = snap;
+    base.agentFor = (s) => procs.agentFor(s, { home, procSnapshot: snap });
+    return base;
+  };
+  const memo = (fn) => { let p = null; return () => (p || (p = Promise.resolve().then(fn).catch(() => null))); };
 
   // One event-log read per request: the join, detect and status lookups all ask the same log.
   function requestDeps() {
@@ -66,7 +78,7 @@ function createSessionRoutes(deps) {
       if (!cache.has(k)) cache.set(k, readEventsRaw(q));
       return cache.get(k);
     };
-    const base = { home, now: () => now, readEvents };
+    const base = withAgent({ home, now: () => now, readEvents }, memo(procSnapshotRaw));
     // The pane's OWN cwd. On cmux the tree carries none and the workspace cwd may belong to another
     // pane, so the cwd is the one the pane's own hooks recorded; no cwd -> no fallback join.
     if (backend === 'cmux') {
@@ -78,13 +90,14 @@ function createSessionRoutes(deps) {
     return base;
   }
   const liveDeps = () => {   // for long-lived watchers: a fresh clock and log on every tick
-    const d = { home, readEvents: readEventsRaw };
+    const d = withAgent({ home, readEvents: readEventsRaw }, () => procSnapshotRaw());
     if (backend === 'cmux') d.cwdFor = async (id) => { const ev = await latestSurfaceEvent({ id }, d, (e) => !!e.cwd); return ev ? ev.cwd : null; };
     return d;
   };
 
   // A loadTree tab as the join/detect modules address it: on tmux the minted surface id names pane %N.
   function joinSurface(tab) {
+    if (tab.tmuxPane) return { id: tab.tmuxPane, socket: tab.tmuxSocket };   // a tmux session no cmux pane shows
     if (backend === 'tmux') {
       const p = tmuxIds.parse(tab.id);
       return { id: p ? `%${p.n}` : tab.id };
@@ -107,13 +120,21 @@ function createSessionRoutes(deps) {
   // For readers that open again and again (tailThread): every open re-runs the check.
   const guardedFs = { async open(p) { const o = await safeOpen(p); if (!o) { const e = new Error('refused'); e.code = 'ENOENT'; throw e; } return o.fh; } };
 
-  async function treeTabs() {
+  async function treeTabs(snap) {
     const ws = await loadTree();
     if (!ws) return null;
     const out = [];
     for (const w of ws) for (const t of w.tabs || []) {
       if (backend === 'tmux' && t.type === 'browser') continue;
       out.push({ ws: w, tab: t });
+    }
+    // cmux host: tmux sessions running claude/codex that no cmux pane shows (detached, or their cmux
+    // pane closed) are listed too, under a `tmux` workspace, so they never silently drop off the list.
+    if (backend === 'cmux') {
+      let orphans = [];
+      try { orphans = await procs.orphanTmuxTabs(new Set(out.map((x) => x.tab.id)), { home, procSnapshot: snap || memo(procSnapshotRaw) }); } catch (_) { orphans = []; }
+      const tw = { ref: 'tmux', id: 'tmux', title: 'tmux', tabs: orphans };
+      for (const t of orphans) out.push({ ws: tw, tab: t });
     }
     return out;
   }
@@ -153,10 +174,11 @@ function createSessionRoutes(deps) {
       title: tab.title || tab.ref || tab.id, status: 'idle', preview: '', lastActivity: 0 };
     if (tab.type === 'browser') { s.kind = 'browser'; return { session: s, join: null }; }
     const js = joinSurface(tab);
+    const be = tab.tmuxPane ? 'tmux' : backend;
     let join = null;
     try { join = await transcriptFor(js, d); } catch (_) { join = null; }
     let fg = null;
-    try { fg = await foregroundCommand(js, backend, d); } catch (_) { fg = null; }
+    try { fg = await foregroundCommand(js, be, d); } catch (_) { fg = null; }
     s.kind = detectKind({ surfaceType: tab.type, foregroundCmd: fg, transcriptPath: join && join.path });
     // A Codex transcript is never parsed with the Claude reader (no Codex normaliser yet): kind only.
     if (s.kind !== 'terminal' && join && join.kind === 'codex') s.kind = 'codex';
@@ -191,9 +213,9 @@ function createSessionRoutes(deps) {
   }
 
   async function list(res) {
-    const tabs = await treeTabs();
-    if (!tabs) return send(res, 502, { error: 'cmux_failed' });
     const d = requestDeps();
+    const tabs = await treeTabs(d.procSnapshot);
+    if (!tabs) return send(res, 502, { error: 'cmux_failed' });
     let by = null;
     try { by = await unreadBySurface(); } catch (_) { by = null; }
     const sessions = [];

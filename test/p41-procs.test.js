@@ -1,0 +1,96 @@
+'use strict';
+// p41 BUG1 — claude found through tmux and wrapper processes, its transcript joined from the live
+// process, and tmux sessions no cmux pane shows still listed. ps/tmux/fs are injected fixtures.
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const procs = require('../sessions/procs.js');
+const { transcriptFor } = require('../sessions/join.js');
+const { foregroundCommand, detectKind } = require('../sessions/detect.js');
+
+const SOCK = '/s/tmux-501/default';
+const SURF = '9FE4C843-DE93-46A9-A8D8-C98B0255429D';
+const PS = [
+  '  100     1 /opt/homebrew/bin/tmux -u -D',
+  '12281   100 zsh -c bash /h/launch/x-cmux-native-2.sh; exec /bin/zsh -l',
+  '12282 12281 /Users/s/.local/bin/claude --settings x.json -n x-cmux-native-2 --model opus',
+  '12290 12282 uv run mcp',
+  '70405   100 zsh -c bash /h/launch/x-chief.sh',
+  '70406 70405 /Users/s/.local/bin/claude -n x-chief',
+  '35931     1 -/bin/zsh',
+  '80000 35931 /Users/s/.local/share/uv/tools/claude-swap/bin/python3 /Users/s/.local/bin/cswap',
+  '80001 80000 node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+  '90000   100 zsh',
+].join('\n');
+const PANES = [
+  ['x-cmux-native-2', '%53', '12281', '1', '1', '1', '1793000000', '/w'],
+  ['x-chief', '%48', '70405', '1', '1', '0', '1793000000', '/m'],
+  ['plain', '%60', '90000', '1', '1', '0', '1793000000', '/m'],
+].map((r) => r.join('\x1f')).join('\n');
+const ENV = { 'x-cmux-native-2': SURF, 'x-chief': '29B341AB-0000-0000-0000-000000000000', plain: null };
+
+function fixture() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'p41-procs-'));
+  const write = (pid, sessionId, cwd) => {
+    fs.mkdirSync(path.join(home, '.claude', 'sessions'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'sessions', `${pid}.json`), JSON.stringify({ pid, sessionId, cwd }));
+    const dir = path.join(home, '.claude', 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), '{}\n');
+    return fs.realpathSync(path.join(dir, `${sessionId}.jsonl`));
+  };
+  const tmuxAt = async (sock, args) => {
+    assert.strictEqual(sock, SOCK);
+    if (args[0] === 'list-panes') return PANES + '\n';
+    if (args[0] === 'show-environment') { const v = ENV[args[2].slice(1)]; return v ? `CMUX_SURFACE_ID=${v}\n` : '-CMUX_SURFACE_ID\n'; }
+    throw new Error('unexpected ' + args[0]);
+  };
+  const snap = () => procs.snapshot({ psAll: async () => PS, tmuxAt, tmuxSockets: [SOCK] });
+  const d = { home, procSnapshot: snap, readEvents: async () => ({ events: [] }), cwdFor: async () => null };
+  d.agentFor = (s) => procs.agentFor(s, { home, procSnapshot: snap });
+  return { home, write, d };
+}
+
+test('tmux-wrapped claude: cmux surface -> tmux session env -> pane -> claude, kind claude + transcript joined', async () => {
+  const { write, d } = fixture();
+  const p = write(12282, 'sess-native-2', '/Volumes/HD/code/ai');
+  const fg = await foregroundCommand({ id: SURF }, 'cmux', d);
+  const j = await transcriptFor({ id: SURF }, d);
+  assert.strictEqual(detectKind({ surfaceType: 'terminal', foregroundCmd: fg, transcriptPath: j && j.path }), 'claude');
+  assert.deepStrictEqual(j, { kind: 'claude', path: p, sessionId: 'sess-native-2' });
+});
+
+test('cswap-wrapped claude: claude is a child of the wrapper, found by the descendant search', async () => {
+  const { write, home } = fixture();
+  const p = write(80001, 'sess-chief', '/Users/s/Main');
+  const table = procs.parsePs(PS);
+  const snap = async () => ({ table, sessions: [] });
+  const a = await procs.agentFor({ id: 'U-CHIEF', pid: 35931 }, { home, procSnapshot: snap });
+  assert.strictEqual(a.kind, 'claude');
+  assert.strictEqual(a.pid, 80001);
+  assert.strictEqual(fs.realpathSync(a.transcriptPath), p);
+  assert.strictEqual(procs.findAgent(table, 90000), null);   // a plain shell stays a terminal
+});
+
+test('missing-session case: a detached tmux session running claude is listed; shells and shown sessions are not', async () => {
+  const { write, d } = fixture();
+  const p = write(70406, 'sess-chief-1103', '/Users/s/Main');
+  const tabs = await procs.orphanTmuxTabs(new Set([SURF]), d);
+  assert.deepStrictEqual(tabs.map((t) => t.title), ['x-chief']);
+  assert.strictEqual(tabs[0].tmuxPane, '%48');
+  const j = await transcriptFor({ id: tabs[0].tmuxPane, socket: tabs[0].tmuxSocket }, d);
+  assert.strictEqual(j.path, p);
+});
+
+test('stale sessions file (pid mismatch) and bounded depth are refused', async () => {
+  const { home } = fixture();
+  fs.mkdirSync(path.join(home, '.claude', 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', 'sessions', '5.json'), JSON.stringify({ pid: 6, sessionId: 'x', cwd: '/a' }));
+  assert.strictEqual(await procs.claudeTranscriptOf(5, { home }), null);
+  const rows = []; for (let i = 1; i <= procs.LIMITS.procTreeDepth + 2; i++) rows.push(`${i + 1} ${i} sh`);
+  rows.push(`${procs.LIMITS.procTreeDepth + 4} ${procs.LIMITS.procTreeDepth + 3} claude`);
+  assert.strictEqual(procs.findAgent(procs.parsePs(rows.join('\n')), 1), null);
+});
