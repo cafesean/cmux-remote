@@ -37,9 +37,9 @@ if [ -n "$ALSO" ]; then
   printf '%s is already on %s. If it is the same Claude login, adding it here signs it out on %s (one live token per login).\n' "$NAME" "$ALSO" "$ALSO"
 fi
 printf '%s Claude account %s on this Mac? [y/N] ' "$VERB" "$NAME"
-# Answered on the Mac within HYPERMUX_CONFIRM_TIMEOUT_S (default 30 s): an unanswered pane must not
-# outlive its private mark (30 s + 600 s capture + kill grace + close delay < 660 s).
-CONFIRM_T="${HYPERMUX_CONFIRM_TIMEOUT_S:-30}"; [[ "$CONFIRM_T" =~ ^[0-9]{1,4}$ ]] || CONFIRM_T=30
+# Answered on the Mac within HYPERMUX_CONFIRM_TIMEOUT_S, clamped to 1..30 s (anything else -> 30): an
+# unanswered pane must not outlive its private mark (30 s + 600 s capture + 2 s grace + 5 s close < 660 s).
+CONFIRM_T="${HYPERMUX_CONFIRM_TIMEOUT_S:-30}"; { [[ "$CONFIRM_T" =~ ^[1-9][0-9]?$ ]] && [ "$CONFIRM_T" -le 30 ]; } || CONFIRM_T=30
 ANS=""; read -r -t "$CONFIRM_T" ANS; RC=$?
 if [ "$RC" -gt 128 ]; then echo; echo "cancelled (no answer in ${CONFIRM_T} s)"; sleep "${HYPERMUX_CLOSE_DELAY_S:-5}"; exit 1; fi
 case "$ANS" in y|Y) ;; *) echo "cancelled"; exit 1;; esac

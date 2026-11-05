@@ -451,6 +451,18 @@ test('remove: unanswered confirm times out -> cancelled, nothing deleted', async
   assert.match(res.out, /cancelled/);
   assert.strictEqual(r.keychain()[KEY('acme')], TOKEN);
 });
+test('confirm timeout is clamped to 1..30 s in both scripts (999 / 0 / junk -> 30): computed by the scripts\' own line', () => {
+  for (const f of [SETUP, REMOVE]) {
+    const line = fs.readFileSync(f, 'utf8').split('\n').find((l) => l.startsWith('CONFIRM_T='));
+    assert.ok(line, 'CONFIRM_T= line in ' + f);
+    const value = (v) => spawnSync('bash', ['-c', line + '; printf %s "$CONFIRM_T"'],
+      { env: { PATH: process.env.PATH, ...(v === undefined ? {} : { HYPERMUX_CONFIRM_TIMEOUT_S: v }) }, encoding: 'utf8' }).stdout;
+    for (const [v, want] of [[undefined, '30'], ['999', '30'], ['31', '30'], ['0', '30'], ['abc', '30'], ['-5', '30'], ['', '30'], ['1', '1'], ['12', '12'], ['30', '30']]) {
+      assert.strictEqual(value(v), want, `${path.basename(f)} HYPERMUX_CONFIRM_TIMEOUT_S=${v}`);
+    }
+  }
+});
+
 test('confirm timeout default is 30 s, read with -t in both scripts', () => {
   for (const f of [SETUP, REMOVE]) {
     const src = fs.readFileSync(f, 'utf8');
