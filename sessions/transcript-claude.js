@@ -6,7 +6,8 @@
 //     the byte offset it names, throws BadCursorError (code 'bad_cursor'); the route maps it to 400.
 //   tailThread(path, fromOffset, {signal, onReset, sessionId, bannerPreset, pollMs}) -> AsyncIterable<Msg>
 //   readAttachment(path, n, {fs}) -> Promise<{mime, data: Buffer} | null>
-//   readThread/tailThread also take `sidechain: true` (a sub-agent transcript: its isSidechain rows are shown)
+//   readThread/tailThread also take `uploadRoot` (D57: an image path typed inside it is an `attachment`
+//   served by /upload/:rel, sessions/uploads.js), `sidechain: true` (a sub-agent transcript: its isSidechain rows are shown)
 //   and `agentIdFor(toolUseId)` (an Agent/Task Tool then carries `agentId`, A10).
 //
 // Msg, Tool and the page cursor are described in sessions/CONTRACT.md. How a record becomes messages
@@ -98,13 +99,15 @@ function imagesIn(rec) {
 }
 
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+const { splitUploadImages, uploadUrl } = require('./uploads');
 const attachmentUrl = (sessionId, n) => `/api/sessions/${encodeURIComponent(sessionId)}/attachment/${n}`;
 
 // Records in file order in, messages out. `push` returns the messages that are new or changed by that
 // record (a tools group that gained a tool or a result), which is exactly what a live stream sends.
 class Normaliser {
-  constructor({ bannerPreset = true, sidechain = false, agentIdFor = null } = {}) {
+  constructor({ bannerPreset = true, sidechain = false, agentIdFor = null, uploadRoot = null } = {}) {
     this.bannerPreset = bannerPreset;
+    this.uploadRoot = uploadRoot;   // D57: image paths typed inside this directory are shown as images
     this.sidechain = sidechain;     // a sub-agent's own transcript: every row is a sidechain row
     this.agentIdFor = agentIdFor;   // toolUseId -> sub-agent id (A10), for Agent/Task rows
     this.out = [];
@@ -129,6 +132,19 @@ class Normaliser {
   text(kind, id, ts, raw, off, changed) {
     if (isSkippedText(raw)) return;
     this.add({ id, ts, kind, text: raw.trim() }, off, changed);
+  }
+
+  // D57: a human message; an uploaded image's path token becomes an attachment after the text.
+  userText(id, ts, raw, off, changed) {
+    if (isSkippedText(raw)) return;
+    const { text, images } = this.uploadRoot ? splitUploadImages(raw, this.uploadRoot) : { text: raw, images: [] };
+    if (!images.length) return this.text('user', id, ts, raw, off, changed);
+    if (text.trim()) this.text('user', id, ts, text, off, changed);
+    images.forEach((im, k) => {
+      const msg = { id: `${id}:img:${k}`, ts, kind: 'attachment', attachment: { mime: im.mime, name: im.name, url: '' } };
+      Object.defineProperty(msg, 'upload', { value: im.rel, enumerable: false });
+      this.add(msg, off, changed);
+    });
   }
 
   push({ off, rec }) {
@@ -158,7 +174,7 @@ class Normaliser {
       } else if (b.type === 'text' && typeof b.text === 'string') {
         if (b.text.startsWith('<')) return;
         if (this.queuedText != null && b.text.trim() === this.queuedText) { this.queuedText = null; return; }
-        this.text('user', id, ts, b.text, off, changed);
+        this.userText(id, ts, b.text, off, changed);
       } else if (b.type === 'image') {
         if (imagesIn({ type: 'user', message: { content: [b] } }).length) {
           const mime = b.source.media_type || 'image/png';
@@ -182,7 +198,7 @@ class Normaliser {
     this.lastTs = ts;
     const raw = a.prompt.replace(/\uFFFC/g, '');
     if (isSkippedText(raw)) return;
-    this.text('user', `${rec.uuid || `@${off}`}:0`, ts, raw, off, changed);
+    this.userText(`${rec.uuid || `@${off}`}:0`, ts, raw, off, changed);
     this.queuedText = raw.trim();
   }
 
@@ -253,6 +269,7 @@ class Normaliser {
 
   // Number and name an attachment once the count of images before this window is known.
   numberAttachment(msg, base, sessionId) {
+    if (msg.upload) { msg.attachment.url = uploadUrl(sessionId, msg.upload); return; }   // D57
     const n = base + this.rels.get(msg.id);
     msg.attachment.url = attachmentUrl(sessionId, n);
     msg.attachment.name = `image-${n + 1}.${EXT[msg.attachment.mime] || 'bin'}`;
@@ -389,7 +406,7 @@ async function headTitle(h, size, chunkSize) {
 }
 
 // The record a cursor points at, read alone: it must start a line and must hold the cursor's message.
-async function cursorRecord(h, size, { id, off }, bannerPreset, sidechain) {
+async function cursorRecord(h, size, { id, off }, bannerPreset, sidechain, uploadRoot) {
   if (off >= size || (off > 0 && (await readAt(h, off - 1, 1))[0] !== NL)) throw new BadCursorError();
   let line = Buffer.alloc(0);
   for (let pos = off; pos < size;) {
@@ -401,14 +418,14 @@ async function cursorRecord(h, size, { id, off }, bannerPreset, sidechain) {
     if (nl >= 0) break;
   }
   const entry = parseLines(line, off)[0];
-  if (!entry || !new Normaliser({ bannerPreset, sidechain }).push(entry).some((m) => m.id === id)) throw new BadCursorError();
+  if (!entry || !new Normaliser({ bannerPreset, sidechain, uploadRoot }).push(entry).some((m) => m.id === id)) throw new BadCursorError();
   return entry;
 }
 
 const clampLimit = (n) => Math.min(MAX_LIMIT, Math.max(1, Math.floor(Number(n)) || DEFAULT_LIMIT));
 
 async function readThread(p, opts = {}) {
-  const { before, sessionId = '', bannerPreset = true, chunkSize = CHUNK, sidechain = false, agentIdFor = null } = opts;
+  const { before, sessionId = '', bannerPreset = true, chunkSize = CHUNK, sidechain = false, agentIdFor = null, uploadRoot = null } = opts;
   const limit = clampLimit(opts.limit == null ? DEFAULT_LIMIT : opts.limit);
   const h = await (opts.fs || REAL_FS).open(p, 'r');
   try {
@@ -419,7 +436,7 @@ async function readThread(p, opts = {}) {
     if (before != null) {
       const c = decodeCursor(before);
       cursorId = c.id;
-      cursorEntry = await cursorRecord(h, size, c, bannerPreset, sidechain);
+      cursorEntry = await cursorRecord(h, size, c, bannerPreset, sidechain, uploadRoot);
       end = c.off;
     }
     const br = new BackReader(h, end, chunkSize);
@@ -427,7 +444,7 @@ async function readThread(p, opts = {}) {
     let older;   // the messages older than the page edge
     for (;;) {
       const more = await br.older();
-      norm = new Normaliser({ bannerPreset, sidechain, agentIdFor });
+      norm = new Normaliser({ bannerPreset, sidechain, agentIdFor, uploadRoot });
       for (const e of br.entries) norm.push(e);
       if (cursorEntry) norm.push(cursorEntry);
       const edge = cursorId == null ? norm.out.length : norm.out.findIndex((m) => m.id === cursorId);
@@ -480,7 +497,7 @@ function waiter(p, signal, pollMs) {
 }
 
 async function* tailThread(p, fromOffset, opts = {}) {
-  const { signal, onReset, sessionId = '', bannerPreset = true, pollMs = POLL_MS, sidechain = false, agentIdFor = null } = opts;
+  const { signal, onReset, sessionId = '', bannerPreset = true, pollMs = POLL_MS, sidechain = false, agentIdFor = null, uploadRoot = null } = opts;
   const fsx = opts.fs || REAL_FS;
   const w = waiter(p, signal, pollMs);
   let norm = null;
@@ -492,7 +509,7 @@ async function* tailThread(p, fromOffset, opts = {}) {
 
   // Feed the 256 KB before `at` without yielding, so a result that arrives now finds its tool.
   const warm = async (h, at) => {
-    norm = new Normaliser({ bannerPreset, sidechain, agentIdFor });
+    norm = new Normaliser({ bannerPreset, sidechain, agentIdFor, uploadRoot });
     base = null;
     carry = Buffer.alloc(0);
     if (at <= 0) { windowStart = 0; base = 0; return; }

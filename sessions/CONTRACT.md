@@ -137,6 +137,7 @@ a running tool call becomes a finished one).
   `{label, description}`. `multi` is true when more than one option may be chosen.
 - `todos`: set for `todo`. A list of `{text, done}`. The newest `todo` message is the current list.
 - `attachment`: set for `attachment`. `{mime, name, url}`. `url` is `/api/sessions/:id/attachment/:n`, where `n` is the 0-based index of this attachment among the attachments of the thread, oldest first. It is relative to the server base URL.
+  D57: an image the human uploaded and whose path they typed (inside the bridge's `UPLOAD_DIR`, extension png/jpg/jpeg/gif/webp/heic) is also an `attachment`, after the message text with that path token removed; its `url` is `/api/sessions/:id/upload/:rel` (`rel` = the path relative to `UPLOAD_DIR`, one URI-encoded segment). The route serves only a regular file whose real path is inside `UPLOAD_DIR`, up to 20 MB.
 
 ## Tool
 
@@ -187,6 +188,7 @@ passes requests through to the right bridge. The session `id` goes in the path, 
 | Read a thread page | `GET /cmux/sessions/:id/thread?before=<cursor>&limit=<n>` | `GET /api/sessions/:id/thread?before=<cursor>&limit=<n>` |
 | Live stream | `GET /cmux/sessions/:id/thread-stream` | `GET /api/sessions/:id/thread-stream` |
 | Attachment bytes | `GET /cmux/sessions/:id/attachment/:n` | `GET /api/sessions/:id/attachment/:n` |
+| Upload image bytes (D57) | `GET /cmux/sessions/:id/upload/:rel` | `GET /api/sessions/:id/upload/:rel` |
 | Send text and keys | `WS /cmux/sessions/:id/input` | `WS /api/sessions/:id/input` |
 | Answer a choice (A14) | `POST /cmux/choose` | `POST /api/cmux/choose` |
 | Rename a session (A16) | `POST /cmux/session-name` `{sessionId, name}` | `POST /api/sessions/:id/name` `{name}` |
