@@ -925,6 +925,9 @@ async function handleApi(req, res, u) {
     const qs = new URLSearchParams({ surface: u.searchParams.get('surface') || '' });
     return relay(res, bridge(m, `/cmux/browser/shot?${qs}`, { timeout: 20000 }));
   }
+  // p41 D97: no SERVER_TOKEN -> authed() lets everyone in, so the whole-desktop view/control would be
+  // open to anyone who reaches this server (tunnel included). Refuse, like the accounts routes.
+  if (p.startsWith('/api/cmux/screen/') && !SERVER_TOKEN) return sendJson(res, 503, { error: 'not_secured' });
   // p41 D97: Mac screen — info + one frame (bridge gates on SCREEN_VIEW, rate-limits, size-caps).
   if (req.method === 'GET' && (p === '/api/cmux/screen/info' || p === '/api/cmux/screen/shot')) {
     const m = findMachine(u.searchParams.get('machine'));

@@ -2043,7 +2043,8 @@ const BROWSER_SHOT_MIN_MS = Math.max(0, Number(process.env.BROWSER_SHOT_MIN_MS) 
 const BROWSER_SHOT_MAX_BYTES = Math.max(1, Number(process.env.BROWSER_SHOT_MAX_BYTES) || 1536 * 1024);
 const browserShotLimiter = require('./lib/shot-limiter').createShotLimiter({ minMs: BROWSER_SHOT_MIN_MS });
 // p41 D97: Mac screen — lib/mac-screen.js owns flags, TCC errors, limits; text rides osascript stdin.
-const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => secretsIn.childEnv() });
+const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => secretsIn.childEnv(),
+  secret: SECRET, host: HOST, socket: SOCKET });
 function cmuxBrowserShot(res, surface) {
   const gate = browserShotLimiter.take(surface);
   if (!gate.ok) return send(res, 429, { error: 'rate_limited', retryMs: gate.retryMs });
