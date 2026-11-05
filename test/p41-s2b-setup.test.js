@@ -254,3 +254,25 @@ test('scripts carry no set -x and are executable', () => {
   }
   for (const f of [SETUP, REMOVE]) assert.ok(fs.statSync(f).mode & 0o100, f + ' not executable');
 });
+
+test('--also-on label: warning shown before the prompt; works with --replace', () => {
+  const r = rig();
+  const res = run(SETUP, r, ['acme', '--also-on', 'cmux-max'], 'y\n');
+  assert.strictEqual(res.status, 0, res.stderr + res.stdout);
+  const w = 'acme is already on cmux-max. If it is the same Claude login, adding it here signs it out on cmux-max (one live token per login).';
+  const i = res.stdout.indexOf(w), j = res.stdout.indexOf('Add Claude account acme');
+  assert.ok(i >= 0 && j > i, 'warning must precede prompt');
+  fs.writeFileSync(r.kc, JSON.stringify({ [KEY('acme')]: 'old' }));
+  assert.strictEqual(run(SETUP, r, ['acme', '--replace', '--also-on', 'My Mac_2.x'], 'y\n').status, 0);
+  fs.writeFileSync(r.kc, '{}');
+  assert.strictEqual(run(SETUP, r, ['acme', '--also-on', 'cmux-max'], 'n\n').stdout.includes(w), true);
+});
+
+test('--also-on bad/missing label -> exit 2, nothing runs', () => {
+  const r = rig();
+  for (const a of [['acme', '--also-on', 'bad;label'], ['acme', '--also-on', ''], ['acme', '--also-on'], ['acme', '--also-on', 'x'.repeat(41)]]) {
+    const res = run(SETUP, r, a, 'y\n');
+    assert.strictEqual(res.status, 2, JSON.stringify(a));
+  }
+  assert.ok(!fs.existsSync(r.side));
+});
