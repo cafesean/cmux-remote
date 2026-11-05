@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# hypermux-claude <name> [-- extra claude args]
+# Launch Claude Code under a named account (token from the login Keychain, never in argv/files/output).
+NAME="${1:-}"; [ $# -gt 0 ] && shift
+[ "${1:-}" = "--" ] && shift
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SECURITY="${HYPERMUX_SECURITY_BIN:-/usr/bin/security}"
+NODE="${HYPERMUX_NODE:-node}"
+CLAUDE_BIN="${HYPERMUX_CLAUDE_BIN:-$HOME/.local/bin/claude}"
+
+if [ "$NAME" != a ] && ! [[ "$NAME" =~ ^[a-z][a-z0-9]{0,5}$ ]]; then
+  echo "bad account name" >&2; exit 2
+fi
+
+# CMUX_* identity stays (cmux made this pane); agent/claude/anthropic env does not.
+for v in $(env | grep -iE '^(CLAUDE|AI_AGENT|GHOSTTY|ANTHROPIC)' | cut -d= -f1); do unset "$v"; done
+unset CMUX_CLAUDE_PID CMUX_AGENT_LAUNCH_KIND CMUX_AGENT_LAUNCH_EXECUTABLE CMUX_AGENT_LAUNCH_CWD CMUX_AGENT_LAUNCH_ARGV_B64 CMUX_AGENT_RESUME_LAUNCH CMUX_AGENT_RESTORE_LAUNCH
+
+if [ "$NAME" != a ]; then
+  # a. settings that would override the account token
+  if HIT=$("$NODE" "$HERE/lib/settings-override.js" --cwd "$PWD" 2>/dev/null); then :; else
+    rc=$?
+    if [ "$rc" = 4 ]; then
+      echo "$NAME can't start: ${HIT%%$'\t'*} sets ${HIT#*$'\t'}, which would override the account" >&2; exit 4
+    fi
+  fi
+  # b. Keychain unlocked? (3 s cap, no GNU timeout)
+  if ! perl -e 'alarm 3; exec @ARGV' "$SECURITY" show-keychain-info >/dev/null 2>&1; then
+    echo "this Mac's Keychain is locked — accounts need a logged-in Mac" >&2; exit 2
+  fi
+  # c. token
+  T=$("$SECURITY" find-generic-password -a "$USER" -s "cos-claude-account-$NAME" -w 2>/dev/null)
+  [ -n "$T" ] || { echo "no account $NAME on this Mac" >&2; exit 2; }
+  # d. fingerprint (printf is a builtin: token never in argv)
+  FP=$(printf '%s' "$T" | shasum -a 256 | cut -c1-12)
+  STORED=$("$NODE" "$HERE/lib/accounts-meta.js" get-fp "$NAME" 2>/dev/null)
+  if [ -z "$STORED" ]; then
+    "$NODE" "$HERE/lib/accounts-meta.js" set "$NAME" --fp "$FP" >/dev/null 2>&1 || true
+  elif [ "$STORED" != "$FP" ]; then
+    unset T
+    echo "$NAME changed on this Mac — add it again in HyperMux Settings" >&2; exit 3
+  fi
+  # e. hand over
+  export CLAUDE_CODE_OAUTH_TOKEN="$T"; unset T
+  export COS_CLAUDE_ACCOUNT_ID="$NAME"
+fi
+export CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
+
+# cmux status hooks: the settings cmux's own claude wrapper injects (skipped outside a cmux pane)
+HM_ARGS=()
+CM_CLI="${CMUX_BUNDLED_CLI_PATH:-}"
+if [ -n "${CMUX_SURFACE_ID:-}" ] && [ "${CMUX_CLAUDE_HOOKS_DISABLED:-}" != 1 ] && [ -n "$CM_CLI" ] && [ -x "$CM_CLI" ]; then
+  HM_HOOKS=$(umask 077; mktemp "${TMPDIR:-/tmp}/hypermux-hooks.XXXXXX") || HM_HOOKS=
+  if [ -n "$HM_HOOKS" ] \
+     && ( umask 077; CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=2 "$CM_CLI" hooks claude inject-settings </dev/null >"$HM_HOOKS" 2>/dev/null ) \
+     && "$NODE" -e 'const h=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).hooks;process.exit(h&&typeof h==="object"&&!Array.isArray(h)&&Object.keys(h).length?0:1)' "$HM_HOOKS" 2>/dev/null; then
+    export CMUX_CLAUDE_PID=$$ CMUX_CLAUDE_HOOK_CMUX_BIN="$CM_CLI"
+    HM_ARGS=(--settings "$HM_HOOKS")
+  else
+    [ -z "$HM_HOOKS" ] || rm -f "$HM_HOOKS"
+  fi
+fi
+
+exec "$CLAUDE_BIN" ${HM_ARGS[@]+"${HM_ARGS[@]}"} "$@"
