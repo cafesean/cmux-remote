@@ -1730,7 +1730,7 @@ function safeName(raw) {
 async function writeUpload(name, body) {
   const day = new Date().toISOString().slice(0, 10);
   const dir = `${UPLOAD_DIR}/${day}`;
-  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });   // p62 G1 L3
   const base = safeName(name);
   const dot = base.lastIndexOf('.');
   const stem = dot > 0 ? base.slice(0, dot) : base;

@@ -399,7 +399,7 @@ function defaultSshExec(opts) {
     opts.target, opts.command,
   ];
   return new Promise((resolve) => {
-    execFile('/usr/bin/ssh', args, { timeout: opts.timeoutMs, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    execFile('/usr/bin/ssh', args, { timeout: opts.timeoutMs, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: require('../lib/secrets-stdin').childEnv() }, (err, stdout, stderr) => {
       if (!err) return resolve({ ok: true, stdout: stdout || '', stderr: stderr || '' });
       resolve({ ok: false, stdout: stdout || '', stderr: (stderr || '') || String(err.message || 'ssh failed') });
     });

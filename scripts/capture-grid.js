@@ -31,7 +31,7 @@ const scratchWorkspaces = [];   // workspace UUIDs to tear down
 
 function cmux(args, timeout = 15000) {
   return new Promise((resolve, reject) => {
-    execFile(CMUX_BIN, args, { timeout, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
+    execFile(CMUX_BIN, args, { timeout, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8', env: require('../lib/secrets-stdin').childEnv() }, (err, stdout, stderr) => {
       if (err) return reject(new Error(`cmux ${args[0]} failed: ${String(stderr || err.message).slice(0, 300)}`));
       resolve(stdout || '');
     });

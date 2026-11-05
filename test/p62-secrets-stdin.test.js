@@ -110,10 +110,10 @@ test('env mode unchanged: .env file SERVER_TOKEN still read', async () => {
   } finally { await s.stop(); }
 });
 
-function runExit(stdinText, keepOpen) {
+function runExit(stdinText, keepOpen, script = SERVER_JS, killMs = 0) {
   return new Promise((resolve) => {
     const cwd = tmp();
-    const child = spawn(process.execPath, [SERVER_JS], {
+    const child = spawn(process.execPath, [script], {
       cwd, env: { PATH: process.env.PATH, HOME: cwd, PORT: '0', HOST: '127.0.0.1', HYPERMUX_SECRETS_ON_STDIN: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -123,7 +123,9 @@ function runExit(stdinText, keepOpen) {
     if (stdinText != null) child.stdin.write(stdinText);
     if (!keepOpen) child.stdin.end();
     const t0 = Date.now();
-    child.on('exit', (code) => { try { child.stdin.destroy(); } catch (_) {} resolve({ code, out, ms: Date.now() - t0 }); });
+    // killMs: a child still running then is serving (fail-open); kill it and report code null.
+    const killer = killMs ? setTimeout(() => child.kill('SIGKILL'), killMs) : null;
+    child.on('exit', (code) => { if (killer) clearTimeout(killer); try { child.stdin.destroy(); } catch (_) {} resolve({ code, out, ms: Date.now() - t0 }); });
   });
 }
 
@@ -140,4 +142,34 @@ test('stdin EOF, bad JSON, unknown key, non-string value -> exit 78, value never
     assert.equal(r.code, 78, `${JSON.stringify(line)}: ${r.out}`);
     assert.ok(!r.out.includes(TOKEN));
   }
+});
+
+// G1 H1: stdin mode fails CLOSED when the role's own secret is missing or blank.
+const BRIDGE_JS = path.join(REPO, 'bridge.js');
+for (const [role, script, key, other] of [['server', SERVER_JS, 'SERVER_TOKEN', 'BRIDGE_SECRET'], ['bridge', BRIDGE_JS, 'BRIDGE_SECRET', 'SERVER_TOKEN']]) {
+  test(`${role}: stdin {} / "" / whitespace / missing ${key} -> exit 78, never serves`, async () => {
+    for (const obj of [{}, { [key]: '' }, { [key]: '   \t' }, { [other]: TOKEN }]) {
+      const r = await runExit(JSON.stringify(obj) + '\n', false, script, 4000);
+      assert.equal(r.code, 78, `${role} ${JSON.stringify(Object.keys(obj))}: ${r.out}`);
+      assert.match(r.out, new RegExp(`secrets: .*${key}`), 'stderr names the key');
+      assert.ok(!r.out.includes(TOKEN), 'value never echoed');
+      assert.doesNotMatch(r.out, /listening|cmux-remote server on/i);
+    }
+  });
+}
+
+// G1 L1: the 64 KiB cap is on total bytes, even when ONE chunk holds the newline.
+test('stdin cap: one oversized chunk that contains the newline -> exit 78', () => {
+  const code = `
+    const { EventEmitter } = require('events');
+    const s = require(${JSON.stringify(path.join(REPO, 'lib/secrets-stdin.js'))});
+    const fake = new EventEmitter(); fake.pause = () => {}; fake.resume = () => {};
+    s.loadSecrets({ stdin: fake, require: ['SERVER_TOKEN'], exit: (c) => { console.log('EXIT', c); process.exit(0); } })
+      .then(() => console.log('LOADED'));
+    fake.emit('data', Buffer.from(JSON.stringify({ SERVER_TOKEN: 'a'.repeat(70 * 1024) }) + '\\n'));`;
+  const r = spawnSync(process.execPath, ['-e', code], {
+    env: { PATH: process.env.PATH, HOME: tmp(), HYPERMUX_SECRETS_ON_STDIN: '1' }, encoding: 'utf8',
+  });
+  assert.match(r.stdout, /EXIT 78/, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /LOADED/);
 });

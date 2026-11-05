@@ -362,6 +362,7 @@ function defaultRun(req) {
         timeout: req.timeoutMs,
         killSignal: 'SIGTERM',
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: require('../lib/secrets-stdin').childEnv(),   // p62 G1
       });
     } catch (e) {
       return finish({ ok: false, code: null, stdout: '', stderr: '', error: e && e.message ? e.message : String(e) });
