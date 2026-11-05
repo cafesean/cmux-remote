@@ -17,7 +17,11 @@ One terminal, agent or browser surface on one machine.
 - `surface`: string. The surface id inside the machine, for example `surface:12`.
 - `kind`: one of `claude`, `codex`, `terminal`, `browser`. How the app should show it: a chat thread
   for the first two, the terminal mirror for `terminal`, the screenshot mirror for `browser`.
-- `title`: string. The session title shown in the list and the thread header.
+- `title`: string. The session title shown in the list and the thread header. Chosen by priority
+  (sessions/titles.js): transcript custom-title, tmux session name, `<workspace title> <surface ref>`,
+  the tab title only when it is not a process/wrapper/shell/prompt title (`cswap`, `zsh`, `user@host:~`).
+  The id never depends on the title, the account, the Claude config dir or the wrapper. One transcript
+  sessionId is one row: a tmux session also shown by a cmux surface is listed once, as the cmux surface.
 - `status`: one of `needs-you` (waiting on a person), `working`, `finished`, `idle`, `your-turn` (the
   agent replied and the next move is yours).
 - `preview`: string. One short line of the latest activity.

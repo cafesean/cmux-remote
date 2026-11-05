@@ -28,6 +28,7 @@ const eventlog = require('../radar/eventlog');
 const tmuxIds = require('../lib/tmux-ids');
 const procs = require('./procs');
 const subagents = require('./subagents');
+const { pickTitle } = require('./titles');
 
 // Every limit this module adds (LIMITS.md rows).
 const LIMITS = {
@@ -191,6 +192,12 @@ function createSessionRoutes(deps) {
     if (tab.type === 'browser') { s.kind = 'browser'; return { session: s, join: null }; }
     const js = joinSurface(tab);
     const be = tab.tmuxPane ? 'tmux' : backend;
+    // A11: title never comes from a process/wrapper name (cswap, zsh...); see sessions/titles.js.
+    let tmuxName = tab.tmuxPane ? tab.title : null;
+    if (!tmuxName && d.procSnapshot) { try { tmuxName = procs.tmuxNameFor(await d.procSnapshot(), js); } catch (_) { tmuxName = null; } }
+    const titleOf = (customTitle, preferTab) => pickTitle({ customTitle, tmuxName, preferTab,
+      workspaceTitle: ws.title || ws.ref, surfaceRef: tab.ref || tab.id, tabTitle: tab.title });
+    s.title = titleOf('', true);
     let join = null;
     try { join = await transcriptFor(js, d); } catch (_) { join = null; }
     let fg = null;
@@ -198,6 +205,7 @@ function createSessionRoutes(deps) {
     s.kind = detectKind({ surfaceType: tab.type, foregroundCmd: fg, transcriptPath: join && join.path });
     // A Codex transcript is never parsed with the Claude reader (no Codex normaliser yet): kind only.
     if (s.kind !== 'terminal' && join && join.kind === 'codex') s.kind = 'codex';
+    s.title = titleOf('', s.kind === 'terminal');
     if (s.kind !== 'claude' || !join) return { session: s, join: s.kind === 'codex' ? join : null };
     const o = await safeOpen(join.path);
     if (!o) return { session: s, join: null };
@@ -206,7 +214,7 @@ function createSessionRoutes(deps) {
     try { thread = await readThread(join.path, { limit: LIMITS.statusTailMsgs, sessionId: id, fs: shim(o.fh) }); } catch (_) { thread = null; }
     const o2 = await safeOpen(join.path);
     const cu = o2 ? await contextUsage(join.path, { fs: shim(o2.fh) }) : null;
-    if (thread && thread.title) s.title = thread.title;
+    s.title = titleOf(thread && thread.title, false);
     const lastMsgs = thread ? thread.messages : [];
     const tail = lastMsgs[lastMsgs.length - 1];
     const running = tail && tail.kind === 'tools' ? (tail.items || []).filter((t) => t.status === 'running').pop() : null;
@@ -235,12 +243,26 @@ function createSessionRoutes(deps) {
     if (!tabs) return send(res, 502, { error: 'cmux_failed' });
     let by = null;
     try { by = await unreadBySurface(); } catch (_) { by = null; }
-    const sessions = [];
+    const results = [];
     for (let i = 0; i < tabs.length; i += LIMITS.listConcurrency) {
       const part = await Promise.all(tabs.slice(i, i + LIMITS.listConcurrency).map((e) =>
-        describe(e, d, by ? by.has(String(e.tab.id).toUpperCase()) : null).then((r) => r.session)));
-      sessions.push(...part);
+        describe(e, d, by ? by.has(String(e.tab.id).toUpperCase()) : null)));
+      results.push(...part);
     }
+    // A11: one claude transcript session is one list row. A tmux session shown by a cmux surface
+    // (attach client) can also surface as a tmux-only orphan; keep the cmux surface entry (it takes
+    // input best), else the first. Keyed by the transcript sessionId, never by surface/title.
+    const keep = new Map();
+    for (const r of results) {
+      const k = r.session.kind === 'claude' && r.join && r.join.sessionId;
+      if (!k) continue;
+      const cur = keep.get(k);
+      if (!cur || (cur.session.reach !== 'cmux' && r.session.reach === 'cmux')) keep.set(k, r);
+    }
+    const sessions = results.filter((r) => {
+      const k = r.session.kind === 'claude' && r.join && r.join.sessionId;
+      return !k || keep.get(k) === r;
+    }).map((r) => r.session);
     send(res, 200, { machineId, sessions });
   }
 
