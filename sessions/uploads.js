@@ -15,7 +15,7 @@ const path = require('path');
 
 const IMAGE_EXT = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', heic: 'image/heic' };
 const LIMITS = {
-  uploadMaxBytes: 20 * 1024 * 1024,   // one inline upload image
+  uploadMaxBytes: Number(process.env.UPLOAD_MAX_BYTES || 32 * 1024 * 1024), // = upload cap (server.js, bridge.js): anything that uploads can show inline
   uploadRelMax: 512,                  // longest path (relative to the upload root) a url may name
   uploadImagesPerMessage: 20,         // path tokens turned into images per user message
   uploadRefsCacheMax: 64,             // M1: sessions whose referenced-upload set is cached (LRU)
