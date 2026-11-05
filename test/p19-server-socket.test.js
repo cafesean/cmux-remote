@@ -130,7 +130,8 @@ test('bridge stopped: tree -> 502 bridge_unreachable, an SSE route -> 502, the s
   const p = await socketPair();
   try {
     await p.bridge.stop();
-    assert.ok(fs.lstatSync(p.bsock).isSocket(), 'the stopped bridge left its (now dead) socket file');
+    // p41 A18: a graceful bridge exit now unlinks its socket; either way the server must answer 502.
+    if (fs.existsSync(p.bsock)) assert.ok(fs.lstatSync(p.bsock).isSocket());
     const tree = await call(p.ssock, 'GET', '/api/cmux/tree', { token: TOKEN });
     assert.equal(tree.status, 502);
     assert.deepEqual(tree.json, { error: 'bridge_unreachable' });
