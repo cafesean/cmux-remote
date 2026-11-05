@@ -33,8 +33,9 @@ async function bootServer(opts) {
   );
   if (o.socket) env.SERVER_SOCKET = o.socket;
   const child = spawn(process.execPath, [...(o.nodeArgs || []), SERVER_JS], {
-    cwd, env, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd, env, stdio: [o.stdin != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],   // p62: `stdin: '<line>'`
   });
+  if (o.stdin != null) child.stdin.end(o.stdin);
 
   let out = '';
   let err = '';

@@ -63,7 +63,7 @@ async function readSidecar(sessionId, { home } = {}) {
 
 function defaultGit(args, cwd) {
   return new Promise((resolve) => {
-    execFile('git', ['-C', cwd, '--no-optional-locks', ...args], { timeout: LIMITS.gitTimeoutMs, windowsHide: true }, (e, out) => resolve(e ? null : String(out).trim()));
+    execFile('git', ['-C', cwd, '--no-optional-locks', ...args], { timeout: LIMITS.gitTimeoutMs, windowsHide: true, env: require('../lib/secrets-stdin').childEnv() }, (e, out) => resolve(e ? null : String(out).trim()));
   });
 }
 

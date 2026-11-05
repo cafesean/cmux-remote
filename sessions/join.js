@@ -106,7 +106,7 @@ function tmuxDisplay(paneId, format) {
   return new Promise((resolve) => {
     execFile(tmuxCli.resolveTmuxBin(process.env.TMUX_BIN || ''),
       ['-S', process.env.TMUX_SOCKET || tmuxCli.defaultSocket(), 'display-message', '-p', '-t', paneId, format],
-      { timeout: TMUX_TIMEOUT }, (err, stdout) => resolve(err ? null : String(stdout).trim() || null));
+      { timeout: TMUX_TIMEOUT, env: require('../lib/secrets-stdin').childEnv() }, (err, stdout) => resolve(err ? null : String(stdout).trim() || null));
   });
 }
 const isPane = (id) => /^%\d+$/.test(String(id));

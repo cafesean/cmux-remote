@@ -29,6 +29,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const childProcess = require('child_process');
+const { childEnv } = require('../lib/secrets-stdin');   // p62 G1
 
 const store = require('./store');
 const hk = require('./handoff-keys');
@@ -158,7 +159,7 @@ function parsePsCapture(text) {
 }
 
 const execFileP = (bin, args, opts) => new Promise((resolve) => {
-  childProcess.execFile(bin, args, Object.assign({ maxBuffer: 16 * 1024 * 1024 }, opts),
+  childProcess.execFile(bin, args, Object.assign({ maxBuffer: 16 * 1024 * 1024, env: childEnv() }, opts),
     (err, stdout) => resolve({ err: err || null, stdout: String(stdout || '') }));
 });
 
@@ -785,7 +786,7 @@ function createHandoff(opts) {
       fd = fs.openSync(plan.logPath, 'a');    // the ONE store-only-writes exemption: `script`
       try {                                   // writes the bytes, radar only creates the file
         child = spawn('/bin/bash', ['-c', WRAPPER, 'bash', plan.claudeBin, ...plan.argv], {
-          cwd: plan.workdir, detached: true, stdio: ['ignore', fd, fd],
+          cwd: plan.workdir, detached: true, stdio: ['ignore', fd, fd], env: childEnv(),   // p62 G1: no secrets to the agent
         });
       } finally {
         // The child holds its own duplicate; Node does NOT close a synchronously-opened fd for

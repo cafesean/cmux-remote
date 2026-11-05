@@ -27,7 +27,7 @@ const LIMITS = {
 
 function run(cmd, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 64 * 1024, windowsHide: true },
+    execFile(cmd, args, { timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 64 * 1024, windowsHide: true, env: require('../lib/secrets-stdin').childEnv() },
       (err, stdout) => (err ? reject(err) : resolve(String(stdout))));
   });
 }

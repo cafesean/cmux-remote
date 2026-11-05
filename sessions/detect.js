@@ -79,7 +79,7 @@ function detectKind(info) {
 
 function run(bin, args, timeout) {
   return new Promise((resolve, reject) => {
-    execFile(bin, args, { timeout, maxBuffer: 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))));
+    execFile(bin, args, { timeout, maxBuffer: 1024 * 1024, env: require('../lib/secrets-stdin').childEnv() }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))));
   });
 }
 const defaultPs = (args) => run('/bin/ps', args, PS_TIMEOUT);

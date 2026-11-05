@@ -585,8 +585,9 @@ const BASE_ENV = Object.freeze({
 
 function sanitizedBase() {
   const out = {};
-  for (const k of Object.keys(process.env)) {
-    if (!k.startsWith('GIT_')) out[k] = process.env[k];
+  const base = require('./lib/secrets-stdin').childEnv();   // p62 S2: no secrets to git
+  for (const k of Object.keys(base)) {
+    if (!k.startsWith('GIT_')) out[k] = base[k];
   }
   return Object.assign(out, BASE_ENV);
 }
@@ -677,7 +678,7 @@ function createGitRead(opts) {
   const assertRepo = o.assertRepo || (async () => { throw new Error('no oracle'); });
   const writesEnabled = !!o.writesEnabled;
   const mounts = o.mounts || (() => new Promise((resolve, reject) => {
-    execFile(MOUNT_BIN, [], { timeout: MOUNT_TIMEOUT_MS, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+    execFile(MOUNT_BIN, [], { timeout: MOUNT_TIMEOUT_MS, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, env: require('./lib/secrets-stdin').childEnv() },
       (err, stdout) => (err ? reject(err) : resolve(stdout)));
   }));
   const homedirFn = o.homedir || (() => os.homedir());

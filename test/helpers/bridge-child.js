@@ -38,7 +38,9 @@ async function bootBridge(opts) {
     o.env || {},
   );
   if (o.socket) env.BRIDGE_SOCKET = o.socket;
-  const child = spawn(process.execPath, [BRIDGE_JS], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  // p62: `stdin: '<line>'` pipes that text to the child (HYPERMUX_SECRETS_ON_STDIN tests).
+  const child = spawn(process.execPath, [BRIDGE_JS], { cwd, env, stdio: [o.stdin != null ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+  if (o.stdin != null) child.stdin.end(o.stdin);
 
   let out = '';
   let err = '';

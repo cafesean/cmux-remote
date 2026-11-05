@@ -46,7 +46,7 @@ const slugOf = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
 
 function run(bin, args, timeout) {
   return new Promise((resolve, reject) => {
-    execFile(bin, args, { timeout, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))));
+    execFile(bin, args, { timeout, maxBuffer: 4 * 1024 * 1024, env: require('../lib/secrets-stdin').childEnv() }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))));
   });
 }
 const defaultPsAll = () => run('/bin/ps', ['-axo', 'pid=,ppid=,args='], LIMITS.psTimeoutMs);
@@ -310,7 +310,7 @@ async function tmuxTargetFor(surfaceId, deps) {
 function tmuxRun(socket, args, input) {
   return new Promise((resolve) => {
     let child;
-    try { child = spawn(tmuxCli.resolveTmuxBin(process.env.TMUX_BIN || ''), ['-S', socket, ...args], { stdio: ['pipe', 'ignore', 'pipe'] }); } catch (e) { return resolve({ code: -1, dispatched: false, detail: String(e.message) }); }
+    try { child = spawn(tmuxCli.resolveTmuxBin(process.env.TMUX_BIN || ''), ['-S', socket, ...args], { stdio: ['pipe', 'ignore', 'pipe'], env: require('../lib/secrets-stdin').childEnv() }); } catch (e) { return resolve({ code: -1, dispatched: false, detail: String(e.message) }); }
     let err = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), LIMITS.tmuxTimeoutMs);
     child.stderr.on('data', (b) => { err += b; });
