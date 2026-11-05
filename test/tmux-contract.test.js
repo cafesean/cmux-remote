@@ -277,7 +277,7 @@ test('SSE: the first data frame of grid-stream, panes-stream and layout-stream h
 const BROWSER = [
   ['POST', '/cmux/browser/open'], ['POST', '/cmux/browser/tap'], ['POST', '/cmux/browser/type'],
   ['POST', '/cmux/browser/key'], ['POST', '/cmux/browser/scroll'], ['POST', '/cmux/browser/nav'],
-  ['POST', '/cmux/browser/zoom'], ['GET', '/cmux/browser/info'], ['GET', '/cmux/browser/stream'],
+  ['POST', '/cmux/browser/zoom'], ['GET', '/cmux/browser/info'], ['GET', '/cmux/browser/shot'], ['GET', '/cmux/browser/stream'],
 ];
 test('the 9 browser routes: 501 unsupported_backend on tmux, never 501 on cmux', { skip }, async () => {
   const f = fakeIds();

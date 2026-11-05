@@ -863,6 +863,13 @@ async function handleApi(req, res, u) {
     const qs = new URLSearchParams({ surface: u.searchParams.get('surface') || '' });
     return relay(res, bridge(m, `/cmux/browser/info?${qs}`));
   }
+  // p41 D67: GET shot — one base64 frame for a polling client (bridge rate-limits + size-caps it).
+  if (req.method === 'GET' && p === '/api/cmux/browser/shot') {
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    const qs = new URLSearchParams({ surface: u.searchParams.get('surface') || '' });
+    return relay(res, bridge(m, `/cmux/browser/shot?${qs}`, { timeout: 20000 }));
+  }
   // GET hits (clickable areas for the desktop hand cursor).
   if (req.method === 'GET' && p === '/api/cmux/browser/hits') {
     const m = findMachine(u.searchParams.get('machine'));

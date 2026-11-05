@@ -2028,6 +2028,28 @@ function cmuxBrowserInfo(res, surface) {
     .then((out) => { let info = null; try { info = JSON.parse(out); } catch (_) {} return info ? send(res, 200, { ok: true, ...info }) : send(res, 502, { error: 'cmux_failed' }); });
 }
 
+// p41 D67: GET /cmux/browser/shot?surface= -> { ok, mime, image: base64 } — ONE frame for a client that
+// polls (the native Workspace browser tile; RN has no SSE reader). Same queued, sips-shrunk shot as the
+// stream. A per-surface floor (BROWSER_SHOT_MIN_MS, 429 + retryMs) keeps a fast poller from starving
+// terminal.replay (the cadence lesson above); a byte cap (BROWSER_SHOT_MAX_BYTES, 413) bounds the reply.
+const BROWSER_SHOT_MIN_MS = Math.max(0, Number(process.env.BROWSER_SHOT_MIN_MS) || 1500);
+const BROWSER_SHOT_MAX_BYTES = Math.max(1, Number(process.env.BROWSER_SHOT_MAX_BYTES) || 1536 * 1024);
+const browserShotLast = new Map();   // surface -> Date.now() of the last accepted one-shot
+function cmuxBrowserShot(res, surface) {
+  const now = Date.now();
+  const last = browserShotLast.get(surface);
+  if (last != null && now - last < BROWSER_SHOT_MIN_MS) return send(res, 429, { error: 'rate_limited', retryMs: BROWSER_SHOT_MIN_MS - (now - last) });
+  browserShotLast.set(surface, now);
+  if (browserShotLast.size > 256) browserShotLast.delete(browserShotLast.keys().next().value);
+  browserShot(surface).then((shot) => {
+    if (!shot || !shot.buf || !shot.buf.length) return send(res, 502, { error: 'cmux_failed' });
+    if (shot.buf.length > BROWSER_SHOT_MAX_BYTES) return send(res, 413, { error: 'too_large', limit: BROWSER_SHOT_MAX_BYTES });
+    const png = shot.buf[0] === 0x89 && shot.buf[1] === 0x50;
+    const jpg = shot.buf[0] === 0xff && shot.buf[1] === 0xd8;
+    send(res, 200, { ok: true, mime: jpg ? 'image/jpeg' : 'image/png', image: shot.buf.toString('base64') });
+  }, () => send(res, 502, { error: 'cmux_failed' }));
+}
+
 // GET /cmux/browser/stream?surface=[&vw=&vh=] -> SSE of base64 JPEG frames, emitted only on change.
 // vw/vh = the viewer's CSS size: the page is laid out at exactly that size (see Phone viewport above).
 // ADAPTIVE cadence — a screenshot of a big Retina pane costs the cmux app real CPU every tick, and an
@@ -2559,6 +2581,11 @@ function dispatchCmux(req, res, u) {
     if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
     return cmuxBrowserStream(req, res, s, viewportDim(u.searchParams.get('vw'), 200, 2000),
       viewportDim(u.searchParams.get('vh'), 200, 3000));
+  }
+  if (req.method === 'GET' && p === '/cmux/browser/shot') {
+    const s = surfaceParam();
+    if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
+    return cmuxBrowserShot(res, s);
   }
   if (req.method === 'GET' && p === '/cmux/browser/hits') {
     const s = surfaceParam();
