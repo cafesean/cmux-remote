@@ -212,6 +212,8 @@ const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   joinPollMs: Number(process.env.P41_JOIN_POLL_MS) || undefined,
   procSnapshot: p41ProcSnapshotKnob(),
   statusPollMs: Number(process.env.P41_JOIN_POLL_MS) || undefined,
+  // A14: Session.choice reads the live screen through the same path as the grid mirror.
+  readGrid: (surface) => new Promise((resolve) => gridPayload(surface, (obj) => resolve(obj && obj.grid ? obj.grid : null))),
 });
 
 // ---------- compose-box completions (p7 §6.2) --------------------------------

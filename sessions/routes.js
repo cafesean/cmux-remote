@@ -30,6 +30,7 @@ const procs = require('./procs');
 const subagents = require('./subagents');
 const { pickTitle } = require('./titles');
 const statusline = require('./statusline');
+const choice = require('./choice');
 
 // Every limit this module adds (LIMITS.md rows).
 const LIMITS = {
@@ -46,6 +47,7 @@ const LIMITS = {
   procSnapshotTtlMs: 2000,           // one ps+tmux snapshot is shared for this long (list, describe, streams)
   attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n
   ...statusline.LIMITS,               // A12 status-line limits (sessions/statusline.js)
+  ...choice.LIMITS,                   // A14 answer-choice limits (sessions/choice.js)
   ...subagents.LIMITS,                // A10 sub-agent limits (sessions/subagents.js)
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
@@ -65,6 +67,8 @@ function createSessionRoutes(deps) {
   const joinPollMs = deps.joinPollMs || WATCH_POLL_MS;
   const statusPollMs = deps.statusPollMs || LIMITS.streamStatusMs;
   const readEventsRaw = deps.readEvents || eventlog.readEvents;
+  // A14: the surface's current screen (bridge gridPayload) for the live-menu choice source.
+  const choices = choice.createChoiceReader({ readGrid: deps.readGrid || null });
   // Process/tmux snapshot for the agent probe (sessions/procs.js). On tmux only the bridge's own
   // socket is looked at, so a pane id never matches another server's pane. Tests inject procSnapshot.
   const procOpts = { home };
@@ -231,6 +235,12 @@ function createSessionRoutes(deps) {
     if (st.contextPct !== undefined) s.contextPct = st.contextPct;
     s.subagents = await subagents.countSubagents(join.path, { home, now: d.now() });
     await addStatusLine(s, join, tab, d);
+    if (choice.WAITING.has(s.status)) {
+      try {
+        const c = await choices.choiceFor({ status: s.status, lastMsgs, surface: tab.id, screen: !tab.tmuxPane });
+        if (c) s.choice = c;
+      } catch (_) { /* optional */ }
+    }
     return { session: s, join };
   }
   const gitInfo = deps.gitInfo || statusline.createGitInfo({ git: deps.git });

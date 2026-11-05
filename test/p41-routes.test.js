@@ -347,3 +347,23 @@ test('cmux backend: detached tmux claude session listed with reach tmux; /cmux/s
     await srv.waitFor(async () => /hello-p41\n.*hello-p41/s.test(await srv.capture(paneId)), { what: 'cat echoed the submitted line' });
   } finally { await b.stop(); await srv.stop(); }
 });
+
+// A14: Session.choice on the list, from the live screen (fake cmux replays the permission prompt).
+test('A14: waiting session carries choice from the live menu; slash menu gives none', async () => {
+  const { h } = home([user(1, 'go'), asst(2, 'Deleting build.')]);
+  const b = await boot(h, {}, { grid: 'a14-permission' });
+  try {
+    const r = await call(b.socketPath, 'GET', '/cmux/sessions', { secret: SECRET });
+    assert.equal(r.status, 200, r.text);
+    const a1 = r.json.sessions.find((s) => s.surface === IDS.sfA1);
+    assert.equal(a1.status, 'your-turn');
+    assert.equal(a1.choice.source, 'menu');
+    assert.deepEqual(a1.choice.options.map((o) => o.send.keys), [['enter'], ['down', 'enter'], ['down', 'down', 'enter']]);
+    assert.equal(r.json.sessions.find((s) => s.surface === IDS.sfA2).choice, undefined, 'terminal kind: no choice');
+  } finally { await b.stop(); }
+  const b2 = await boot(h, {}, {});
+  try {
+    const r = await call(b2.socketPath, 'GET', '/cmux/sessions', { secret: SECRET });
+    assert.equal(r.json.sessions.find((s) => s.surface === IDS.sfA1).choice, undefined, 'a slash completion menu is not a question');
+  } finally { await b2.stop(); }
+});

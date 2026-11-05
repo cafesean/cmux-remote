@@ -189,4 +189,4 @@ function statusFor(input) {
   return out('idle', idlePreview);
 }
 
-module.exports = { statusFor, contextPct, contextUsage, CONTEXT_WINDOWS, LIMITS, PREVIEW_MAX };
+module.exports = { statusFor, tailOf, contextPct, contextUsage, CONTEXT_WINDOWS, LIMITS, PREVIEW_MAX };

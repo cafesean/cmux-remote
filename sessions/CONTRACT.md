@@ -39,6 +39,34 @@ One terminal, agent or browser surface on one machine.
   `writtenAt`) plus `branch`/`repo` from git on the pane cwd (cached); `account` is `null` then. Example:
   `{"account":"jet","lastReplyAt":"2026-11-05T01:19:28.440Z","ctxUsed":205000,"ctxLimit":200000,"ctxPct":102,"model":"Opus 5.5","title":"x-cmux-native-3","branch":"integration/p41-native","repo":"cmux-remote","writtenAt":"2026-11-05T01:19:42Z"}`.
   Limits (`sessions/statusline.js`): sidecarMaxBytes 16 KiB, gitCacheTtlMs 10000, gitCacheMax 128, gitTimeoutMs 2000, strMax 300.
+- `choice`: optional object (A14), the answer buttons for what the session is waiting on right now. Present only
+  when `status` is `needs-you` or `your-turn` (never while working) and a source is found; absent otherwise.
+  `{source: 'menu'|'ask'|'callout', question: string, options: [{label: string, send: Send}]}`. Sources, first
+  match wins:
+  1. `menu`: the live terminal selector (permission prompt `Do you want to proceed? ❯ 1. Yes 2. … 3. No`, the
+     AskUserQuestion selector, any numbered menu with a `❯` highlight), parsed from the pane's current screen by
+     `public/menuparse.js` `menuChoice` (the PWA's own parser). Items must be numbered 1..n consecutively with
+     exactly one `❯` row. `send = {keys: [...]}`: arrows from the highlighted item to this one, then `enter`
+     (the PWA's tap-to-pick sequence). Slash/@ completion menus are not offered (the operator is typing).
+  2. `ask`: the transcript's pending AskUserQuestion (the last message), when no live menu was readable.
+     Single-select only. `send = {text: '<n>', submit: false}`: the option's 1-based number typed WITHOUT
+     Enter; Claude Code's selector picks on the digit. (Digits are not `/cmux/key` names, so this goes as text.)
+  3. `callout`: the last callout with `options:` in the last assistant message. `question` is its title.
+     `send = {text: option, submit: true}`: the option sent as a normal message plus Enter.
+
+  How the app sends a pick (no new route; the existing ones, with the Session's `machine` and `surface`):
+  - `send.keys`: one `POST /api/cmux/key {machine, surface, key}` per key, IN ORDER, each awaited before the
+    next (the bridge path is `/cmux/key`). Stop at the first non-2xx. Example `['down','down','enter']`.
+  - `send.text`: one `POST /api/cmux/send {machine, surface, text, submit}` (bridge `/cmux/send`); `submit`
+    true adds Enter after the bridge's settle delay.
+  The menu is a snapshot: the screen can move between the list poll and the tap. Refresh the session (or
+  re-read the list) before sending if the choice is older than a poll, and drop the buttons once one is sent.
+  Example: `{"source":"menu","question":"Do you want to proceed?","options":[{"label":"Yes","send":{"keys":["enter"]}},
+  {"label":"No, and tell Claude what to do differently (esc)","send":{"keys":["down","enter"]}}]}`.
+  Limits (`sessions/choice.js`): choiceScreenTailRows 40, choiceScreenTimeoutMs 1500, choiceScreenTtlMs 1500
+  (one screen read per surface shared by list + streams; the parse is cached by screen hash), choiceCacheMax 64,
+  choiceOptionsMax 9, choiceLabelMax 200. The screen is read only for waiting Claude sessions on a cmux grid
+  (`reach: 'tmux'` rows use `ask`/`callout` only).
 - `reach`: `cmux` or `tmux`. How input reaches the pane. On a cmux host, a tmux session that runs
   claude or codex but that no cmux pane shows (detached, or its cmux pane was closed) is still listed,
   under workspace `tmux`, with `reach: 'tmux'` and a minted tmux surface id (`lib/tmux-ids.js`). The

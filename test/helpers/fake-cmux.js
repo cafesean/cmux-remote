@@ -34,7 +34,7 @@ const IDS = {
 function writeFakeCmux(dir, opts) {
   const o = opts || {};
   const cwd = o.cwd || dir;
-  const grid = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'grids', 'claude-slash-2.json'), 'utf8')).grid;
+  const grid = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'grids', (o.grid || 'claude-slash-2') + '.json'), 'utf8')).grid;
   const data = { IDS, cwd, browser: !!o.browser, hideFile: o.hideFile || '', replay: { seq: 7, render_grid: grid } };
   const file = path.join(dir, 'fake-cmux');
   const src = '#!' + process.execPath + '\n' + String.raw`'use strict';
