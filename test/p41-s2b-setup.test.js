@@ -26,8 +26,8 @@ function run(args) {
   const cmd = args[0]; const o = opts(args.slice(1)); const k = o.a + '|' + o.s; const db = load();
   if (process.env.FAKE_LOG) fs.appendFileSync(process.env.FAKE_LOG, cmd + (o.U ? ' -U' : '') + '\\n');
   if (cmd === 'show-keychain-info') return process.env.FAKE_LOCKED ? 36 : 0;
-  if (cmd === 'find-generic-password') return k in db ? 0 : 44;
-  if (cmd === 'delete-generic-password') { if (process.env.FAKE_DELETE_FAIL) return 1; if (!(k in db)) return 44; delete db[k]; save(db); return 0; }
+  if (cmd === 'find-generic-password') { if (process.env.FAKE_FIND_ERR_AFTER_DELETE && fs.existsSync(kc + '.deleted')) return 36; return k in db ? 0 : 44; }
+  if (cmd === 'delete-generic-password') { if (process.env.FAKE_DELETE_FAIL) return 1; if (!(k in db)) return 44; delete db[k]; save(db); fs.writeFileSync(kc + '.deleted', '1'); return 0; }
   if (cmd === 'add-generic-password') {
     if (process.env.FAKE_WRITE_FAIL) return 1;
     if (k in db && !o.U) return 45;
@@ -55,6 +55,10 @@ const T = process.env.FAKE_TOKEN;
   const mode = process.env.FAKE_MODE || 'normal';
   if (mode === 'onechunk') {
     w('Opening browser...\\r\\nVisit: https://claude.example.test/oauth/authorize?code=true\\r\\n\\x1b[1mYour OAuth token (valid for 1 year):\\x1b[0m\\r\\n' + T.slice(0, 70) + '\\r\\n' + T.slice(70) + '\\r\\n');
+    return;
+  }
+  if (mode === 'ansisplit') {
+    w('Visit: https://claude.example.test/oauth/authorize?code=true\\r\\nsk-\\x1b[1mant-oat01-' + T.slice(13, 70) + '\\r\\n' + T.slice(70) + '\\r\\n(valid for 1 year)\\r\\n');
     return;
   }
   if (mode === 'osc') {
@@ -387,4 +391,21 @@ test('HYPERMUX_SETUP_CMD accepts a JSON array (path with space)', () => {
   const res = run(SETUP, r, ['acme'], 'y\n', { HYPERMUX_SETUP_CMD: JSON.stringify([cmd]) });
   assert.strictEqual(res.status, 0, res.stderr + res.stdout);
   assert.strictEqual(r.keychain()[KEY('acme')], TOKEN);
+});
+
+test('N1: ANSI-split prefix + trailer in one chunk -> no token fragment, URL kept', () => {
+  const r = rig({ FAKE_MODE: 'ansisplit' });
+  const res = run(SETUP, r, ['acme'], 'y\n');
+  noLeak(res);
+  assert.ok(!res.stdout.includes('sk-'), 'prefix leaked');
+  assert.match(res.stdout, /https:\/\/claude\.example\.test\/oauth\/authorize/);
+});
+
+test('I3: post-delete find fails with non-44 -> "couldn\'t confirm", exit 1', () => {
+  const r = rig({ FAKE_FIND_ERR_AFTER_DELETE: '1' });
+  fs.writeFileSync(r.kc, JSON.stringify({ [KEY('acme')]: TOKEN }));
+  const res = run(REMOVE, r, ['acme'], 'y\n');
+  assert.strictEqual(res.status, 1);
+  assert.match(res.stdout + res.stderr, /remove failed — couldn't confirm/);
+  assert.ok(!/Removed acme/.test(res.stdout));
 });
