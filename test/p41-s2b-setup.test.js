@@ -61,6 +61,12 @@ const T = process.env.FAKE_TOKEN;
     w('Visit: https://claude.example.test/oauth/authorize?code=true\\r\\nsk-\\x1b[1mant-oat01-' + T.slice(13, 70) + '\\r\\n' + T.slice(70) + '\\r\\n(valid for 1 year)\\r\\n');
     return;
   }
+  if (mode === 'longesc') {
+    w('Visit: https://claude.example.test/x\\r\\nsk-\\x1b[' + '0;'.repeat(25));
+    await sleep(150);
+    w('mant-oat01-' + T.slice(13) + '\\r\\n(valid for 1 year)\\r\\n');
+    return;
+  }
   if (mode === 'osc') {
     w('Visit: https://claude.example.test/x\\r\\n');
     await sleep(80);
@@ -408,4 +414,11 @@ test('I3: post-delete find fails with non-44 -> "couldn\'t confirm", exit 1', ()
   assert.strictEqual(res.status, 1);
   assert.match(res.stdout + res.stderr, /remove failed — couldn't confirm/);
   assert.ok(!/Removed acme/.test(res.stdout));
+});
+
+test('N2: >32 bytes of ANSI inside the prefix across chunks -> no body printed', () => {
+  const r = rig({ FAKE_MODE: 'longesc' });
+  const res = run(SETUP, r, ['acme'], 'y\n');
+  noLeak(res);
+  assert.ok(!res.stdout.includes('oat01'), 'body leaked');
 });
