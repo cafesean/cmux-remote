@@ -31,6 +31,7 @@ const subagents = require('./subagents');
 const { pickTitle } = require('./titles');
 const statusline = require('./statusline');
 const choice = require('./choice');
+const names = require('./names');
 
 // Every limit this module adds (LIMITS.md rows).
 const LIMITS = {
@@ -48,6 +49,7 @@ const LIMITS = {
   attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n
   ...statusline.LIMITS,               // A12 status-line limits (sessions/statusline.js)
   ...choice.LIMITS,                   // A14 answer-choice limits (sessions/choice.js)
+  ...names.LIMITS,                    // A16 session-name limits (sessions/names.js)
   ...subagents.LIMITS,                // A10 sub-agent limits (sessions/subagents.js)
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
@@ -201,7 +203,8 @@ function createSessionRoutes(deps) {
     // A11: title never comes from a process/wrapper name (cswap, zsh...); see sessions/titles.js.
     let tmuxName = tab.tmuxPane ? tab.title : null;
     if (!tmuxName && d.procSnapshot) { try { tmuxName = procs.tmuxNameFor(await d.procSnapshot(), js); } catch (_) { tmuxName = null; } }
-    const titleOf = (customTitle, preferTab) => pickTitle({ customTitle, tmuxName, preferTab,
+    let userName = '';
+    const titleOf = (customTitle, preferTab) => pickTitle({ customTitle, tmuxName, preferTab, userName,
       workspaceTitle: ws.title || ws.ref, surfaceRef: tab.ref || tab.id, tabTitle: tab.title });
     s.title = titleOf('', true);
     let join = null;
@@ -211,6 +214,8 @@ function createSessionRoutes(deps) {
     s.kind = detectKind({ surfaceType: tab.type, foregroundCmd: fg, transcriptPath: join && join.path });
     // A Codex transcript is never parsed with the Claude reader (no Codex normaliser yet): kind only.
     if (s.kind !== 'terminal' && join && join.kind === 'codex') s.kind = 'codex';
+    userName = nameStore.get(nameKey(join, tab));
+    if (userName) s.userNamed = true;
     s.title = titleOf('', s.kind === 'terminal');
     if (s.kind !== 'claude' || !join) return { session: s, join: s.kind === 'codex' ? join : null };
     const o = await safeOpen(join.path);
@@ -243,6 +248,8 @@ function createSessionRoutes(deps) {
     }
     return { session: s, join };
   }
+  const nameStore = deps.nameStore || names.createNameStore({ home, limits: LIMITS });
+  const nameKey = (join, tab) => (join && join.sessionId) || tab.id;
   const gitInfo = deps.gitInfo || statusline.createGitInfo({ git: deps.git });
   async function addStatusLine(s, join, tab, d) {
     let cwd = null;
@@ -532,7 +539,24 @@ function createSessionRoutes(deps) {
     return choices.commit({ current: session.choice || null, choiceId: b.choiceId, index, label: b.label, surface }, io);
   }
 
-  return { handle, tmuxTarget, choose };
+  // A16 POST /cmux/session-name {sessionId, name}: sessionId is the Session.id. Empty name clears.
+  async function rename(b) {
+    if (!b || typeof b.sessionId !== 'string' || !b.sessionId || b.sessionId.length > LIMITS.idMax) return { code: 400, body: { error: 'bad_id' } };
+    const v = names.validateName(b.name, LIMITS);
+    if (v.error) return { code: 400, body: { error: v.error } };
+    const entry = await findTab(b.sessionId);
+    if (entry === null) return { code: 502, body: { error: 'cmux_failed' } };
+    if (!entry) return { code: 404, body: { error: 'not_found' } };
+    const d = requestDeps();
+    let join = null;
+    if (entry.tab.type !== 'browser') { try { join = await transcriptFor(joinSurface(entry.tab), d); } catch (_) { join = null; } }
+    const r = nameStore.set(nameKey(join, entry.tab), v.name);
+    if (!r.ok) return { code: r.error === 'names_full' ? 409 : 400, body: { error: r.error } };
+    const { session } = await describe(entry, d, await unreadFor(entry.tab));
+    return { code: 200, body: { ok: true, sessionId: b.sessionId, name: r.name || null, title: session.title } };
+  }
+
+  return { handle, tmuxTarget, choose, rename };
 }
 
 module.exports = { createSessionRoutes, LIMITS };

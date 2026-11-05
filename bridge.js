@@ -1218,6 +1218,14 @@ function cmuxChoose(req, res) {
   });
 }
 
+// POST /cmux/session-name { sessionId, name } (p41 A16) — set/clear the user's name for a session.
+function cmuxSessionName(req, res) {
+  cmuxReadBody(req, (b) => {
+    if (!b) return send(res, 400, { error: 'bad_json' });
+    sessionRoutes.rename(b).then((r) => send(res, r.code, r.body)).catch(() => send(res, 500, { error: 'rename_failed' }));
+  });
+}
+
 // POST /cmux/key { surface, key } — press a single (allow-listed) key on a specific surface.
 // Addressing the SURFACE (not the workspace) is what makes arrows/tab actually reach the mirrored tab
 // instead of the workspace's focused surface — the root cause of "up-arrow acts like escape".
@@ -2193,6 +2201,7 @@ function handleCmux(req, res) {
   }
   if (req.method === 'POST' && p === '/cmux/send') return cmuxSend(req, res);
   if (req.method === 'POST' && p === '/cmux/choose') return cmuxChoose(req, res);
+  if (req.method === 'POST' && p === '/cmux/session-name') return cmuxSessionName(req, res);
   if (req.method === 'POST' && p === '/cmux/key') return cmuxKey(req, res);
   if (req.method === 'POST' && p === '/cmux/new-surface') return cmuxNewSurface(req, res);
   if (req.method === 'POST' && p === '/cmux/new-workspace') return cmuxNewWorkspace(req, res);

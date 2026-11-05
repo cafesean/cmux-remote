@@ -1,7 +1,7 @@
 'use strict';
 // p41 A11 — session title choice. A cmux tab title is the terminal's process title ("cswap", "zsh",
 // "user@host:~/x"): it changes with the wrapper or Claude account and is not an identity. Priority:
-//   1 transcript custom-title   2 tmux session name (stable)   3 workspace title + short surface ref
+//   0 user name (A16, sessions/names.js)   1 transcript custom-title   2 tmux session name (stable)   3 workspace title + short surface ref
 //   4 tab.title, only when it is not a volatile process/shell/prompt title
 // Non-agent terminals prefer the tab title (preferTab) so a plain `vim x` pane keeps its own title.
 // One config object, no inline lists (LIMITS.md row: titleMax).
@@ -24,6 +24,8 @@ function isVolatileTitle(t, cfg) {
 function pickTitle(o, cfg) {
   const c = cfg || TITLES;
   const clip = (s) => String(s).trim().slice(0, c.titleMax);
+  const named = o.userName && String(o.userName).trim();
+  if (named) return clip(named);
   const custom = o.customTitle && String(o.customTitle).trim();
   if (custom) return clip(custom);
   const tmux = o.tmuxName && String(o.tmuxName).trim();

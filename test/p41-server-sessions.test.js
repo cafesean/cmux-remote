@@ -22,7 +22,7 @@ async function fakeBridge(mid, secret) {
     if (req.headers['x-bridge-secret'] !== secret) return send(401, { error: 'unauthorized' });
     const u = new URL(req.url, 'http://x');
     const pre = `/cmux/sessions/${encodeURIComponent(mid + ':surface:1')}`;
-    if (req.method === 'POST' && (u.pathname === '/cmux/send' || u.pathname === '/cmux/key' || u.pathname === '/cmux/choose')) {
+    if (req.method === 'POST' && (u.pathname === '/cmux/send' || u.pathname === '/cmux/key' || u.pathname === '/cmux/choose' || u.pathname === '/cmux/session-name')) {
       let body = '';
       req.on('data', (c) => { body += c; });
       req.on('end', () => { rec.body = body; send(200, { ok: true, via: mid }); });
@@ -279,4 +279,22 @@ test('A10: /api/sessions/:id/subagents* pass through; bad agentId is 400 before 
     req.on('error', (e) => { if (!/socket hang up|aborted/.test(String(e))) reject(e); });
     setTimeout(() => reject(new Error('no subagent SSE frame')), 8000);
   });
+});
+
+test('A16 POST /api/sessions/:id/name relays {sessionId,name} to the owning bridge; bad input 400', async () => {
+  await call(server.base, 'GET', '/api/sessions', { token: TOKEN });   // learn the owners
+  const r = await call(server.base, 'POST', `/api/sessions/${enc('air:surface:1')}/name`, { token: TOKEN, body: { name: '  Deploy fix ' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.via, 'air');
+  const rec = bb.log.filter((x) => x.url === '/cmux/session-name').pop();
+  assert.equal(rec.secret, 'sb');
+  assert.deepEqual(JSON.parse(rec.body), { sessionId: 'air:surface:1', name: '  Deploy fix ' });
+  const noTok = await call(server.base, 'POST', `/api/sessions/${enc('air:surface:1')}/name`, { body: { name: 'x' } });
+  assert.equal(noTok.status, 401);
+  for (const body of [{}, { name: 5 }, { name: null }]) {
+    const bad = await call(server.base, 'POST', `/api/sessions/${enc('air:surface:1')}/name`, { token: TOKEN, body });
+    assert.equal(bad.status, 400);
+  }
+  const big = await call(server.base, 'POST', `/api/sessions/${enc('air:surface:1')}/name`, { token: TOKEN, body: { name: 'x'.repeat(9000) } });
+  assert.equal(big.status, 413);
 });

@@ -164,6 +164,7 @@ passes requests through to the right bridge. The session `id` goes in the path, 
 | Attachment bytes | `GET /cmux/sessions/:id/attachment/:n` | `GET /api/sessions/:id/attachment/:n` |
 | Send text and keys | `WS /cmux/sessions/:id/input` | `WS /api/sessions/:id/input` |
 | Answer a choice (A14) | `POST /cmux/choose` | `POST /api/cmux/choose` |
+| Rename a session (A16) | `POST /cmux/session-name` `{sessionId, name}` | `POST /api/sessions/:id/name` `{name}` |
 | List sub-agents (A10) | `GET /cmux/sessions/:id/subagents` | `GET /api/sessions/:id/subagents` |
 | Sub-agent thread page (A10) | `GET /cmux/sessions/:id/subagents/:agentId/thread?before=&limit=` | `GET /api/sessions/:id/subagents/:agentId/thread?before=&limit=` |
 | Sub-agent live stream (A10) | `GET /cmux/sessions/:id/subagents/:agentId/thread-stream` | `GET /api/sessions/:id/subagents/:agentId/thread-stream` |
@@ -172,6 +173,18 @@ The list returns a Session list, `{machineId, sessions: Session[]}`, where `mach
 machine and every session in it has that `machine`. The thread read returns a Thread; `limit` is the page
 size in messages and defaults to 80. The stream returns Stream events. The attachment route returns the
 image bytes. New routes are additive; no existing bridge route changes shape.
+
+### Rename a session (A16)
+
+`POST /api/sessions/:id/name {name}` (device auth; `:id` is `Session.id`, optional `?machine=`) relays to the owning
+bridge's `POST /cmux/session-name {sessionId, name}`. `name` is trimmed; empty clears. Replies:
+`200 {ok:true, sessionId, name: string|null, title}` (`title` = the Session.title now in effect),
+`400 bad_json|bad_id|bad_name` (not a string, over `nameMax`, control chars), `404 not_found|no_machine`,
+`409 names_full`, `413 too_large` (server), `502`. Names live in `~/.cmux-remote/session-names.json` (0600, atomic),
+keyed by transcript sessionId (else the surface id). A named Session has `userNamed: true` and its `title` is the
+name: title priority is user name > transcript custom-title > tmux name > workspace+ref > non-volatile tab title.
+Limits (`sessions/names.js`): nameMax 80, nameKeyMax 128, nameEntriesMax 500, nameFileMaxBytes 256 KiB;
+server `lib/sessions-proxy.js`: nameBodyMax 4096, nameTimeoutMs 20000.
 
 ### Sub-agents (A10)
 
