@@ -410,3 +410,89 @@ test('tailThread stops when the signal aborts', async () => {
   ac.abort();
   assert.strictEqual(await done, 'ended');
 });
+
+// D55: a message typed while a turn runs is written as an `attachment` record (queued_command), not a
+// user row. Shape from a real transcript; the text here is synthetic.
+const queued = (n, prompt, origin = { kind: 'human' }, extra) => ({ type: 'attachment', uuid: uid(n), timestamp: ts(n),
+  parentUuid: uid(n - 1), isSidechain: false,
+  attachment: { type: 'queued_command', prompt, commandMode: 'prompt', origin, humanTurn: origin.kind === 'human' || undefined, timestamp: ts(n) },
+  ...extra });
+const qop = (n, operation, content, reason) => ({ type: 'queue-operation', operation, timestamp: ts(n), sessionId: 's',
+  ...(content != null ? { content } : {}), ...(reason ? { reason } : {}) });
+
+test('D55 a mid-turn (queued) human message is a user message at its place; queue-operation rows are not', async () => {
+  const p = file('d55-queued', [
+    user(1, 'start the job'),
+    asst(2, [use('tu1', 'Bash', { command: 'sleep 9' })]),
+    qop(3, 'enqueue', 'also check the logs'),
+    qop(4, 'remove', 'also check the logs', 'absorbed_mid_turn'),
+    queued(5, 'also check the logs'),
+    user(6, [result('tu1', 'ok')]),
+    asst(7, 'checked the logs too'),
+  ]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => [m.kind, m.text]), [
+    ['user', 'start the job'], ['tools', undefined], ['user', 'also check the logs'], ['assistant', 'checked the logs too'],
+  ]);
+  const q = messages[2];
+  assert.strictEqual(q.id, `${uid(5)}:0`);
+  assert.strictEqual(q.ts, Date.parse(ts(5)));
+});
+
+test('D55 queued rows that are not from the human are not shown (peer, task-notification, meta, sidechain)', async () => {
+  const p = file('d55-skip', [
+    user(1, 'hi'),
+    queued(2, '<cross-session-message from="x">peer</cross-session-message>', { kind: 'peer' }, { attachment: { type: 'queued_command', prompt: 'peer text', commandMode: 'prompt', origin: { kind: 'peer' }, isMeta: true } }),
+    queued(3, '<task-notification>done</task-notification>', { kind: 'task-notification' }),
+    { ...queued(4, 'note'), attachment: { type: 'queued_command', prompt: 'meta note', commandMode: 'prompt', origin: { kind: 'human' }, isMeta: true } },
+    { ...queued(5, 'side'), isSidechain: true },
+    { type: 'attachment', uuid: uid(6), timestamp: ts(6), attachment: { type: 'hook_success', content: 'x' } },
+    queued(7, '<system-reminder>x</system-reminder>'),
+    queued(8, '   '),
+  ]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => m.text), ['hi']);
+});
+
+test('D55 a queued message later written again as a user row is shown once', async () => {
+  const p = file('d55-dedupe', [
+    user(1, 'go'),
+    queued(2, 'and then deploy'),
+    user(3, 'and then deploy'),
+    asst(4, 'deploying'),
+    user(5, 'and then deploy'),   // typed again after a reply: a new message, kept
+  ]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => [m.kind, m.text]), [
+    ['user', 'go'], ['user', 'and then deploy'], ['assistant', 'deploying'], ['user', 'and then deploy'],
+  ]);
+});
+
+test('D55 queued prompt with a pasted-image placeholder keeps its text', async () => {
+  const p = file('d55-img', [queued(1, '￼ look at this')]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => m.text), ['look at this']);
+});
+
+test('D55 tailThread streams a queued message as it is written', async () => {
+  const p = file('d55-tail', [user(1, 'before')]);
+  const start = fs.statSync(p).size;
+  const ac = new AbortController();
+  const it = tailThread(p, start, { signal: ac.signal, pollMs: 50 });
+  const got = take(it, 2);
+  await nextTick(100);
+  fs.appendFileSync(p, [qop(2, 'enqueue', 'mid turn note'), qop(3, 'remove', 'mid turn note', 'absorbed_mid_turn'), queued(4, 'mid turn note'), asst(5, 'noted')].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const msgs = await got;
+  ac.abort();
+  assert.deepStrictEqual(msgs.map((m) => [m.kind, m.text]), [['user', 'mid turn note'], ['assistant', 'noted']]);
+});
+
+test('D55 a cursor can point at a queued message', async () => {
+  const rows = [];
+  for (let i = 1; i <= 6; i++) rows.push(i % 2 ? queued(i, `q${i}`) : asst(i, `a${i}`));
+  const p = file('d55-cursor', rows);
+  const first = await readThread(p, { limit: 2 });
+  assert.deepStrictEqual(first.messages.map((m) => m.text), ['q5', 'a6']);
+  const older = await readThread(p, { limit: 10, before: first.cursor });
+  assert.deepStrictEqual(older.messages.map((m) => m.text), ['q1', 'a2', 'q3', 'a4']);
+});

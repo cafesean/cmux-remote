@@ -15,6 +15,11 @@
 //     `Base directory for this skill` is not shown; tool_result rows only complete a tool.
 //   - tool_use and tool_result pair by id into one Tool; consecutive tools are one `tools` message whose
 //     id is the first tool's id, so a running tool that finishes is sent again under the same id.
+//   - D55: a message typed while a turn runs is not a user row: Claude Code writes it as an `attachment`
+//     record ({attachment: {type: 'queued_command', prompt, origin: {kind: 'human'}}}) plus queue-operation
+//     rows. The attachment is a `user` message at its place; queue-operation rows are never read, and a
+//     queued_command from a peer session, a task notification or marked isMeta is not shown. A user row
+//     that repeats the queued text right after it (nothing in between) is the same message, shown once.
 //   - AskUserQuestion is a `question`, TodoWrite a `todo`, a base64 image an `attachment`.
 //   - ids are `<record uuid>:<content index>`, so reading the file again gives the same ids.
 //
@@ -78,6 +83,10 @@ function resultText(content) {
   return String(content == null ? '' : content);
 }
 
+// D55: only the human's own queued prompts; peer messages and task notifications are queued the same way.
+const isQueuedHuman = (a) => !!a && a.type === 'queued_command' && typeof a.prompt === 'string' && !a.isMeta &&
+  (a.commandMode == null || a.commandMode === 'prompt') && !!a.origin && a.origin.kind === 'human';
+
 const isSkippedText = (t) => !t.trim() || t.startsWith('<') || t.startsWith('Base directory for this skill');
 
 // Image blocks that count as attachments, in order. One rule for the reader, the tail and the scans.
@@ -106,9 +115,11 @@ class Normaliser {
     this.rel = 0;
     this.title = '';
     this.lastTs = 0;
+    this.queuedText = null;  // D55: the queued message just shown, until anything else is shown
   }
 
   add(msg, off, changed) {
+    this.queuedText = null;
     this.out.push(msg);
     this.offs.set(msg.id, off);
     this.group = null;
@@ -126,7 +137,9 @@ class Normaliser {
       if (typeof rec.customTitle === 'string') this.title = rec.customTitle;
       return changed;
     }
-    if ((rec.isSidechain && !this.sidechain) || (rec.type !== 'user' && rec.type !== 'assistant')) return changed;
+    if (rec.isSidechain && !this.sidechain) return changed;
+    if (rec.type === 'attachment') { this.queued(off, rec, changed); return changed; }
+    if (rec.type !== 'user' && rec.type !== 'assistant') return changed;
     const parsed = Date.parse(rec.timestamp);
     const ts = Number.isNaN(parsed) ? this.lastTs : parsed;
     this.lastTs = ts;
@@ -143,7 +156,9 @@ class Normaliser {
         if (b.type === 'text' && typeof b.text === 'string') this.assistantText(id, ts, b.text, off, changed, rec);
         else if (b.type === 'tool_use') this.toolUse(id, ts, b, off, changed);
       } else if (b.type === 'text' && typeof b.text === 'string') {
-        if (!b.text.startsWith('<')) this.text('user', id, ts, b.text, off, changed);
+        if (b.text.startsWith('<')) return;
+        if (this.queuedText != null && b.text.trim() === this.queuedText) { this.queuedText = null; return; }
+        this.text('user', id, ts, b.text, off, changed);
       } else if (b.type === 'image') {
         if (imagesIn({ type: 'user', message: { content: [b] } }).length) {
           const mime = b.source.media_type || 'image/png';
@@ -156,6 +171,19 @@ class Normaliser {
       }
     });
     return changed;
+  }
+
+  // D55: a human message queued while a turn ran (Claude Code's queued_command attachment).
+  queued(off, rec, changed) {
+    const a = rec.attachment;
+    if (!isQueuedHuman(a)) return;
+    const parsed = Date.parse(rec.timestamp || a.timestamp);
+    const ts = Number.isNaN(parsed) ? this.lastTs : parsed;
+    this.lastTs = ts;
+    const raw = a.prompt.replace(/\uFFFC/g, '');
+    if (isSkippedText(raw)) return;
+    this.text('user', `${rec.uuid || `@${off}`}:0`, ts, raw, off, changed);
+    this.queuedText = raw.trim();
   }
 
   assistantText(id, ts, raw, off, changed, rec) {
@@ -191,6 +219,7 @@ class Normaliser {
       return;
     }
     if (!this.group) {
+      this.queuedText = null;
       this.group = { id, ts, kind: 'tools', items: [] };
       this.out.push(this.group);
       this.offs.set(id, off);
@@ -242,7 +271,8 @@ function parseLines(buf, base) {
     if (e > s) {
       try {
         const rec = JSON.parse(buf.toString('utf8', s, e));
-        if (rec && (rec.type === 'user' || rec.type === 'assistant' || rec.type === 'custom-title')) entries.push({ off: base + s, rec });
+        if (rec && (rec.type === 'user' || rec.type === 'assistant' || rec.type === 'custom-title' ||
+          (rec.type === 'attachment' && isQueuedHuman(rec.attachment)))) entries.push({ off: base + s, rec });
       } catch { /* half-written or foreign line */ }
     }
     s = e + 1;
