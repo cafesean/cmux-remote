@@ -11,7 +11,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const qr = require('../lib/qr');
 
-const BASE_120 = 'cmuxremote://pair?u=' + encodeURIComponent('https://cmux-max.cafesean.com') + '&c=K7M2QX9P&n=';
+const BASE_120 = 'cmuxremote://pair?u=' + encodeURIComponent('https://mux.example.test') + '&c=K7M2QX9P&n=';
 const URL_120 = BASE_120 + '-'.repeat(120 - BASE_120.length);
 
 test('Reed-Solomon matches the published HELLO WORLD 1-M vector', () => {

@@ -134,6 +134,21 @@ test('docs: README has the headless tmux section with its settings and the featu
   assert.ok(!('dependencies' in pkg) && !('devDependencies' in pkg), 'zero dependencies');
 });
 
+test('public repo: no private hostnames in server.js, bin/, lib/, the README or the p41 tests', () => {
+  // Real tunnel hostnames live in the operator's env (PUBLIC_URL), never in the code; fixtures use *.example.test.
+  const PRIVATE_HOST = /[\w-]+\.cafesean\.com\b/i;
+  const js = (d) => fs.readdirSync(path.join(REPO, d)).filter((f) => f.endsWith('.js')).map((f) => `${d}/${f}`);
+  const files = ['server.js', 'README.md', ...js('bin'), ...js('lib'),
+    ...fs.readdirSync(path.join(REPO, 'test')).filter((f) => /^p41-.*\.test\.js$/.test(f)).map((f) => `test/${f}`)];
+  assert.ok(files.includes('server.js') && files.includes('bin/cmux-remote-pair.js') && files.includes('test/p41-pairing.test.js'));
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(REPO, f), 'utf8');
+    const m = PRIVATE_HOST.exec(src);
+    assert.equal(m, null, `${f}: ${m && JSON.stringify(src.slice(Math.max(0, m.index - 40), m.index + 40))}`);
+  }
+  assert.ok(PRIVATE_HOST.test('https://mux-a.cafesean.com/x'), 'the pattern itself still bites');
+});
+
 test('public repo: no deployment identifiers in the docs, lib/, the fixture script or any p18 test file', () => {
   // `cf-ray` is Cloudflare's public request-id header (lib/pairing.js FORWARD_HEADERS), not a name.
   const IDENT = /jetdevs|172\.16\.|(?<!cf-)\bray\b|\bstanley\b|cmux-claude|co\.jetdevs/i;

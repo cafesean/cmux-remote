@@ -9,7 +9,7 @@
 //   SERVER_SOCKET  absolute path of a UNIX socket to listen on INSTEAD of a TCP port (p19, shared Macs):
 //                  its directory must be 0700 and ours; PORT/HOST/SERVER_HOST are then ignored
 //   SERVER_TOKEN   token the browser must present on /api/* (empty = open; trusted LAN only)
-//   PUBLIC_URL     the address the native app should pair with (e.g. https://cmux-max.cafesean.com); unset = the request Host
+//   PUBLIC_URL     the address the native app should pair with (e.g. https://mux.example.test); unset = the request Host
 //   DEVICES_FILE   paired-device store, default ~/.config/cmux-remote/devices.json (hashed keys only, 0600)
 //   PAIR_LOCAL     'off' disables D40 local pairing (no Allow dialog; /api/pair/local answers 403 unavailable).
 //                  Default on for macOS. Unsupported in SERVER_SOCKET mode (a unix peer is never local-only).
