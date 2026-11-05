@@ -2054,6 +2054,26 @@ function cmuxBrowserShot(res, surface) {
   }, () => send(res, 502, { error: 'cmux_failed' }));
 }
 
+// p41 D88: POST /cmux/browser/scroll {shot:true} answers with a fresh frame so a polling client sees
+// the scroll land without waiting out its poll. Scroll frames have their own, shorter per-surface
+// floor (BROWSER_SCROLL_SHOT_MIN_MS, same as the SSE burst tick): a frame inside it WAITS out the rest
+// (never skipped — the last scroll of a burst must paint) and every scroll frame re-arms the poll
+// floor, so scroll + poll together never shoot faster than the floor allows.
+const BROWSER_SCROLL_SHOT_MIN_MS = Math.max(0, Number(process.env.BROWSER_SCROLL_SHOT_MIN_MS) || 350);
+const browserScrollShotLimiter = require('./lib/shot-limiter').createShotLimiter({ minMs: BROWSER_SCROLL_SHOT_MIN_MS });
+const BROWSER_TYPE_MAX_CHARS = 4096;   // one field's value per /cmux/browser/type (was the silent slice)
+const cmuxSocket = require('./lib/cmux-socket').createCmuxSocket({ auth: secretsIn.cmuxSocketAuth });
+function scrollFrame(surface) {   // -> Promise<{mime,image}|{}> (never rejects)
+  const wait = browserScrollShotLimiter.reserve(surface);
+  return new Promise((r) => setTimeout(r, wait)).then(() => {
+    browserShotLimiter.mark(surface);
+    return browserShot(surface);
+  }).then((shot) => {
+    if (!shot || !shot.buf || !shot.buf.length || shot.buf.length > BROWSER_SHOT_MAX_BYTES) return {};
+    return { mime: shot.buf[0] === 0xff && shot.buf[1] === 0xd8 ? 'image/jpeg' : 'image/png', image: shot.buf.toString('base64') };
+  }, () => ({}));
+}
+
 // GET /cmux/browser/stream?surface=[&vw=&vh=] -> SSE of base64 JPEG frames, emitted only on change.
 // vw/vh = the viewer's CSS size: the page is laid out at exactly that size (see Phone viewport above).
 // ADAPTIVE cadence — a screenshot of a big Retina pane costs the cmux app real CPU every tick, and an
@@ -2153,7 +2173,7 @@ function cmuxBrowserTap(req, res) {
     // are real. So a tap on an ANCHOR never dispatches the click at all — the eval only reports the
     // href (nav) and the handler drives a `goto`. Everything else gets the full synthetic click:
     // DOM interaction (buttons, inputs, SPA handlers) works fine.
-    const js = `(function(fx,fy){var x=Math.round(fx*innerWidth),y=Math.round(fy*innerHeight);var el=document.elementFromPoint(x,y);if(!el)return JSON.stringify({hit:null,x:x,y:y});try{if(el.focus)el.focus();}catch(e){}if(el.tagName==='IFRAME'){var xo=false;try{xo=!el.contentDocument;}catch(e){xo=true;}if(xo){var fl=null;for(var n=el;n&&n!==document.body&&n!==document.documentElement;n=n.parentElement){var ps=getComputedStyle(n).position;if(ps==='fixed'||ps==='sticky'){fl=n;}}if(fl){fl.setAttribute('data-cmr-hidden','1');fl.style.setProperty('display','none','important');return JSON.stringify({hit:'IFRAME',xframe:true,closed:true,x:x,y:y,loc:location.href});}try{el.focus();}catch(e){}return JSON.stringify({hit:'IFRAME',xframe:true,closed:false,x:x,y:y,loc:location.href});}}var a=el.closest?el.closest('a[href]'):null;var href=(a&&a.href&&/^https?:/i.test(a.href)&&a.href!==location.href)?a.href:null;var ed=(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable===true);if(!href){['mousedown','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0}));});}var val=ed?String(el.value!==undefined?el.value:(el.textContent||'')).slice(0,2000):null;return JSON.stringify({hit:el.tagName,editable:ed,value:val,x:x,y:y,nav:href,loc:location.href});})(${fx},${fy})`;
+    const js = `(function(fx,fy){var x=Math.round(fx*innerWidth),y=Math.round(fy*innerHeight);var el=document.elementFromPoint(x,y);if(!el)return JSON.stringify({hit:null,x:x,y:y});try{if(el.focus)el.focus();}catch(e){}if(el.tagName==='IFRAME'){var xo=false;try{xo=!el.contentDocument;}catch(e){xo=true;}if(xo){var fl=null;for(var n=el;n&&n!==document.body&&n!==document.documentElement;n=n.parentElement){var ps=getComputedStyle(n).position;if(ps==='fixed'||ps==='sticky'){fl=n;}}if(fl){fl.setAttribute('data-cmr-hidden','1');fl.style.setProperty('display','none','important');return JSON.stringify({hit:'IFRAME',xframe:true,closed:true,x:x,y:y,loc:location.href});}try{el.focus();}catch(e){}return JSON.stringify({hit:'IFRAME',xframe:true,closed:false,x:x,y:y,loc:location.href});}}var a=el.closest?el.closest('a[href]'):null;var href=(a&&a.href&&/^https?:/i.test(a.href)&&a.href!==location.href)?a.href:null;var ed=(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable===true);if(!href){['mousedown','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0}));});}var sec=el.tagName==='INPUT'&&String(el.type).toLowerCase()==='password';var val=ed&&!sec?String(el.value!==undefined?el.value:(el.textContent||'')).slice(0,2000):(sec?'':null);return JSON.stringify({hit:el.tagName,editable:ed,secure:sec,value:val,x:x,y:y,nav:href,loc:location.href});})(${fx},${fy})`;
     (async () => {
       const out = await browserEval(surface, js);
       let r = {}; try { r = JSON.parse(out) || {}; } catch (_) { r = { raw: String(out || '').slice(0, 300) }; }
@@ -2163,7 +2183,7 @@ function cmuxBrowserTap(req, res) {
         cmux(['browser', surface, 'goto', r.nav], () => {}, 20000);
         return send(res, 200, { ok: true, ...r, hit: r.hit || null, editable: false, url: r.nav });
       }
-      send(res, 200, { ok: true, ...r, hit: r.hit || null, editable: !!r.editable });
+      send(res, 200, { ok: true, ...r, hit: r.hit || null, editable: !!r.editable, secure: !!r.secure });
     })();
   });
 }
@@ -2194,9 +2214,18 @@ function cmuxBrowserType(req, res) {
     if (!b) return send(res, 400, { error: 'bad_json' });
     const surface = String(b.surface || '');
     if (!SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
-    const text = typeof b.text === 'string' ? b.text.slice(0, 4096) : '';
+    if (typeof b.text === 'string' && b.text.length > BROWSER_TYPE_MAX_CHARS) return send(res, 413, { error: 'too_long', limit: BROWSER_TYPE_MAX_CHARS });
+    const text = typeof b.text === 'string' ? b.text : '';
     const js = `(function(t){var el=document.activeElement;if(!el)return'noactive';if(el.tagName==='INPUT'||el.tagName==='TEXTAREA'){var proto=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;var setter=Object.getOwnPropertyDescriptor(proto,'value').set;setter.call(el,t);try{el.selectionStart=el.selectionEnd=t.length;}catch(_){}el.dispatchEvent(new Event('input',{bubbles:true}));return'ok';}if(el.isContentEditable){el.textContent=t;el.dispatchEvent(new Event('input',{bubbles:true}));return'ok';}return'notinput';})(${JSON.stringify(text)})`;
-    (async () => { const out = await browserEval(surface, js); noteAction(surface); send(res, 200, { ok: true, result: (out || '').trim() }); })();
+    // p41 D88: the script carries the typed text (passwords) — so it goes over the cmux socket, never
+    // `cmux browser eval --script` argv (ps-visible). No socket (tmux backend / no path) -> 502, no
+    // argv fallback. Neither the text nor the script is ever logged or echoed in an error.
+    if (tmuxCli) return send(res, 501, { error: 'unsupported' });
+    cmuxSocket.call('browser.eval', { surface_id: surface, script: js }, { timeoutMs: 10000 }).then((r) => {
+      noteAction(surface);
+      const v = r && r.result && typeof r.result === 'object' ? (r.result.value ?? r.result.result) : r && r.result;
+      send(res, 200, { ok: true, result: typeof v === 'string' ? v.replace(/^"|"$/g, '').slice(0, 40) : 'ok' });
+    }, () => send(res, 502, { error: 'cmux_failed' }));
   });
 }
 
@@ -2229,7 +2258,10 @@ function cmuxBrowserScroll(req, res) {
     const js = `(function(fx,fy,dx,dy){var el=document.elementFromPoint(Math.round(fx*innerWidth),Math.round(fy*innerHeight));function can(e){var cs=getComputedStyle(e);var oy=cs.overflowY,ox=cs.overflowX;var vy=dy&&(oy==='auto'||oy==='scroll'||oy==='overlay')&&e.scrollHeight>e.clientHeight+1&&(dy>0?e.scrollTop+e.clientHeight<e.scrollHeight-1:e.scrollTop>0);var vx=dx&&(ox==='auto'||ox==='scroll'||ox==='overlay')&&e.scrollWidth>e.clientWidth+1;return vy||vx;}for(var e=el;e&&e!==document.body&&e!==document.documentElement;e=e.parentElement){if(can(e)){var t0=e.scrollTop;e.scrollBy({left:dx,top:dy,behavior:'instant'});return 'el:'+(e.scrollTop-t0);}}var d=document.scrollingElement||document.documentElement;var y0=d.scrollTop;window.scrollBy({left:dx,top:dy,behavior:'instant'});return 'doc:'+(d.scrollTop-y0);})(${fx},${fy},${dx},${dy})`;
     browserEval(surface, js).then((out) => {
       if (out == null) return send(res, 502, { error: 'cmux_failed' });
-      noteAction(surface); send(res, 200, { ok: true, moved: String(out).replace(/"/g, '') });
+      noteAction(surface);
+      const moved = String(out).replace(/"/g, '');
+      if (!b.shot) return send(res, 200, { ok: true, moved });
+      scrollFrame(surface).then((f) => send(res, 200, { ok: true, moved, ...f }));
     });
   });
 }
