@@ -61,3 +61,38 @@ test('unparseable section header fails closed', () => {
   assert.strictEqual(redacted, 1);
   assert.ok(!diff.includes('+secret'));
 });
+
+test('merge conflict (diff --cc) on a credential file is redacted', async () => {
+  const h = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 's2-0b-cc-')));
+  const git = (...a) => { try { return execFileSync('git', ['-C', h, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { return e.stdout || ''; } };
+  git('init', '-q', '-b', 'main');
+  await fsp.writeFile(path.join(h, 'app.credentials.json'), 'base\n');
+  git('add', '-A'); git('commit', '-qm', 'base');
+  git('checkout', '-qb', 'other');
+  await fsp.writeFile(path.join(h, 'app.credentials.json'), `${SECRET}-other\n`);
+  git('commit', '-qam', 'other');
+  git('checkout', '-q', 'main');
+  await fsp.writeFile(path.join(h, 'app.credentials.json'), `${SECRET}-main\n`);
+  git('commit', '-qam', 'main');
+  git('merge', '-q', 'other');
+  const raw = git('diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '--', '.');
+  assert.ok(raw.startsWith('diff --cc'), raw.slice(0, 40));
+  assert.ok(raw.includes(SECRET));
+  const { diff, redacted } = redactDeniedDiff(raw, h, h);
+  assert.ok(!diff.includes(SECRET));
+  assert.strictEqual(redacted, 1);
+});
+
+test('text before any file header (external diff tool output) is dropped', () => {
+  const { diff, redacted } = redactDeniedDiff(`tool output ${SECRET}\nmore\n`, '/r', '/h');
+  assert.ok(!diff.includes(SECRET));
+  assert.strictEqual(redacted, 1);
+});
+
+test('gitpanel ignores diff.external (no tool output reaches the reply)', async () => {
+  const { h, git } = await repo();
+  git('config', 'diff.external', '/bin/echo');
+  const gp = createGitPanel({ workspaceCwds: async () => [{ path: h }], homedir: h });
+  const r = await gp.diff(h, 'notes.md', false);
+  assert.ok(r.diff.includes('+new'), r.diff);
+});

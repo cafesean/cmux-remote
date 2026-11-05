@@ -191,7 +191,8 @@ function createGitPanel(opts = {}) {
     const dir = await assertRepo(repo);
     const p = validatePathspec(rel);
     // fixed a/ b/ prefixes: S2-0b parses the headers, and diff.noprefix/mnemonicPrefix would change them
-    const args = ['diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/'];
+    // --no-ext-diff/--no-textconv: a diff.external tool prints text with no file header (S2-0b review).
+    const args = ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
     if (staged) args.push('--cached');
     args.push('--', p);
     const r = await run(dir, args, { timeoutMs: 15000 });
