@@ -232,17 +232,7 @@ async function relay(res, upstreamPromise) {
   } catch (_) { sendJson(res, 502, { error: 'bridge_unreachable' }); }
 }
 
-function readBody(req, cb, cap = 256 * 1024) {
-  let body = '';
-  req.on('data', (c) => { body += c; if (body.length > cap) req.destroy(); });
-  req.on('end', () => {
-    let b;
-    try { b = JSON.parse(body || '{}'); } catch (_) { return cb(null); }
-    // BUG2: a body naming a machine we cannot find yet may name a bridge machineId — learn it first.
-    const mid = b && typeof b.machine === 'string' ? b.machine : '';
-    (mid ? ensureMachine(mid).catch(() => {}) : Promise.resolve()).then(() => cb(b));
-  });
-}
+const readBody = require('./lib/read-body').createReadBody({ ensureMachine, sendJson });
 
 // ---- download tickets -------------------------------------------------------
 // A file download is a NAVIGATION (an <a download> click), and a navigation cannot carry an
@@ -348,6 +338,7 @@ async function handleApi(req, res, u) {
   // code is the credential), so it is dispatched before the SERVER_TOKEN gate and checks for itself.
   if (p.startsWith('/api/pair/')) return pairing.handle(req, res, u);
   if (!authed(req, u)) return sendJson(res, 401, { error: 'unauthorized' });
+  req.cmuxRes = res;   // lib/read-body.js answers 500 through it if a body handler throws
   // BUG2: GET/query routes carry ?machine=; same bridge-machineId learning as readBody does for bodies.
   if (p.startsWith('/api/cmux/') && !p.startsWith('/api/cmux/fs/download')) {
     const qm = u.searchParams.get('machine');

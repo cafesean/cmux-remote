@@ -195,3 +195,44 @@ test('BUG2: /api/cmux/send|key and query routes accept the bridge machineId (ses
     assert.equal((await call(s2.base, 'GET', '/api/cmux/layout?machine=ghost', { token: TOKEN })).status, 404);
   } finally { await s2.stop(); }
 });
+
+test('BUG2 r1: readBody - a throwing or rejecting handler is a 500, not an unhandled rejection', async () => {
+  const { createReadBody } = require('../lib/read-body');
+  const sendJson = (res, code, o) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
+  const logs = [];
+  const readBody = createReadBody({ ensureMachine: async () => {}, sendJson, log: (m) => logs.push(m) });
+  const unhandled = [];
+  const onUnhandled = (e) => unhandled.push(e);
+  process.on('unhandledRejection', onUnhandled);
+  const srv = http.createServer((req, res) => {
+    req.cmuxRes = res;
+    if (req.url === '/throw') return readBody(req, () => { throw new TypeError('secret body text'); });
+    if (req.url === '/reject') return readBody(req, async () => { throw new Error('boom'); });
+    return readBody(req, (b) => sendJson(res, 200, { got: b }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    assert.equal((await call(base, 'POST', '/throw', { body: { machine: 'x' } })).status, 500);
+    assert.equal((await call(base, 'POST', '/reject', { body: { a: 1 } })).status, 500);
+    const ok = await call(base, 'POST', '/ok', { body: { a: 1 } });   // still serving
+    assert.deepEqual(ok.json, { got: { a: 1 } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(unhandled, []);
+    assert.ok(logs.length === 2 && logs.every((l) => !l.includes('secret') && !l.includes('boom')), 'logs carry no message or body text');
+  } finally { process.off('unhandledRejection', onUnhandled); srv.closeAllConnections(); srv.close(); }
+});
+
+test('BUG2 r1: many unknown machine ids cause at most one list sweep per debounce', async () => {
+  const fa = await fakeBridge('mini', 'sa');
+  const s2 = await bootServer({ env: {
+    SERVER_TOKEN: TOKEN, CMUX_MACHINES: JSON.stringify([{ id: 'a', label: 'A', baseUrl: fa.url, secret: 'sa' }]) } });
+  try {
+    const lists = () => fa.log.filter((x) => x.url === '/cmux/sessions').length;
+    await Promise.all(Array.from({ length: 12 }, (_, i) =>
+      call(s2.base, 'POST', '/api/cmux/send', { token: TOKEN, body: { machine: `ghost${i}`, surface: 's', text: 'x' } })));
+    assert.equal(lists(), 1, '12 concurrent unknown ids -> one sweep');
+    for (let i = 0; i < 5; i++) assert.equal((await call(s2.base, 'GET', `/api/cmux/layout?machine=nope${i}`, { token: TOKEN })).status, 404);
+    assert.equal(lists(), 1, 'within the debounce window, still one sweep');
+  } finally { await s2.stop(); await fa.close(); }
+});
