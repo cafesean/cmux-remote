@@ -19,3 +19,7 @@ _specs/p6-handoff/evidence/
 *.bak
 test-results/
 playwright-report/
+
+# Specs, plans and agent notes live in the private jetdevs/context repo, never here
+_specs/
+.superpowers/
