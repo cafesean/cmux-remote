@@ -148,7 +148,7 @@ function createSessionRoutes(deps) {
     // pane closed) are listed too, under a `tmux` workspace, so they never silently drop off the list.
     if (backend === 'cmux') {
       let orphans = [];
-      try { orphans = await procs.orphanTmuxTabs(new Set(out.map((x) => x.tab.id)), { liveTtys: out.map((x) => x.tab.tty).filter(Boolean), home, procSnapshot: sharedSnapshot }); } catch (_) { orphans = []; }
+      try { orphans = await procs.orphanTmuxTabs(new Set(out.map((x) => x.tab.id)), { home, procSnapshot: sharedSnapshot }); } catch (_) { orphans = []; }
       const tw = { ref: 'tmux', id: 'tmux', title: 'tmux', tabs: orphans };
       for (const t of orphans) out.push({ ws: tw, tab: t });
     }

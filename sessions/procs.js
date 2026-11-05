@@ -33,9 +33,14 @@ const LIMITS = {
   psTimeoutMs: 3000,
   tmuxTimeoutMs: 3000,
   sessionFileMaxBytes: 64 * 1024,
+  clientAncestorDepth: 32,   // ppid hops from a tmux client up to the cmux app
+  procStartCacheMs: 30 * 1000,   // `ps lstart` per pid is cached this long (one spawn per claude pid, not per request)
   pidFileSkewMs: 30 * 1000,  // a pid file may predate its process start by this much (clock/rounding) before it is called stale
   tmuxSubmitSettleMs: 150,   // pause between pasted text and Enter (same paste-burst rule as cmuxSend)
 };
+
+// The cmux app's own process (args of the main executable, not its bundled CLI helpers).
+const CMUX_APP = /\/cmux\.app\/Contents\/MacOS\/cmux(\s|$)/;
 
 const slugOf = (cwd) => String(cwd).replace(/[^A-Za-z0-9]/g, '-');
 
@@ -119,18 +124,20 @@ async function tmuxSocketState(tmux, socket) {
     let s = sessions.get(f[0]);
     if (!s) {
       if (sessions.size >= LIMITS.tmuxSessionsMax) continue;
-      s = { socket, name: f[0], attached: Number(f[5]) || 0, epoch: Number(f[6]) || 0, created: Number(f[8]) || 0, panes: [], surfaceId: null, clientTtys: [] };
+      s = { socket, name: f[0], attached: Number(f[5]) || 0, epoch: Number(f[6]) || 0, created: Number(f[8]) || 0, panes: [], surfaceId: null, clientPids: [] };
       sessions.set(f[0], s);
     }
     s.panes.push({ id: f[1], pid: Number(f[2]), active: f[3] === '1' && f[4] === '1', cwd: f[7] || null });
   }
-  // Client ttys per session (`tmux attach` clients): a session a cmux surface is attached to is shown by it.
+  // Client pids per session (`tmux attach` processes): a session whose client descends from the cmux
+  // app is shown by that cmux surface (cmux reports no tty, so the process tree is the signal).
   try {
-    const cl = await tmux(socket, ['list-clients', '-F', ['#{session_name}', '#{client_tty}'].join(SEP)]);
+    const cl = await tmux(socket, ['list-clients', '-F', ['#{client_pid}', '#{session_name}'].join(SEP)]);
     for (const line of String(cl || '').split('\n')) {
       const f = line.split(SEP);
-      const s = f.length >= 2 && sessions.get(f[0]);
-      if (s && f[1]) s.clientTtys.push(f[1].replace(/^\/dev\//, ''));
+      const s = f.length >= 2 && sessions.get(f.slice(1).join(SEP));
+      const pid = Number(f[0]);
+      if (s && pid > 0) s.clientPids.push(pid);
     }
   } catch (_) { /* no clients / old tmux: attached count still stands */ }
   await Promise.all([...sessions.values()].map(async (s) => {
@@ -153,6 +160,16 @@ function snapshot(deps) {
     psAll().then(parsePs, () => null),
     Promise.all(sockets.map((s) => tmuxSocketState(tmux, s))).then((all) => all.flat().filter(Boolean)),
   ]).then(([table, sessions]) => ({ table, sessions }));
+}
+
+// Walk ppid from pid (bounded) looking for the cmux app process. One ps table, no spawn per client.
+function underCmuxApp(table, pid) {
+  let cur = table && table.byPid.get(pid);
+  for (let i = 0; cur && i < LIMITS.clientAncestorDepth; i++) {
+    if (CMUX_APP.test(cur.args)) return true;
+    cur = table.byPid.get(cur.ppid);
+  }
+  return false;
 }
 
 const activePane = (s) => s.panes.find((p) => p.active) || s.panes[0] || null;
@@ -225,7 +242,16 @@ async function claudeTranscriptOf(pid, deps) {
   return best ? { sessionId: best.sessionId, transcriptPath: best.transcriptPath } : null;
 }
 // `ps -o lstart=` of the live pid -> epoch ms (null when unknown: the check then does not apply).
+const startCache = new Map();
 async function defaultProcStartMs(pid) {
+  const hit = startCache.get(pid);
+  if (hit && Date.now() - hit.at < LIMITS.procStartCacheMs) return hit.ms;
+  if (startCache.size > 256) startCache.clear();
+  const ms = await psStartMs(pid);
+  startCache.set(pid, { at: Date.now(), ms });
+  return ms;
+}
+async function psStartMs(pid) {
   const out = await run('/bin/ps', ['-o', 'lstart=', '-p', String(Number(pid))], LIMITS.psTimeoutMs);
   const t = Date.parse(String(out).trim());
   return Number.isFinite(t) ? t : null;
@@ -253,11 +279,10 @@ async function orphanTmuxTabs(liveIds, deps) {
   const snap = await (deps && deps.procSnapshot ? deps.procSnapshot() : snapshot(deps));
   if (!snap || !snap.table) return [];
   const out = [];
-  const liveTtys = new Set([...((deps && deps.liveTtys) || [])].map((t) => String(t).replace(/^\/dev\//, '')));
   for (const s of snap.sessions || []) {
     if (s.surfaceId && liveIds.has(s.surfaceId) && ownerOf(snap.sessions, s.surfaceId) === s) continue;   // shown by that cmux pane
-    // Attached by a cmux surface (its tty is a client tty of this session): that surface is the row.
-    if (liveTtys.size && (s.clientTtys || []).some((t) => liveTtys.has(t))) continue;
+    // Attached by a cmux surface (a client process descends from the cmux app): that surface is the row.
+    if ((s.clientPids || []).some((pid) => underCmuxApp(snap.table, pid))) continue;
     const p = activePane(s);
     if (!p || !findAgent(snap.table, p.pid)) continue;
     const n = Number(String(p.id).slice(1));

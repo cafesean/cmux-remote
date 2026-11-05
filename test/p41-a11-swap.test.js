@@ -106,13 +106,35 @@ test('dedupe: one tmux session + one cmux surface attached to it + same transcri
   assert.deepEqual(l.sessions[0].aliases, ["mini:" + orphan.id]);
 });
 
-test('orphanTmuxTabs: a tmux session a cmux surface is attached to (client tty) is never an orphan, claude or not', async () => {
-  const table = procs.parsePs([' 10 1 -zsh', ' 11 10 claude --resume', ' 20 1 -zsh', ' 21 20 codex'].join('\n'));
-  const mkSession = (name, pid, tty) => ({ socket: '/s', name, attached: tty ? 1 : 0, epoch: 1, created: 1, surfaceId: null, clientTtys: tty ? [tty] : [],
-    panes: [{ id: name === 'c' ? '%1' : name === 'x' ? '%2' : '%3', pid, active: true, cwd: '/w' }] });
-  const snap = { table, sessions: [mkSession('c', 10, 'ttys007'), mkSession('x', 20, 'ttys008'), mkSession('free', 10, null)] };
-  const tabs = await procs.orphanTmuxTabs(new Set(['surface:1', 'surface:2']), { liveTtys: ['/dev/ttys007', 'ttys008'], procSnapshot: async () => snap });
-  assert.deepEqual(tabs.map((t) => t.title), ['free']);   // 'c' (claude) and 'x' (codex, no join) are shown by their surfaces
+// Real path: ps tree + `tmux list-clients` output fixtures, tab.tty null (cmux reports none).
+const APP = '/Applications/cmux.app/Contents/MacOS/cmux';
+const PSROWS = [' 1 0 /sbin/launchd', ` 795 1 ${APP}`, ' 800 795 /usr/bin/login -fp s', ' 801 800 -zsh', ' 802 801 tmux attach -t c',
+  ' 900 1 -zsh', ' 901 900 tmux attach -t other',
+  ' 10 1 -zsh', ' 11 10 claude --resume', ' 20 1 -zsh', ' 21 20 codex', ' 30 1 -zsh', ' 31 30 claude'].join('\n');
+
+test('orphanTmuxTabs (ps tree + list-clients, no tty): a session attached from the cmux app is never an orphan; other clients still list', async () => {
+  const table = procs.parsePs(PSROWS);
+  const mkS = (name, pid, id, clientPids) => ({ socket: '/s', name, attached: clientPids.length, epoch: 1, created: 1, surfaceId: null, clientPids,
+    panes: [{ id, pid, active: true, cwd: '/w' }] });
+  const snap = { table, sessions: [mkS('c', 10, '%1', [802]), mkS('x', 20, '%2', [802]), mkS('free', 30, '%3', []), mkS('other', 30, '%4', [901])] };
+  const tabs = await procs.orphanTmuxTabs(new Set(['surface:1']), { procSnapshot: async () => snap });
+  assert.deepEqual(tabs.map((t) => t.title).sort(), ['free', 'other']);   // claude 'c' and codex/no-join 'x' are shown by cmux; a client outside cmux does not hide
+});
+
+test('tmuxSocketState parses list-clients into clientPids', async () => {
+  const calls = [];
+  const tmux = async (socket, args) => {
+    calls.push(args[0]);
+    const S = '|^|';
+    if (args[0] === 'list-panes') return ['c', '%1', 10, 1, 1, 1, 1, '/w', 1].join(S) + '\n' + ['free', '%3', 30, 1, 1, 1, 1, '/w', 1].join(S) + '\n';
+    if (args[0] === 'list-clients') return `802${S}c\nbad${S}c\n`;
+    throw new Error('no env');
+  };
+  const snap = await procs.snapshot({ tmuxSockets: ["/s"], tmuxAt: tmux, psAll: async () => PSROWS });
+  const by = Object.fromEntries(snap.sessions.map((x) => [x.name, x.clientPids]));
+  assert.deepEqual(by, { c: [802], free: [] });
+  const tabs = await procs.orphanTmuxTabs(new Set(), { procSnapshot: async () => snap });
+  assert.deepEqual(tabs.map((t) => t.title), ['free']);
 });
 
 test('stale pid file in a swap dir (written before the process began) does not bind; newest valid wins', async () => {
@@ -126,4 +148,22 @@ test('stale pid file in a swap dir (written before the process began) does not b
   assert.equal(await procs.claudeTranscriptOf(9, d), null);   // only the stale one: refused
   files['/h/.claude-swap-backup/sessions/2-a/sessions/9.json'].startedAt = 2_000_500;
   assert.equal((await procs.claudeTranscriptOf(9, d)).sessionId, 'stale');   // valid swap-dir file binds
+});
+
+test('routes list (real snapshot + orphanTmuxTabs, tab.tty null): attached tmux sessions add no orphan rows, a free one does', async () => {
+  const S = '|^|';
+  const tmux = async (socket, args) => {
+    if (args[0] === 'list-panes') return [['c', '%1', 10], ['x', '%2', 20], ['free', '%3', 30]].map(([n, id, pid]) => [n, id, pid, 1, 1, 1, 1, '/w', 1].join(S)).join('\n') + '\n';
+    if (args[0] === 'list-clients') return `802${S}c\n802${S}x\n`;
+    throw new Error('no env');
+  };
+  const snapshot = () => procs.snapshot({ tmuxSockets: ['/s'], tmuxAt: tmux, psAll: async () => PSROWS });
+  const home = mk();
+  const r = createSessionRoutes({ machineId: 'mini', backend: 'cmux', home,
+    loadTree: async () => [{ ref: 'workspace:1', title: 'CHIEF', tabs: [{ id: 'surface:1', ref: 'surface:1', title: 'tmux', type: 'terminal', tty: null }] }],
+    readEvents: async () => ({ events: [], more: false }), procSnapshot: snapshot });
+  const l = await list(r);
+  const titles = l.sessions.map((x) => x.title);
+  assert.ok(!titles.includes('c') && !titles.includes('x'), titles.join(','));   // claude + codex(no join) shown by cmux, not duplicated
+  assert.ok(titles.includes('free'), titles.join(','));
 });
