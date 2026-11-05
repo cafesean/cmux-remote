@@ -57,7 +57,7 @@ catch (e) { console.error(`refusing to start: ${e.code}: ${e.detail}`); process.
 // every response that carries session data carries the machine it came from.
 const MACHINE_ID = process.env.RADAR_MACHINE_ID || os.hostname();
 const CMUX_BIN = process.env.CMUX_BIN || '/Applications/cmux.app/Contents/Resources/bin/cmux';
-const CMUX_ENV = secretsIn.childEnv({ CMUX_QUIET: '1' });   // p62 S2: no secret reaches cmux or its panes
+const CMUX_ENV = secretsIn.cmuxChildEnv({ CMUX_QUIET: '1' });   // p62 S2/D83: no secret but the cmux socket password (cmux CLI only)
 // p18: which program answers the cmux argv this file builds. `cmux` (the default) is the cmux CLI,
 // exactly as before. `tmux` is lib/tmux-cli.js — an in-process emulator that takes the same argv and
 // answers in cmux's shapes from a headless tmux server, so every handler below runs unchanged. A typo
