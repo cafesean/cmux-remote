@@ -18,6 +18,8 @@ const LIMITS = {
   uploadMaxBytes: 20 * 1024 * 1024,   // one inline upload image
   uploadRelMax: 512,                  // longest path (relative to the upload root) a url may name
   uploadImagesPerMessage: 20,         // path tokens turned into images per user message
+  uploadRefsCacheMax: 64,             // M1: sessions whose referenced-upload set is cached (LRU)
+  uploadRefsPerSession: 10000,        // M1: upload rels kept per cached session
 };
 
 // A path token as the app and PWA type it (quotePath): bare when it has no shell-special character,
@@ -69,16 +71,21 @@ async function readUpload(rel, rootArg, opts = {}) {
   if (path.isAbsolute(rel)) return null;
   const target = path.resolve(root, rel);
   if (!inside(path.resolve(root), target)) return null;
-  let realRoot;
-  let real;
-  try { realRoot = await fsp.realpath(root); real = await fsp.realpath(target); } catch (_) { return null; }
-  if (!inside(realRoot, real)) return null;
-  const mime = mimeOf(real);
-  if (!mime || mimeOf(target) !== mime) return null;
+  // L1: open FIRST (no realpath/open window), then prove the fd is the file whose real path is inside
+  // the real root: realpath + lstat of that path must be the fd's dev+ino, and realpath must not move.
+  const io = opts.fsp || fsp;
   let fh;
   try {
-    fh = await fsp.open(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    fh = await io.open(target, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
     const st = await fh.stat();
+    const realRoot = await io.realpath(root);
+    const real = await io.realpath(target);
+    if (!inside(realRoot, real)) return null;
+    const mime = mimeOf(real);
+    if (!mime || mimeOf(target) !== mime) return null;
+    const ls = await io.lstat(real);
+    if (!ls.isFile() || ls.dev !== st.dev || ls.ino !== st.ino) return null;
+    if ((await io.realpath(target)) !== real) return null;
     if (!st.isFile()) return null;
     if (st.size > maxBytes) return { mime, tooLarge: true };
     const data = Buffer.alloc(st.size);

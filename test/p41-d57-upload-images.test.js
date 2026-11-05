@@ -146,3 +146,34 @@ test('tailThread: a new message with an upload path streams the attachment with 
   assert.deepStrictEqual(got.map((m) => m.kind), ['user', 'attachment']);
   assert.strictEqual(got[1].attachment.url, '/api/sessions/s1/upload/2026-11-05%2Fpasted-1.png');
 });
+
+// ---- fix round 1 ---------------------------------------------------------------------------------
+
+test('L1: a dir swapped for a symlink around open() never serves the outside file', async () => {
+  const fsp = require('fs/promises');
+  const sdir = path.join(root, 'swap');
+  const away = path.join(tmp, 'away');
+  fs.mkdirSync(away, { recursive: true });
+  fs.writeFileSync(path.join(away, 'p.png'), Buffer.from('outside-bytes'));
+  fs.mkdirSync(sdir, { recursive: true });
+  fs.writeFileSync(path.join(sdir, 'p.png'), PNG);
+  const toLink = () => { fs.renameSync(sdir, sdir + '.real'); fs.symlinkSync(away, sdir); };
+  const toReal = () => { fs.unlinkSync(sdir); fs.renameSync(sdir + '.real', sdir); };
+  const io = { ...fsp, async open(...a) { toLink(); try { return await fsp.open(...a); } finally { toReal(); } } };
+  const a = await readUpload('swap/p.png', root, { fsp: io });
+  assert.strictEqual(a, null);
+  assert.ok((await readUpload('swap/p.png', root)).data.equals(PNG));
+});
+
+test('M1: uploadRefs lists only rels typed in human messages; resumes from end', async () => {
+  const { uploadRefs } = require('../sessions/transcript-claude.js');
+  const img = path.join(day, 'pasted-1.png');
+  const asst = { type: 'assistant', uuid: uid(9), timestamp: '2026-11-05T10:00:09Z', message: { role: 'assistant', content: [{ type: 'text', text: `see ${path.join(day, 'my shot (1).jpg')}` }] } };
+  const p = transcript([user(1, `look ${img}`), asst]);
+  const r = await uploadRefs(p, { uploadRoot: root });
+  assert.deepStrictEqual([...r.rels], ['2026-11-05/pasted-1.png']);
+  assert.strictEqual(r.end, fs.statSync(p).size);
+  fs.appendFileSync(p, JSON.stringify(user(3, `'${path.join(day, 'my shot (1).jpg')}'`)) + '\n');
+  const r2 = await uploadRefs(p, { uploadRoot: root, from: r.end });
+  assert.deepStrictEqual([...r2.rels], ['2026-11-05/my shot (1).jpg']);
+});

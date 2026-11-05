@@ -23,7 +23,7 @@ const { redactTokens } = require('../lib/redact-tokens');
 const path = require('path');
 
 const { detectKind, foregroundCommand, latestSurfaceEvent } = require('./detect');
-const { readThread, tailThread, readAttachment, BadCursorError } = require('./transcript-claude');
+const { readThread, tailThread, readAttachment, uploadRefs, BadCursorError } = require('./transcript-claude');
 const uploads = require('./uploads');
 const { transcriptFor, watchJoin, isAllowedTranscriptPath, WATCH_POLL_MS } = require('./join');
 const { statusFor, contextUsage } = require('./status');
@@ -380,12 +380,41 @@ function createSessionRoutes(deps) {
     res.end(a.data);
   }
 
+  // M1: transcript path -> {root, dev, ino, size, mtimeMs, end, rels}. LRU, LIMITS.uploadRefsCacheMax
+  // entries. Same file grown: only the appended lines are scanned; replaced/shrunk/touched-in-place or a
+  // new root: rescanned. Takes ownership of o.fh (uploadRefs closes it).
+  const refsCache = new Map();
+  async function referencedUploads(p, o, root) {
+    const st = o.st;
+    let c = refsCache.get(p);
+    if (c) refsCache.delete(p);
+    const same = c && c.root === root && c.dev === st.dev && c.ino === st.ino;
+    if (same && c.size === st.size && c.mtimeMs === st.mtimeMs) { await o.fh.close().catch(() => {}); refsCache.set(p, c); return c.rels; }
+    const from = same && st.size > c.size ? c.end : 0;
+    const r = await uploadRefs(p, { uploadRoot: root, from, fs: shim(o.fh) });
+    const rels = from ? c.rels : new Set();
+    for (const x of r.rels) if (rels.size < LIMITS.uploadRefsPerSession) rels.add(x);
+    c = { root, dev: st.dev, ino: st.ino, size: r.size, mtimeMs: st.mtimeMs, end: r.end, rels };
+    refsCache.set(p, c);
+    while (refsCache.size > LIMITS.uploadRefsCacheMax) refsCache.delete(refsCache.keys().next().value);
+    return rels;
+  }
+
   // D57 GET /cmux/sessions/:id/upload/:rel — an uploaded image the thread shows inline. Only a file whose
   // real path is inside the upload directory, with an image extension, under the size cap.
-  async function upload(res, relRaw) {
+  // M1: and only a rel THIS session's transcript (human messages) references; a rel another session
+  // (a private one included) typed is 404 here.
+  async function upload(res, entry, relRaw) {
     let rel;
     try { rel = decodeURIComponent(relRaw); } catch (_) { return send(res, 400, { error: 'bad_path' }); }
-    const a = await uploads.readUpload(rel, uploadRoot(), { maxBytes: LIMITS.uploadMaxBytes });
+    const root = uploadRoot();
+    const { session, join } = await describe(entry, requestDeps(), null);
+    const o = root && join && session.kind === 'claude' && await safeOpen(join.path);
+    if (!o) return send(res, 404, { error: 'not_found' });
+    let refs = null;
+    try { refs = await referencedUploads(join.path, o, root); } catch (_) { refs = null; }
+    if (!refs || !refs.has(rel)) return send(res, 404, { error: 'not_found' });
+    const a = await uploads.readUpload(rel, root, { maxBytes: LIMITS.uploadMaxBytes });
     if (!a) return send(res, 404, { error: 'not_found' });
     if (a.tooLarge) return send(res, 413, { error: 'too_large' });
     res.writeHead(200, { 'content-type': a.mime, 'content-length': a.data.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -569,7 +598,7 @@ function createSessionRoutes(deps) {
       if (await refusePrivate(res, entry)) return;
       if (m[2] === 'thread') return thread(res, entry, u);
       if (m[2] === 'thread-stream') return stream(req, res, entry);
-      if (m[4] != null) return upload(res, m[4]);
+      if (m[4] != null) return upload(res, entry, m[4]);
       return attachment(res, entry, m[3]);
     })().catch(() => { if (!res.headersSent) send(res, 500, { error: 'sessions_failed' }); });
     return true;

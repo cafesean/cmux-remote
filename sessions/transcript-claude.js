@@ -342,11 +342,12 @@ class BackReader {
 }
 
 // Calls fn(line Buffer, offset) for every whole line in [0, end) of the file, front to back.
-async function eachLine(h, end, fn) {
+// `start` (default 0) shifts the read: offsets passed to fn stay relative to `start`.
+async function eachLine(h, end, fn, start = 0) {
   let carry = Buffer.alloc(0);
   let pos = 0;
   while (pos < end) {
-    const chunk = await readAt(h, pos, Math.min(SCAN_CHUNK, end - pos));
+    const chunk = await readAt(h, start + pos, Math.min(SCAN_CHUNK, end - pos));
     if (!chunk.length) break;
     const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
     const base = pos - carry.length;
@@ -391,6 +392,34 @@ async function readAttachment(p, n, opts = {}) {
       return true;
     });
     return found;
+  } finally {
+    await h.close();
+  }
+}
+
+// D57 M1: the upload rels this transcript's HUMAN messages reference, by the same Normaliser rule the
+// thread uses (user text + queued prompts; never assistant/tool output). Scans [from, size); `end` is
+// the end of the last whole line, so a caller can resume an append-only file from there. Only lines
+// that mention the upload root's path are parsed (a root holding a JSON-escaped character: all lines).
+async function uploadRefs(p, opts = {}) {
+  const { uploadRoot = null, from = 0 } = opts;
+  const rels = new Set();
+  const h = await (opts.fs || REAL_FS).open(p, 'r');
+  try {
+    const { size } = await h.stat();
+    if (!uploadRoot || from > size) return { rels, end: from > size ? 0 : from, size };
+    const mark = /["\\\u0000-\u001f]/.test(uploadRoot) ? null : Buffer.from(uploadRoot);
+    let end = from;
+    await eachLine(h, size - from, (line, off) => {
+      const at = from + off;
+      if (at + line.length < size) end = at + line.length + 1;
+      if (mark && line.indexOf(mark) < 0) return true;
+      for (const { rec } of parseLines(line, at)) {
+        for (const m of new Normaliser({ uploadRoot }).push({ off: at, rec })) if (m.upload) rels.add(m.upload);
+      }
+      return true;
+    }, from);
+    return { rels, end, size };
   } finally {
     await h.close();
   }
@@ -568,4 +597,4 @@ async function* tailThread(p, fromOffset, opts = {}) {
   }
 }
 
-module.exports = { readThread, tailThread, readAttachment, BadCursorError, AGENT_ID_RE };
+module.exports = { readThread, tailThread, readAttachment, uploadRefs, BadCursorError, AGENT_ID_RE };
