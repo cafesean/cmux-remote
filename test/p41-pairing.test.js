@@ -36,7 +36,8 @@ async function mount(opts) {
   const file = path.join(dir, 'devices.json');
   const clock = { t: 1_700_000_000_000 };
   const pairing = createPairing({ file, serverToken: o.serverToken === undefined ? TOKEN : o.serverToken,
-    publicUrl: o.publicUrl, now: () => clock.t, write: o.write, log: o.log || { error() {} } });
+    // D40 W2: with no PUBLIC_URL a loopback Host is refused (409), so most cases run with one.
+    publicUrl: o.publicUrl === undefined ? 'https://mux.example.test' : o.publicUrl, now: () => clock.t, write: o.write, log: o.log || { error() {} } });
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     if (u.pathname.startsWith('/api/pair/')) return pairing.handle(req, res, u);
@@ -47,21 +48,22 @@ async function mount(opts) {
 }
 
 test('start mints an 8-char code from an unambiguous alphabet and a cmuxremote:// link', async () => {
-  const m = await mount({ publicUrl: 'https://cmux-max.cafesean.com/' });
+  const m = await mount({ publicUrl: 'https://mux.example.test/' });
   try {
     const r = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
     assert.strictEqual(r.status, 200);
     assert.match(r.json.code, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/);
     assert.strictEqual(r.json.expiresAt, m.clock.t + TEN_MIN);
-    assert.strictEqual(r.json.qr, `cmuxremote://pair?u=${encodeURIComponent('https://cmux-max.cafesean.com')}&c=${r.json.code}`);
+    assert.strictEqual(r.json.qr, `cmuxremote://pair?u=${encodeURIComponent('https://mux.example.test')}&c=${r.json.code}`);
   } finally { await m.close(); }
 });
 
-test('without PUBLIC_URL the link uses the request Host', async () => {
-  const m = await mount();
+test('without PUBLIC_URL the link uses the request Host (a loopback Host is 409, W2)', async () => {
+  const m = await mount({ publicUrl: '' });
   try {
-    const r = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
-    assert.strictEqual(r.json.qr, `cmuxremote://pair?u=${encodeURIComponent(m.base)}&c=${r.json.code}`);
+    const r = await raw(m.base, 'POST', '/api/pair/start', { authorization: `Bearer ${TOKEN}`, host: 'mac.example.test:8080' });
+    assert.strictEqual(r.json.qr, `cmuxremote://pair?u=${encodeURIComponent('http://mac.example.test:8080')}&c=${r.json.code}`);
+    assert.strictEqual((await call(m.base, 'POST', '/api/pair/start', { token: TOKEN })).status, 409);
   } finally { await m.close(); }
 });
 
@@ -118,13 +120,13 @@ test('devices.json never contains the raw key', async () => {
   const m = await mount();
   try {
     const { json } = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
-    const { json: claimed } = await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: 'Sean iPhone' } });
+    const { json: claimed } = await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: 'Test iPhone' } });
     const raw = fs.readFileSync(m.file, 'utf8');
     assert.ok(!raw.includes(claimed.deviceKey), 'raw key is not on disk');
     const stored = JSON.parse(raw).devices[0];
     assert.strictEqual(stored.keyHash, crypto.createHash('sha256').update(claimed.deviceKey).digest('hex'));
-    assert.deepStrictEqual(Object.keys(stored).sort(), ['createdAt', 'deviceName', 'id', 'keyHash', 'lastSeenAt']);
-    assert.strictEqual(stored.deviceName, 'Sean iPhone');
+    assert.deepStrictEqual(Object.keys(stored).sort(), ['canInvite', 'createdAt', 'deviceName', 'id', 'invitedBy', 'keyHash', 'lastSeenAt', 'local']);
+    assert.strictEqual(stored.deviceName, 'Test iPhone');
     assert.strictEqual(fs.statSync(m.file).mode & 0o777, 0o600);
     assert.strictEqual(fs.readdirSync(m.dir).length, 1, 'the atomic-write temp file is gone');
   } finally { await m.close(); }
@@ -234,13 +236,14 @@ test('start refused from a forwarded (tunnel) request without SERVER_TOKEN', asy
   } finally { await open.close(); await locked.close(); }
 });
 
-test('an existing device key may start pairing for another device', async () => {
+test('a QR-paired device key may not start pairing for another device (D40 W2 invite gate)', async () => {
   const m = await mount();
   try {
     const { json } = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
     const { json: c } = await call(m.base, 'POST', '/api/pair/claim', { body: { code: json.code, deviceName: 'phone' } });
     const r = await call(m.base, 'POST', '/api/pair/start', { token: c.deviceKey, headers: { 'x-forwarded-for': '203.0.113.9' } });
-    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.status, 403);
+    assert.strictEqual(r.json.error, 'not_allowed');
     assert.strictEqual((await call(m.base, 'POST', '/api/pair/start', { token: c.deviceKey + 'x' })).status, 401);
   } finally { await m.close(); }
 });
@@ -263,7 +266,7 @@ test('claim attempts are rate limited: 10 misses a minute, then 429', async () =
 async function boot() {
   const dir = tmp();
   const devices = path.join(dir, 'devices.json');
-  const s = await bootServer({ env: { SERVER_TOKEN: TOKEN, DEVICES_FILE: devices, PUBLIC_URL: 'https://cmux-max.cafesean.com' } });
+  const s = await bootServer({ env: { SERVER_TOKEN: TOKEN, DEVICES_FILE: devices, PUBLIC_URL: 'https://mux.example.test' } });
   return { s, devices };
 }
 async function pairOne(base, name) {
@@ -306,7 +309,7 @@ test('real server: start needs the token even from loopback; claim is open', asy
     assert.strictEqual((await raw(s.base, 'POST', '/api/pair/start', { host: 'evil.example' })).status, 401);
     const ok = await call(s.base, 'POST', '/api/pair/start', { token: TOKEN });
     assert.strictEqual(ok.status, 200);
-    assert.ok(ok.json.qr.startsWith('cmuxremote://pair?u=https%3A%2F%2Fcmux-max.cafesean.com&c='));
+    assert.ok(ok.json.qr.startsWith('cmuxremote://pair?u=https%3A%2F%2Fmux.example.test&c='));
     const claim = await call(s.base, 'POST', '/api/pair/claim', { body: { code: ok.json.code, deviceName: 'phone' }, headers: { 'x-forwarded-for': '203.0.113.9' } });
     assert.strictEqual(claim.status, 200, 'the app claims through the tunnel without any credential');
   } finally { await s.stop(); }
@@ -396,7 +399,7 @@ test('CLI sends SERVER_TOKEN', async () => {
     const full = await run([], { SERVER_TOKEN: TOKEN });
     assert.strictEqual(full.code, 0, full.stderr);
     const link = full.stdout.split('\n').find((l) => l.startsWith('cmuxremote://pair?'));
-    assert.ok(link && link.includes('u=https%3A%2F%2Fcmux-max.cafesean.com&c='), 'the raw link sits on its own line');
+    assert.ok(link && link.includes('u=https%3A%2F%2Fmux.example.test&c='), 'the raw link sits on its own line');
     assert.ok(/[█▀▄]/.test(full.stdout), 'a QR is drawn');
     assert.ok(!full.stdout.includes(TOKEN) && !full.stderr.includes(TOKEN), 'the token is never printed');
     const only = await run(['--link'], { SERVER_TOKEN: TOKEN });
