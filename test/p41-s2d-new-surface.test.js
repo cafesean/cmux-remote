@@ -147,6 +147,48 @@ test('tmux backend: an account session is 501 unsupported_backend, never a bare 
   } finally { await b.stop(); await srv.stop(); }
 });
 
+// releases live under "~/Library/Application Support/…": the launcher path is shell-quoted (shq)
+async function bridgeWithBin(binDir) {
+  return bootBridge({ cwd: dir, env: {
+    BRIDGE_SECRET: SECRET, CMUX_BIN: path.join(dir, 'fake-cmux'), FAKE_DIR: dir,
+    HYPERMUX_SECURITY_BIN: path.join(sec, 'security'), FAKE_SEC_DIR: sec, USER: 'tester',
+    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private-b.json'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'),
+    NODE_ENV: 'test', COMPLETIONS_ENABLED: '0', HYPERMUX_BIN_DIR: binDir,
+  } });
+}
+async function nsOn(base, body) {
+  fs.writeFileSync(path.join(dir, 'cmux.log'), '');
+  const r = await fetch(base + '/cmux/new-surface', { method: 'POST', headers: { 'x-bridge-secret': SECRET, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const json = await r.json().catch(() => null);
+  const calls = fs.readFileSync(path.join(dir, 'cmux.log'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+  return { status: r.status, json, ns: calls.filter((a) => a[0] === 'new-surface') };
+}
+
+test('bin dir with a space: the launcher path is quoted as one word', async () => {
+  const bin = path.join(dir, 'Application Support', 'cmux-remote', 'releases', 'abc', 'bin');
+  const b = await bridgeWithBin(bin);
+  try {
+    const d = await nsOn(b.base, { workspace: WS, account: 'default' });
+    assert.equal(d.status, 200, JSON.stringify(d.json));
+    assert.deepEqual(d.ns, [TERMINAL_ARGV.concat(['--command', `'${bin}/hypermux-claude' a`])]);
+    const n = await nsOn(b.base, { workspace: WS, account: 'acme' });
+    assert.equal(n.status, 200, JSON.stringify(n.json));
+    assert.deepEqual(n.ns, [TERMINAL_ARGV.concat(['--command', `'${bin}/hypermux-claude' acme`])]);
+  } finally { await b.stop(); }
+});
+
+test('bin dir with a quote: account sessions 503 accounts_disabled, plain terminal unaffected', async () => {
+  const b = await bridgeWithBin(path.join(dir, "it's", 'bin'));
+  try {
+    const a = await nsOn(b.base, { workspace: WS, account: 'acme' });
+    assert.equal(a.status, 503); assert.deepEqual(a.json, { error: 'accounts_disabled' });
+    assert.deepEqual(a.ns, []);
+    const t = await nsOn(b.base, { workspace: WS });
+    assert.equal(t.status, 200);
+    assert.deepEqual(t.ns, [TERMINAL_ARGV]);
+  } finally { await b.stop(); }
+});
+
 // ---------------------------------------------------------------- server relay
 test('server relays `account` (string <= 16 chars), omits anything else', async () => {
   const seen = [];

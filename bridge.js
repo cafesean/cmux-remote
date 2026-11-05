@@ -1349,7 +1349,7 @@ function cmuxNewSurface(req, res) {
           if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
           if (!(await accountsLib.exists(account))) return send(res, 400, { error: 'bad_account' });
         }
-        args.push('--command', `'${ACCOUNT_BIN_DIR}/hypermux-claude' ${account === 'default' ? 'a' : account}`);
+        args.push('--command', `${shq(ACCOUNT_BIN_DIR + '/hypermux-claude')} ${account === 'default' ? 'a' : account}`);
       }
       const pre = await loadTree();
       if (pre) for (const w of pre) for (const t of w.tabs) before.add(t.id);
