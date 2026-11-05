@@ -73,7 +73,7 @@ function finish() {
 function startCount() {
   try {
     return fs.readFileSync(process.env.FAKE_CMUX_LOG, 'utf8').split('\n').filter(Boolean)
-      .filter(function (l) { try { return JSON.parse(l).phase === 'start'; } catch (_) { return false; } }).length;
+      .filter(function (l) { try { const e = JSON.parse(l); return e.phase === 'start' && e.op !== 'tree'; } catch (_) { return false; } }).length;   // S2p: gate's tree probe is not a surface command
   } catch (_) { return 0; }
 }
 if (step.mode === 'hang') setInterval(function () {}, 60000);   // never exits: execFile's timeout kills it
@@ -130,7 +130,8 @@ function log() {
   try { raw = fs.readFileSync(logPath, 'utf8'); } catch (_) { return []; }
   // The bridge's boot-time `cmux --version` probe (lib/cmux-version.js) is not a surface command and
   // lands in the log at a time of its own choosing — it is no part of any send's sequence.
-  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.op !== '--version');
+  // p41 S2p: nor is the private-surface gate's read-only `tree` probe, which runs before the route.
+  return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.op !== '--version' && e.op !== 'tree');
 }
 const started = () => log().filter((e) => e.phase === 'start').map((e) => e.op);
 const sendCommands = () => started().filter((o) => o === 'send-text' || o === 'send-key');

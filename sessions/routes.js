@@ -65,6 +65,9 @@ function createSessionRoutes(deps) {
   const backend = deps.backend;
   const home = deps.home || os.homedir();
   const loadTree = deps.loadTree;
+  // p41 S2p: (refs) -> Promise<(ref) -> bool>. A private surface is never listed and its thread/
+  // stream/attachment/subagents answer 423 `private`.
+  const privateCheck = deps.privateCheck || (async () => () => false);
   const unreadBySurface = deps.unreadBySurface || (async () => null);
   const sseHead = deps.sseHead;
   const joinPollMs = deps.joinPollMs || WATCH_POLL_MS;
@@ -171,6 +174,13 @@ function createSessionRoutes(deps) {
     if (!tabs) return null;
     return tabs.find((x) => x.tab.id === sf);
   }
+  // S2p: true when the 423 was sent.
+  async function refusePrivate(res, entry) {
+    const isPriv = await privateCheck([entry.tab.id]);
+    if (!isPriv(entry.tab.id)) return false;
+    send(res, 423, { error: 'private' });
+    return true;
+  }
 
   async function sessionEvents(d, sessionId) {
     if (!sessionId) return [];
@@ -267,8 +277,10 @@ function createSessionRoutes(deps) {
 
   async function list(res) {
     const d = requestDeps();
-    const tabs = await treeTabs(d.procSnapshot);
-    if (!tabs) return send(res, 502, { error: 'cmux_failed' });
+    const all = await treeTabs(d.procSnapshot);
+    if (!all) return send(res, 502, { error: 'cmux_failed' });
+    const isPriv = await privateCheck(all.map((e) => e.tab.id));
+    const tabs = all.filter((e) => !isPriv(e.tab.id));
     let by = null;
     try { by = await unreadBySurface(); } catch (_) { by = null; }
     const results = [];
@@ -496,6 +508,7 @@ function createSessionRoutes(deps) {
         const entry = await findTab(id);
         if (entry === null) return send(res, 502, { error: 'cmux_failed' });
         if (!entry) return send(res, 404, { error: 'not_found' });
+        if (await refusePrivate(res, entry)) return;
         if (agentId == null) return subagentList(res, entry);
         if (sm[3] === 'thread') return subagentThread(res, entry, agentId, u);
         return subagentStream(req, res, entry, agentId);
@@ -510,6 +523,7 @@ function createSessionRoutes(deps) {
       const entry = await findTab(id);
       if (entry === null) return send(res, 502, { error: 'cmux_failed' });
       if (!entry) return send(res, 404, { error: 'not_found' });
+      if (await refusePrivate(res, entry)) return;
       if (m[2] === 'thread') return thread(res, entry, u);
       if (m[2] === 'thread-stream') return stream(req, res, entry);
       return attachment(res, entry, m[3]);
