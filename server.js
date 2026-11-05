@@ -217,7 +217,8 @@ async function bridge(m, pathAndQuery, opt = {}) {
 let alerts = null;
 if (!/^(0|false|no|off)$/i.test(String(process.env.PUSH_ENABLED || '').trim())) {
   try {
-    alerts = require('./lib/alerts').createAlerts({ machines: MACHINES, bridge });
+    alerts = require('./lib/alerts').createAlerts({ machines: MACHINES, bridge,
+      isDevice: (id) => pairing.list().some((d) => d.id === id) });   // D96: a revoked device's Expo token is dropped
     alerts.start();
   } catch (e) {
     alerts = null;
@@ -505,6 +506,19 @@ async function handleApi(req, res, u) {
           const results = await alerts.test(b.endpoint ? String(b.endpoint) : '');
           return sendJson(res, 200, { ok: results.length > 0 && results.every((x) => x.ok), results });
         } catch (e) { return sendJson(res, 500, { error: 'push_error', detail: (e && e.message) || String(e) }); }
+      });
+    }
+    // D96: the native app's Expo push token. Device-key auth (the gate above); the token is tied to the
+    // device that registered it, so revoking that device stops its pushes.
+    if (p === '/api/push/register' && (req.method === 'POST' || req.method === 'DELETE')) {
+      return readBody(req, (b) => {
+        if (!b) return sendJson(res, 400, { error: 'bad_json' });
+        if (req.method === 'DELETE') {
+          return sendJson(res, 200, { ok: alerts.unregisterExpo({ installationId: String(b.installationId || ''), token: String(b.token || '') }), devices: alerts.expoCount() });
+        }
+        const dev = pairing.presentedDevice(req, u);
+        return alerts.registerExpo({ token: b.token, installationId: b.installationId, platform: b.platform, deviceId: dev ? dev.id : null })
+          ? sendJson(res, 200, { ok: true, devices: alerts.expoCount() }) : sendJson(res, 400, { error: 'bad_registration' });
       });
     }
     return sendJson(res, 404, { error: 'not_found' });
