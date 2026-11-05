@@ -126,8 +126,11 @@ a running tool call becomes a finished one).
 
 - `id`: string. Stable and unique within the thread.
 - `ts`: number. When the message happened.
-- `kind`: one of `user`, `assistant`, `tools`, `callout`, `question`, `todo`, `attachment`.
-- `text`: string. Markdown. Set for `user` and `assistant`.
+- `kind`: one of `user`, `assistant`, `tools`, `callout`, `question`, `todo`, `attachment`, `peer`. An app
+  ignores a kind it does not know.
+- `text`: string. Markdown. Set for `user`, `assistant` and `peer`.
+- `from`: string. Set for `peer` (D60): the name of the Claude session that sent the message, or
+  `another session` when it is not known. A `peer` message is agent-to-agent, not typed by the human.
 - `items`: Tool[]. Set for `tools`. A run of consecutive tool calls is one message.
 - `callout`: set for `callout`. `{type, title, body, options}`. `type` is a string such as `needs-you`,
   `done`, `handover`, `decision`, `warning`, `info` or a custom type. `options` is the list of tap
