@@ -27,6 +27,10 @@ const { emptyShadowed } = require('./loadenv');
 // p62 S2: HYPERMUX_SECRETS_ON_STDIN=1 -> read the secrets line first, then run main()
 // (main() runs once loaded, so every const in it sees them). Unset -> no-op, today's behaviour.
 const secretsIn = require('./lib/secrets-stdin');
+// D99: the D52 unhandledRejection + D93 uncaughtException guards go in FIRST, before the secrets wait
+// and before main() builds anything, so no code path (stdin-secrets mode, a throw during startup, a
+// relay that outlives a restart) can run unguarded. Idempotent per process (lib/relay-fail.js).
+require('./lib/relay-fail').installProcessGuards();
 // D62: the body is main(), not a top-level `return` + self re-require: `bun build --compile` drops a
 // top-level return (the body ran before the secrets were read, so auth was open). Same order on node.
 if (secretsIn.pending()) secretsIn.loadSecrets({ require: ['SERVER_TOKEN'] }).then(main);
@@ -1073,21 +1077,5 @@ if (SERVER_SOCKET) {
 // p41 A18: SIGTERM/SIGINT -> every open SSE stream gets `event: restarting`, then a short drain and
 // exit. Radar's timers (if enabled) are stopped first.
 graceful.install(() => { if (radar) radar.stop(); });
-// D52 defense in depth: an unhandled rejection in one relay must not take every session's send down
-// with it (each crash = a launchd restart = cloudflared 502s). Log the cause (no message, no secret).
-process.on('unhandledRejection', (e) => { try { console.error(`unhandled_rejection ${JSON.stringify({ cause: relayFail.classify(e) })}`); } catch (_) {} });
-// D93 last resort: Node 26's undici can THROW `TypeError: terminated` (cause UND_ERR_SOCKET / ERR_HTTP2_*)
-// from inside a socket 'close' / h2 stream 'error' emit when a bridge connection dies mid-response:
-// no relay's try/catch can reach that frame, and the unhandledRejection handler above never sees it.
-// A dead bridge connection is not a broken server, so ONLY that error class is logged and survived.
-// Any other uncaught exception prints its stack and exits 1 exactly like Node's default (launchd
-// restarts it): a genuine bug must not be swallowed.
-process.on('uncaughtException', (e) => {
-  if (relayFail.isTransportError(e)) {
-    try { console.error(`uncaught_transport ${JSON.stringify({ cause: relayFail.classify(e) })}`); } catch (_) {}
-    return;
-  }
-  try { console.error((e && e.stack) || e); } catch (_) {}
-  process.exit(1);
-});
+// D52/D93/D99 process guards: installed at the top of this file, before main() (see installProcessGuards).
 }
