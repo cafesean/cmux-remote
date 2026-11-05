@@ -925,6 +925,25 @@ async function handleApi(req, res, u) {
     const qs = new URLSearchParams({ surface: u.searchParams.get('surface') || '' });
     return relay(res, bridge(m, `/cmux/browser/shot?${qs}`, { timeout: 20000 }));
   }
+  // p41 D97: Mac screen — info + one frame (bridge gates on SCREEN_VIEW, rate-limits, size-caps).
+  if (req.method === 'GET' && (p === '/api/cmux/screen/info' || p === '/api/cmux/screen/shot')) {
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    const d = u.searchParams.get('display');
+    const qs = new URLSearchParams(d ? { display: d } : {});
+    return relay(res, bridge(m, `${p.slice(4)}${d ? '?' + qs : ''}`, { timeout: 20000 }));
+  }
+  // p41 D97: Mac screen input — body relayed (never logged); bridge gates on SCREEN_CONTROL.
+  if (req.method === 'POST' && p.startsWith('/api/cmux/screen/')) {
+    const sub = p.slice('/api/cmux/screen/'.length);
+    if (!['tap', 'scroll', 'type', 'key'].includes(sub)) return sendJson(res, 404, { error: 'not_found' });
+    return readBody(req, (b) => {
+      if (!b) return sendJson(res, 400, { error: 'bad_json' });
+      const m = findMachine(b.machine);
+      if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      relay(res, bridge(m, `/cmux/screen/${sub}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b), timeout: 15000 }));
+    });
+  }
   // GET hits (clickable areas for the desktop hand cursor).
   if (req.method === 'GET' && p === '/api/cmux/browser/hits') {
     const m = findMachine(u.searchParams.get('machine'));

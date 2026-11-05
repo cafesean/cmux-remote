@@ -682,6 +682,17 @@ collector). A failure shows up as a radar-scoped error and a line on stderr, nev
 
 ---
 
+### Mac screen (off by default)
+
+`SCREEN_VIEW=1` lets a paired device see the whole Mac desktop (`/api/cmux/screen/info`, `/api/cmux/screen/shot`);
+`SCREEN_CONTROL=1` lets it click, scroll, type and press allow-listed keys (`/api/cmux/screen/tap|scroll|type|key`).
+Unset, every screen route answers `403 screen_disabled`. macOS charges the grants to the binary the
+LaunchAgent runs (the `node` binary, or the compiled hypermux binary), not to `osascript`:
+Screen Recording (System Settings > Privacy & Security > Screen & System Audio Recording) for view,
+Accessibility (System Settings > Privacy & Security > Accessibility) for control. Restart the server
+after granting. This is full remote control of the Mac — anyone holding a paired device key can drive
+every app, including ones the private-surface gate hides inside cmux. Turn it on only on Macs you mean to drive.
+
 ## Security notes
 
 - **Two secrets, two layers.** `SERVER_TOKEN` guards who can open the UI; `BRIDGE_SECRET` guards which

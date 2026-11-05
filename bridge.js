@@ -2042,6 +2042,8 @@ function cmuxBrowserInfo(res, surface) {
 const BROWSER_SHOT_MIN_MS = Math.max(0, Number(process.env.BROWSER_SHOT_MIN_MS) || 1500);
 const BROWSER_SHOT_MAX_BYTES = Math.max(1, Number(process.env.BROWSER_SHOT_MAX_BYTES) || 1536 * 1024);
 const browserShotLimiter = require('./lib/shot-limiter').createShotLimiter({ minMs: BROWSER_SHOT_MIN_MS });
+// p41 D97: Mac screen — lib/mac-screen.js owns flags, TCC errors, limits; text rides osascript stdin.
+const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => secretsIn.childEnv() });
 function cmuxBrowserShot(res, surface) {
   const gate = browserShotLimiter.take(surface);
   if (!gate.ok) return send(res, 429, { error: 'rate_limited', retryMs: gate.retryMs });
@@ -2635,6 +2637,17 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'POST' && p === '/cmux/browser/scroll') return cmuxBrowserScroll(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/nav') return cmuxBrowserNav(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/zoom') return cmuxBrowserZoom(req, res);
+
+  // ----- p41 D97 Mac screen (whole desktop; off unless SCREEN_VIEW / SCREEN_CONTROL) -----
+  if (req.method === 'GET' && p === '/cmux/screen/info') return macScreen.info().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+  if (req.method === 'GET' && p === '/cmux/screen/shot') return macScreen.shot(u.searchParams.get('display')).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+  if (req.method === 'POST' && /^\/cmux\/screen\/(tap|scroll|type|key)$/.test(p)) {
+    const op = p.slice('/cmux/screen/'.length);
+    return cmuxReadBody(req, (b) => {
+      if (!b) return send(res, 400, { error: 'bad_json' });
+      macScreen.input(op, b).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+    }, 16 * 1024);
+  }
 
   // ----- p41 S2c Claude accounts -----
   if (p === '/cmux/accounts' || p.startsWith('/cmux/accounts/')) return cmuxAccounts(req, res, u, p);
