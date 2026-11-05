@@ -21,6 +21,11 @@
 //     rows. The attachment is a `user` message at its place; queue-operation rows are never read, and a
 //     queued_command from a peer session, a task notification or marked isMeta is not shown. A user row
 //     that repeats the queued text right after it (nothing in between) is the same message, shown once.
+//   - D60: a message another Claude session sent (origin.kind 'peer': a meta user row, or a queued_command
+//     attachment when it lands mid-turn) is a `peer` message {from, text} at its place: `from` is the
+//     sender's from-name ("another session" when unknown), `text` the body without the wrapper tag or
+//     the harness note after it. The same sender + body seen again (queued, then delivered) is shown once.
+//     Task notifications and system reminders are still never shown.
 //   - AskUserQuestion is a `question`, TodoWrite a `todo`, a base64 image an `attachment`.
 //   - ids are `<record uuid>:<content index>`, so reading the file again gives the same ids.
 //
@@ -88,6 +93,33 @@ function resultText(content) {
 const isQueuedHuman = (a) => !!a && a.type === 'queued_command' && typeof a.prompt === 'string' && !a.isMeta &&
   (a.commandMode == null || a.commandMode === 'prompt') && !!a.origin && a.origin.kind === 'human';
 
+// D60: a cross-session (peer) message, from a user row or a queued_command attachment. -> {from, text} | null
+const PEER_TAG_RE = /<cross-session-message\b([^>]*)>([\s\S]*?)<\/cross-session-message>/;
+const PEER_FALLBACK = 'another session';
+function peerOf(rec) {
+  if (!rec || rec.isSidechain) return null;
+  let origin;
+  let raw;
+  if (rec.type === 'attachment') {
+    const a = rec.attachment;
+    if (!a || a.type !== 'queued_command' || !a.origin || a.origin.kind !== 'peer') return null;
+    origin = a.origin;
+    raw = a.prompt;
+  } else if (rec.type === 'user') {
+    if (!rec.origin || rec.origin.kind !== 'peer') return null;
+    origin = rec.origin;
+    const c = rec.message && rec.message.content;
+    raw = typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => (b && b.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('\n') : '';
+  } else return null;
+  const m = typeof raw === 'string' ? PEER_TAG_RE.exec(raw) : null;
+  let text = typeof origin.body === 'string' ? origin.body : m ? m[2] : typeof raw === 'string' && !raw.trim().startsWith('<') ? raw : '';
+  text = text.replace(/\uFFFC/g, '').trim();
+  if (!text) return null;
+  let from = typeof origin.name === 'string' ? origin.name.trim() : '';
+  if (!from && m) { const n = /\bfrom-name="([^"]*)"/.exec(m[1]); if (n) from = n[1].trim(); }
+  return { from: from || PEER_FALLBACK, text };
+}
+
 const isSkippedText = (t) => !t.trim() || t.startsWith('<') || t.startsWith('Base directory for this skill');
 
 // Image blocks that count as attachments, in order. One rule for the reader, the tail and the scans.
@@ -119,6 +151,7 @@ class Normaliser {
     this.title = '';
     this.lastTs = 0;
     this.queuedText = null;  // D55: the queued message just shown, until anything else is shown
+    this.peers = new Set();  // D60: sender + body of every peer message shown
   }
 
   add(msg, off, changed) {
@@ -154,7 +187,10 @@ class Normaliser {
       return changed;
     }
     if (rec.isSidechain && !this.sidechain) return changed;
-    if (rec.type === 'attachment') { this.queued(off, rec, changed); return changed; }
+    if (rec.type === 'attachment' || (rec.type === 'user' && rec.origin && rec.origin.kind === 'peer')) {
+      if (!this.peer(off, rec, changed)) this.queued(off, rec, changed);
+      return changed;
+    }
     if (rec.type !== 'user' && rec.type !== 'assistant') return changed;
     const parsed = Date.parse(rec.timestamp);
     const ts = Number.isNaN(parsed) ? this.lastTs : parsed;
@@ -187,6 +223,20 @@ class Normaliser {
       }
     });
     return changed;
+  }
+
+  // D60: a message from another Claude session. True when the record was a peer record (shown or not).
+  peer(off, rec, changed) {
+    const p = peerOf(rec);
+    if (!p) return rec.type === 'user';
+    const parsed = Date.parse(rec.timestamp || (rec.attachment && rec.attachment.timestamp));
+    const ts = Number.isNaN(parsed) ? this.lastTs : parsed;
+    this.lastTs = ts;
+    const key = `${p.from}\u0000${p.text}`;
+    if (this.peers.has(key)) return true;
+    this.peers.add(key);
+    this.add({ id: `${rec.uuid || `@${off}`}:0`, ts, kind: 'peer', from: p.from, text: p.text }, off, changed);
+    return true;
   }
 
   // D55: a human message queued while a turn ran (Claude Code's queued_command attachment).
@@ -289,7 +339,7 @@ function parseLines(buf, base) {
       try {
         const rec = JSON.parse(buf.toString('utf8', s, e));
         if (rec && (rec.type === 'user' || rec.type === 'assistant' || rec.type === 'custom-title' ||
-          (rec.type === 'attachment' && isQueuedHuman(rec.attachment)))) entries.push({ off: base + s, rec });
+          (rec.type === 'attachment' && (isQueuedHuman(rec.attachment) || peerOf(rec))))) entries.push({ off: base + s, rec });
       } catch { /* half-written or foreign line */ }
     }
     s = e + 1;
@@ -597,4 +647,5 @@ async function* tailThread(p, fromOffset, opts = {}) {
   }
 }
 
-module.exports = { readThread, tailThread, readAttachment, uploadRefs, BadCursorError, AGENT_ID_RE };
+module.exports = {
+  peerOf, readThread, tailThread, readAttachment, uploadRefs, BadCursorError, AGENT_ID_RE };

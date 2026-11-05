@@ -439,7 +439,7 @@ test('D55 a mid-turn (queued) human message is a user message at its place; queu
   assert.strictEqual(q.ts, Date.parse(ts(5)));
 });
 
-test('D55 queued rows that are not from the human are not shown (peer, task-notification, meta, sidechain)', async () => {
+test('D55 queued rows that are not from the human are not user messages (peer is D60 `peer`; task-notification, meta, sidechain hidden)', async () => {
   const p = file('d55-skip', [
     user(1, 'hi'),
     queued(2, '<cross-session-message from="x">peer</cross-session-message>', { kind: 'peer' }, { attachment: { type: 'queued_command', prompt: 'peer text', commandMode: 'prompt', origin: { kind: 'peer' }, isMeta: true } }),
@@ -451,7 +451,7 @@ test('D55 queued rows that are not from the human are not shown (peer, task-noti
     queued(8, '   '),
   ]);
   const { messages } = await readThread(p);
-  assert.deepStrictEqual(messages.map((m) => m.text), ['hi']);
+  assert.deepStrictEqual(messages.map((m) => [m.kind, m.text]), [['user', 'hi'], ['peer', 'peer text']]);
 });
 
 test('D55 a queued message later written again as a user row is shown once', async () => {
@@ -495,4 +495,90 @@ test('D55 a cursor can point at a queued message', async () => {
   assert.deepStrictEqual(first.messages.map((m) => m.text), ['q5', 'a6']);
   const older = await readThread(p, { limit: 10, before: first.cursor });
   assert.deepStrictEqual(older.messages.map((m) => m.text), ['q1', 'a2', 'q3', 'a4']);
+});
+
+// D60: a message from another Claude session. Two shapes from a real transcript (names and text here are
+// synthetic): a meta user row when it arrives between turns, a queued_command attachment mid-turn.
+const peerWrap = (name, body) => `<cross-session-message from="uds:/tmp/socks/1.sock" from-name="${name}" from-mode="bypass">\n${body}\n</cross-session-message>\n\nThis came from another Claude session, not typed by your user.`;
+const peerUser = (n, name, body, origin) => user(n, `Another Claude session sent a message:\n${peerWrap(name, body)}`,
+  { isMeta: true, promptSource: 'system', origin: origin || { kind: 'peer', from: 'uds:/tmp/socks/1.sock', name, msg_id: `m${n}`, body } });
+const peerQueued = (n, name, body, origin) => queued(n, peerWrap(name, body), origin || { kind: 'peer', from: 'uds:/tmp/socks/1.sock', name, msg_id: `q${n}`, body },
+  { attachment: { type: 'queued_command', prompt: peerWrap(name, body), commandMode: 'prompt', isMeta: true, origin: origin || { kind: 'peer', name, body } } });
+
+test('D60 a peer message is a `peer` message {from, text} at its place, wrapper and harness note stripped', async () => {
+  const p = file('d60-peer', [
+    user(1, 'start'),
+    peerUser(2, 'helper-alpha', 'build is green'),
+    asst(3, 'ok'),
+  ]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => [m.kind, m.text]), [['user', 'start'], ['peer', 'build is green'], ['assistant', 'ok']]);
+  assert.deepStrictEqual(messages[1], { id: `${uid(2)}:0`, ts: Date.parse(ts(2)), kind: 'peer', from: 'helper-alpha', text: 'build is green' });
+});
+
+test('D60 a queued (mid-turn) peer message is a `peer` message; without origin.body the tag body is used', async () => {
+  const p = file('d60-queued', [
+    user(1, 'go'),
+    asst(2, [use('tu1', 'Bash', { command: 'sleep 9' })]),
+    peerQueued(3, 'helper-beta', 'line one\nline two', { kind: 'peer' }),
+    user(4, [result('tu1', 'ok')]),
+  ]);
+  const { messages } = await readThread(p);
+  const peer = messages.find((m) => m.kind === 'peer');
+  assert.strictEqual(peer.from, 'helper-beta');
+  assert.strictEqual(peer.text, 'line one\nline two');
+});
+
+test('D60 the same peer body queued and then delivered is shown once; a different sender is kept', async () => {
+  const p = file('d60-dedupe', [
+    user(1, 'go'),
+    peerQueued(2, 'helper-alpha', 'done with step 1'),
+    peerUser(3, 'helper-alpha', 'done with step 1'),
+    peerUser(4, 'helper-gamma', 'done with step 1'),
+  ]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => [m.kind, m.from, m.text]), [
+    ['user', undefined, 'go'], ['peer', 'helper-alpha', 'done with step 1'], ['peer', 'helper-gamma', 'done with step 1'],
+  ]);
+});
+
+test('D60 a peer with no name falls back to "another session"; empty peers, task notifications and reminders stay hidden', async () => {
+  const p = file('d60-fallback', [
+    user(1, 'hi'),
+    user(2, '<cross-session-message from="x">anon note</cross-session-message>', { isMeta: true, origin: { kind: 'peer' } }),
+    user(3, '<cross-session-message from="x"> </cross-session-message>', { isMeta: true, origin: { kind: 'peer' } }),
+    user(4, '<task-notification>done</task-notification>', { isMeta: true, origin: { kind: 'task-notification' } }),
+    queued(5, '<task-notification>done</task-notification>', { kind: 'task-notification' }),
+    user(6, '<system-reminder>x</system-reminder>', { isMeta: true }),
+    { ...peerUser(7, 'helper-side', 'from a sidechain'), isSidechain: true },
+  ]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => [m.kind, m.from, m.text]), [['user', undefined, 'hi'], ['peer', 'another session', 'anon note']]);
+});
+
+test('D60 a human queued message still is a user message (D55 unchanged) next to a peer one', async () => {
+  const p = file('d60-d55', [user(1, 'go'), peerQueued(2, 'helper-alpha', 'fyi'), queued(3, 'and deploy'), user(4, 'and deploy')]);
+  const { messages } = await readThread(p);
+  assert.deepStrictEqual(messages.map((m) => [m.kind, m.text]), [['user', 'go'], ['peer', 'fyi'], ['user', 'and deploy']]);
+});
+
+test('D60 tailThread streams a peer message; a cursor can point at one', async () => {
+  const p = file('d60-tail', [user(1, 'before')]);
+  const start = fs.statSync(p).size;
+  const ac = new AbortController();
+  const it = tailThread(p, start, { signal: ac.signal, pollMs: 50 });
+  const got = take(it, 2);
+  await nextTick(100);
+  fs.appendFileSync(p, [peerQueued(2, 'helper-alpha', 'ping'), asst(3, 'pong')].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const msgs = await got;
+  ac.abort();
+  assert.deepStrictEqual(msgs.map((m) => [m.kind, m.text]), [['peer', 'ping'], ['assistant', 'pong']]);
+
+  const rows = [];
+  for (let i = 1; i <= 6; i++) rows.push(i % 2 ? peerUser(i, 'helper-alpha', `p${i}`) : asst(i, `a${i}`));
+  const q = file('d60-cursor', rows);
+  const first = await readThread(q, { limit: 2 });
+  assert.deepStrictEqual(first.messages.map((m) => m.text), ['p5', 'a6']);
+  const older = await readThread(q, { limit: 10, before: first.cursor });
+  assert.deepStrictEqual(older.messages.map((m) => m.text), ['p1', 'a2', 'p3', 'a4']);
 });
