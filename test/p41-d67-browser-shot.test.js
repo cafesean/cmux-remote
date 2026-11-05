@@ -55,7 +55,7 @@ before(async () => {
     CMUX_BIN: bin, FAKE_CMUX_TREE: path.join(dir, 'tree.json'), FAKE_CMUX_LOG: log, FAKE_BIG_SURFACE: S3,
     HYPERMUX_PRIVATE_FILE: path.join(dir, 'cfg', 'private-surfaces.json'),
     P41_PROCS_FIXTURE: path.join(dir, 'procs.json'), NODE_ENV: 'test', COMPLETIONS_ENABLED: '0',
-    BROWSER_SHOT_MIN_MS: '1000', BROWSER_SHOT_MAX_BYTES: '1024',
+    BROWSER_SHOT_MIN_MS: '3600000', BROWSER_SHOT_MAX_BYTES: '1024',
   } });
 });
 after(async () => { if (bridge) await bridge.stop(); if (dir) await fsp.rm(dir, { recursive: true, force: true }); });
@@ -91,4 +91,18 @@ test('shot: private surface -> 423, never shot; bad surface -> 400', async () =>
   assert.equal(r.status, 423);
   assert.equal(shots(S1), 0);
   assert.equal((await get('/cmux/browser/shot?surface=bad;rm')).status, 400);
+});
+
+test('shot limiter: floor honours an injected clock (no real timing)', () => {
+  const { createShotLimiter } = require('../lib/shot-limiter');
+  let t = 1000;
+  const l = createShotLimiter({ minMs: 1500, now: () => t });
+  assert.equal(l.take('a').ok, true);
+  t += 100;
+  const r = l.take('a');
+  assert.equal(r.ok, false);
+  assert.equal(r.retryMs, 1400);
+  assert.equal(l.take('b').ok, true);
+  t += 1400;
+  assert.equal(l.take('a').ok, true);
 });
