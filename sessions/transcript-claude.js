@@ -131,7 +131,7 @@ function imagesIn(rec) {
 }
 
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
-const { splitUploadImages, uploadUrl } = require('./uploads');
+const { splitUploadImages, uploadUrl, uploadFullUrl } = require('./uploads');
 const attachmentUrl = (sessionId, n) => `/api/sessions/${encodeURIComponent(sessionId)}/attachment/${n}`;
 
 // Records in file order in, messages out. `push` returns the messages that are new or changed by that
@@ -319,7 +319,7 @@ class Normaliser {
 
   // Number and name an attachment once the count of images before this window is known.
   numberAttachment(msg, base, sessionId) {
-    if (msg.upload) { msg.attachment.url = uploadUrl(sessionId, msg.upload); return; }   // D57
+    if (msg.upload) { msg.attachment.url = uploadUrl(sessionId, msg.upload); msg.attachment.fullUrl = uploadFullUrl(sessionId, msg.upload); return; }   // D57; D65 url = thumbnail
     const n = base + this.rels.get(msg.id);
     msg.attachment.url = attachmentUrl(sessionId, n);
     msg.attachment.name = `image-${n + 1}.${EXT[msg.attachment.mime] || 'bin'}`;

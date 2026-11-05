@@ -449,3 +449,32 @@ test('A14: /cmux/choose — stale choiceId and label mismatch are 409 and send n
     assert.deepEqual(sent().map((a) => a[a.length - 1]), ['enter']);
   } finally { await b.stop(); }
 });
+
+test('D65 upload route: default = thumbnail (or small fallback), ?size=full = original, bad size 400; binding + .thumbs refused', async () => {
+  const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');   // not decodable: sips fails -> small fallback
+  const up = fs.realpathSync(tmp());
+  fs.mkdirSync(path.join(up, 'd'));
+  fs.writeFileSync(path.join(up, 'd', 'a.png'), PNG);
+  fs.writeFileSync(path.join(up, 'd', 'other.png'), PNG);
+  const { h } = home([user(1, `look ${path.join(up, 'd', 'a.png')}`), asst(2, 'ok')]);
+  const b = await boot(h, { UPLOAD_DIR: up });
+  const pre = `/cmux/sessions/${idOf(IDS.sfA1)}/upload/`;
+  const get = (rel, q = '') => call(b.socketPath, 'GET', pre + encodeURIComponent(rel) + q, { secret: SECRET });
+  try {
+    const t = await call(b.socketPath, 'GET', `/cmux/sessions/${idOf(IDS.sfA1)}/thread`, { secret: SECRET });
+    const att = t.json.messages.find((m) => m.kind === 'attachment');
+    assert.equal(att.attachment.fullUrl, `/api/sessions/${idOf(IDS.sfA1)}/upload/${encodeURIComponent('d/a.png')}?size=full`);
+    const thumb = await get('d/a.png');
+    assert.equal(thumb.status, 200, thumb.text);
+    assert.equal(thumb.headers['x-cmux-thumb'], 'fallback');
+    assert.ok(thumb.body.equals(PNG));
+    const full = await get('d/a.png', '?size=full');
+    assert.equal(full.status, 200);
+    assert.equal(full.headers['cache-control'], 'no-store');
+    assert.ok(full.body.equals(PNG));
+    assert.equal((await get('d/a.png', '?size=huge')).status, 400);
+    assert.equal((await get('d/other.png')).status, 404, 'unreferenced: no thumbnail either');
+    assert.equal((await get('../x.png')).status, 404);
+    assert.equal((await get('.thumbs/0000000000000000000000000000000000000000.jpg')).status, 404);
+  } finally { await b.stop(); }
+});

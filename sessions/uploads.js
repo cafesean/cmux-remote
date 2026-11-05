@@ -8,7 +8,8 @@
 // those bytes are served, and it serves nothing whose REAL path is outside the upload directory.
 //
 //   splitUploadImages(text, root) -> {text, images: [{rel, mime, name}]}   (lexical, no fs)
-//   readUpload(rel, root, {maxBytes}) -> Promise<{mime, data: Buffer} | null>
+//   readUpload(rel, root, {maxBytes, stat}) -> Promise<{mime, data: Buffer} | {mime, size, mtimeMs} (stat) | null>
+// D65: the hidden thumbnail cache (<root>/.thumbs, sessions/thumbs.js) is never an upload: not split, not served.
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
@@ -26,6 +27,8 @@ const LIMITS = {
 // else single-quoted with ' written as '\''.
 const TOKEN_RE = /'((?:[^']|'\\'')*)'|(\S+)/g;
 
+const THUMB_DIR = '.thumbs';
+const inThumbDir = (rel) => rel.split(/[\\/]/)[0] === THUMB_DIR;
 const mimeOf = (p) => IMAGE_EXT[path.extname(p).slice(1).toLowerCase()] || null;
 const rootOf = (root) => (typeof root === 'function' ? root() : root);
 
@@ -50,7 +53,7 @@ function splitUploadImages(text, rootArg) {
     const abs = path.resolve(p);
     const rel = inside(base, abs);
     const mime = rel && mimeOf(abs);
-    if (!mime || rel.length > LIMITS.uploadRelMax) continue;
+    if (!mime || rel.length > LIMITS.uploadRelMax || inThumbDir(rel)) continue;
     images.push({ rel, mime, name: path.basename(abs) });
     cut.push([m.index, m.index + m[0].length]);
   }
@@ -70,7 +73,8 @@ async function readUpload(rel, rootArg, opts = {}) {
   if (!root || !path.isAbsolute(root) || typeof rel !== 'string' || !rel || rel.length > LIMITS.uploadRelMax || rel.includes('\0')) return null;
   if (path.isAbsolute(rel)) return null;
   const target = path.resolve(root, rel);
-  if (!inside(path.resolve(root), target)) return null;
+  const relN = inside(path.resolve(root), target);
+  if (!relN || inThumbDir(relN)) return null;
   // L1: open FIRST (no realpath/open window), then prove the fd is the file whose real path is inside
   // the real root: realpath + lstat of that path must be the fd's dev+ino, and realpath must not move.
   const io = opts.fsp || fsp;
@@ -88,6 +92,7 @@ async function readUpload(rel, rootArg, opts = {}) {
     if ((await io.realpath(target)) !== real) return null;
     if (!st.isFile()) return null;
     if (st.size > maxBytes) return { mime, tooLarge: true };
+    if (opts.stat) return { mime, size: st.size, mtimeMs: st.mtimeMs };
     const data = Buffer.alloc(st.size);
     let got = 0;
     while (got < st.size) {
@@ -103,6 +108,8 @@ async function readUpload(rel, rootArg, opts = {}) {
   }
 }
 
+// D65: the bare url serves the thumbnail (?size=thumb is the default); fullUrl serves the original.
 const uploadUrl = (sessionId, rel) => `/api/sessions/${encodeURIComponent(sessionId)}/upload/${encodeURIComponent(rel)}`;
+const uploadFullUrl = (sessionId, rel) => `${uploadUrl(sessionId, rel)}?size=full`;
 
-module.exports = { splitUploadImages, readUpload, uploadUrl, IMAGE_EXT, LIMITS };
+module.exports = { splitUploadImages, readUpload, uploadUrl, uploadFullUrl, IMAGE_EXT, LIMITS, THUMB_DIR };
