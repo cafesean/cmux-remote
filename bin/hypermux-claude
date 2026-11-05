@@ -57,7 +57,7 @@ if [ "$NAME" != a ]; then
     "$NODE" "$HERE/lib/accounts-meta.js" set "$NAME" --fp "$FP" >/dev/null 2>&1 || { unset T; echo "cannot record account fingerprint" >&2; exit 2; }
   elif [ "$STORED" != "$FP" ]; then
     unset T
-    echo "$NAME changed on this Mac — add it again in HyperMux Settings" >&2; exit 3
+    echo "$NAME changed on this Mac — add it again in HyprMux Settings" >&2; exit 3
   fi
   # e. hand over
   export CLAUDE_CODE_OAUTH_TOKEN="$T"; unset T
