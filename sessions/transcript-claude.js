@@ -6,6 +6,8 @@
 //     the byte offset it names, throws BadCursorError (code 'bad_cursor'); the route maps it to 400.
 //   tailThread(path, fromOffset, {signal, onReset, sessionId, bannerPreset, pollMs}) -> AsyncIterable<Msg>
 //   readAttachment(path, n, {fs}) -> Promise<{mime, data: Buffer} | null>
+//   readThread/tailThread also take `sidechain: true` (a sub-agent transcript: its isSidechain rows are shown)
+//   and `agentIdFor(toolUseId)` (an Agent/Task Tool then carries `agentId`, A10).
 //
 // Msg, Tool and the page cursor are described in sessions/CONTRACT.md. How a record becomes messages
 // (rules from the render spike):
@@ -88,8 +90,10 @@ const attachmentUrl = (sessionId, n) => `/api/sessions/${encodeURIComponent(sess
 // Records in file order in, messages out. `push` returns the messages that are new or changed by that
 // record (a tools group that gained a tool or a result), which is exactly what a live stream sends.
 class Normaliser {
-  constructor({ bannerPreset = true } = {}) {
+  constructor({ bannerPreset = true, sidechain = false, agentIdFor = null } = {}) {
     this.bannerPreset = bannerPreset;
+    this.sidechain = sidechain;     // a sub-agent's own transcript: every row is a sidechain row
+    this.agentIdFor = agentIdFor;   // toolUseId -> sub-agent id (A10), for Agent/Task rows
     this.out = [];
     this.offs = new Map();   // message id -> byte offset of its record
     this.rels = new Map();   // attachment message id -> index among the images this normaliser saw
@@ -118,7 +122,7 @@ class Normaliser {
       if (typeof rec.customTitle === 'string') this.title = rec.customTitle;
       return changed;
     }
-    if (rec.isSidechain || (rec.type !== 'user' && rec.type !== 'assistant')) return changed;
+    if ((rec.isSidechain && !this.sidechain) || (rec.type !== 'user' && rec.type !== 'assistant')) return changed;
     const parsed = Date.parse(rec.timestamp);
     const ts = Number.isNaN(parsed) ? this.lastTs : parsed;
     this.lastTs = ts;
@@ -144,7 +148,7 @@ class Normaliser {
           this.add(msg, off, changed);
         }
       } else if (b.type === 'tool_result') {
-        this.toolResult(b, changed);
+        this.toolResult(b, changed, rec);
       }
     });
     return changed;
@@ -180,14 +184,25 @@ class Normaliser {
       this.offs.set(id, off);
     }
     const tool = { id: b.id || id, name: String(b.name || ''), target: toolTarget(b.name, input), status: 'running' };
+    this.linkAgent(tool, null);
     this.group.items.push(tool);
     this.tools.set(tool.id, { tool, group: this.group });
     if (!changed.includes(this.group)) changed.push(this.group);
   }
 
-  toolResult(b, changed) {
+  // Agent/Task rows carry the sub-agent's id: the record's own toolUseResult.agentId, else the meta map.
+  linkAgent(tool, rec) {
+    if (tool.agentId || (tool.name !== 'Agent' && tool.name !== 'Task')) return;
+    const tr = rec && rec.toolUseResult;
+    let a = tr && typeof tr === 'object' && typeof tr.agentId === 'string' ? tr.agentId : null;
+    if (!a && this.agentIdFor) { try { a = this.agentIdFor(tool.id); } catch (_) { a = null; } }
+    if (typeof a === 'string' && /^a[A-Za-z0-9-]{5,79}$/.test(a)) tool.agentId = a;
+  }
+
+  toolResult(b, changed, rec) {
     const hit = this.tools.get(b.tool_use_id);
     if (!hit) return;
+    this.linkAgent(hit.tool, rec);
     const body = resultText(b.content);
     hit.tool.status = b.is_error ? 'error' : 'ok';
     hit.tool.lines = body ? body.split('\n').length : 0;
@@ -332,7 +347,7 @@ async function headTitle(h, size, chunkSize) {
 }
 
 // The record a cursor points at, read alone: it must start a line and must hold the cursor's message.
-async function cursorRecord(h, size, { id, off }, bannerPreset) {
+async function cursorRecord(h, size, { id, off }, bannerPreset, sidechain) {
   if (off >= size || (off > 0 && (await readAt(h, off - 1, 1))[0] !== NL)) throw new BadCursorError();
   let line = Buffer.alloc(0);
   for (let pos = off; pos < size;) {
@@ -344,14 +359,14 @@ async function cursorRecord(h, size, { id, off }, bannerPreset) {
     if (nl >= 0) break;
   }
   const entry = parseLines(line, off)[0];
-  if (!entry || !new Normaliser({ bannerPreset }).push(entry).some((m) => m.id === id)) throw new BadCursorError();
+  if (!entry || !new Normaliser({ bannerPreset, sidechain }).push(entry).some((m) => m.id === id)) throw new BadCursorError();
   return entry;
 }
 
 const clampLimit = (n) => Math.min(MAX_LIMIT, Math.max(1, Math.floor(Number(n)) || DEFAULT_LIMIT));
 
 async function readThread(p, opts = {}) {
-  const { before, sessionId = '', bannerPreset = true, chunkSize = CHUNK } = opts;
+  const { before, sessionId = '', bannerPreset = true, chunkSize = CHUNK, sidechain = false, agentIdFor = null } = opts;
   const limit = clampLimit(opts.limit == null ? DEFAULT_LIMIT : opts.limit);
   const h = await (opts.fs || REAL_FS).open(p, 'r');
   try {
@@ -362,7 +377,7 @@ async function readThread(p, opts = {}) {
     if (before != null) {
       const c = decodeCursor(before);
       cursorId = c.id;
-      cursorEntry = await cursorRecord(h, size, c, bannerPreset);
+      cursorEntry = await cursorRecord(h, size, c, bannerPreset, sidechain);
       end = c.off;
     }
     const br = new BackReader(h, end, chunkSize);
@@ -370,7 +385,7 @@ async function readThread(p, opts = {}) {
     let older;   // the messages older than the page edge
     for (;;) {
       const more = await br.older();
-      norm = new Normaliser({ bannerPreset });
+      norm = new Normaliser({ bannerPreset, sidechain, agentIdFor });
       for (const e of br.entries) norm.push(e);
       if (cursorEntry) norm.push(cursorEntry);
       const edge = cursorId == null ? norm.out.length : norm.out.findIndex((m) => m.id === cursorId);
@@ -423,7 +438,7 @@ function waiter(p, signal, pollMs) {
 }
 
 async function* tailThread(p, fromOffset, opts = {}) {
-  const { signal, onReset, sessionId = '', bannerPreset = true, pollMs = POLL_MS } = opts;
+  const { signal, onReset, sessionId = '', bannerPreset = true, pollMs = POLL_MS, sidechain = false, agentIdFor = null } = opts;
   const fsx = opts.fs || REAL_FS;
   const w = waiter(p, signal, pollMs);
   let norm = null;
@@ -435,7 +450,7 @@ async function* tailThread(p, fromOffset, opts = {}) {
 
   // Feed the 256 KB before `at` without yielding, so a result that arrives now finds its tool.
   const warm = async (h, at) => {
-    norm = new Normaliser({ bannerPreset });
+    norm = new Normaliser({ bannerPreset, sidechain, agentIdFor });
     base = null;
     carry = Buffer.alloc(0);
     if (at <= 0) { windowStart = 0; base = 0; return; }

@@ -5,6 +5,9 @@
 //   GET  /cmux/sessions/:id/thread?before=&limit= -> {title, messages, cursor}
 //   GET  /cmux/sessions/:id/thread-stream        -> SSE of Stream events (msg | status | reset)
 //   GET  /cmux/sessions/:id/attachment/:n        -> image bytes
+//   GET  /cmux/sessions/:id/subagents            -> {subagents: Subagent[], total}       (A10)
+//   GET  /cmux/sessions/:id/subagents/:agentId/thread?before=&limit= -> Thread       (A10)
+//   GET  /cmux/sessions/:id/subagents/:agentId/thread-stream        -> SSE msg | reset | gone (A10)
 //
 // createSessionRoutes(deps).handle(req, res, url) returns true when it answered. bridge.js calls it
 // AFTER its own secret check, so every route here is auth-gated exactly like the rest of /cmux/*.
@@ -24,6 +27,7 @@ const { statusFor, contextUsage } = require('./status');
 const eventlog = require('../radar/eventlog');
 const tmuxIds = require('../lib/tmux-ids');
 const procs = require('./procs');
+const subagents = require('./subagents');
 
 // Every limit this module adds (LIMITS.md rows).
 const LIMITS = {
@@ -38,7 +42,8 @@ const LIMITS = {
   eventMaxPages: 20,                  // event-log pages followed per read (= detect.js MAX_EVENT_PAGES)
   markerIdMax: 128,
   procSnapshotTtlMs: 2000,           // one ps+tmux snapshot is shared for this long (list, describe, streams)
-  attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n                   // longest session id used as a ~/.claude/needs-you/<id> file name
+  attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n
+  ...subagents.LIMITS,                // A10 sub-agent limits (sessions/subagents.js)
 };
 const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
 
@@ -214,6 +219,7 @@ function createSessionRoutes(deps) {
     s.preview = st.preview || '';
     if (cu && cu.model) s.model = cu.model;
     if (st.contextPct !== undefined) s.contextPct = st.contextPct;
+    s.subagents = await subagents.countSubagents(join.path, { home, now: d.now() });
     return { session: s, join };
   }
   async function unreadFor(tab) {
@@ -244,12 +250,19 @@ function createSessionRoutes(deps) {
     if (session.kind === 'codex') return send(res, 200, { title: session.title, messages: [], cursor: null, unsupported: 'codex' });
     const o = join && await safeOpen(join.path);
     if (!o) return send(res, 200, { title: session.title, messages: [], cursor: null });
+    let amap = new Map();
+    try { amap = await subagents.agentIdMap(join.path); } catch (_) { amap = new Map(); }
+    return page(res, u, join.path, o, { sessionId: session.id, agentIdFor: (tu) => amap.get(tu) }, session.title);
+  }
+
+  // One Thread page of an open transcript (main or sub-agent): the cursor is the reader's own.
+  async function page(res, u, p, o, ro, fallbackTitle) {
     const before = u.searchParams.get('before');
     const lim = Number(u.searchParams.get('limit'));
     try {
-      const t = await readThread(join.path, { before: before == null || before === '' ? undefined : before,
-        limit: Number.isFinite(lim) && lim > 0 ? Math.min(lim, LIMITS.pageMax) : undefined, sessionId: session.id, fs: shim(o.fh) });
-      send(res, 200, { title: t.title || session.title, messages: t.messages, cursor: t.cursor });
+      const t = await readThread(p, { ...ro, before: before == null || before === '' ? undefined : before,
+        limit: Number.isFinite(lim) && lim > 0 ? Math.min(lim, LIMITS.pageMax) : undefined, fs: shim(o.fh) });
+      send(res, 200, { title: t.title || fallbackTitle, messages: t.messages, cursor: t.cursor });
     } catch (e) {
       if (e instanceof BadCursorError || (e && e.code === 'bad_cursor')) return send(res, 400, { error: 'bad_cursor' });
       send(res, 500, { error: 'thread_failed' });
@@ -302,13 +315,16 @@ function createSessionRoutes(deps) {
     if (closed) return;
     if (first && first.session.kind === 'codex') { emit({ type: 'unsupported', unsupported: 'codex' }); return; }
     if (first) lastStatus = first.session.status;
+    let amap = new Map();
+    const refreshAgents = async () => { if (path0) { try { amap = await subagents.agentIdMap(path0); } catch (_) { /* keep */ } } };
     const startTail = (p) => {
       if (tailAbort) tailAbort.abort();
       const ac = new AbortController();
       tailAbort = ac;
       (async () => {
+        await refreshAgents();
         try {
-          for await (const msg of tailThread(p, null, { signal: ac.signal, sessionId: id, fs: guardedFs, onReset: () => emit({ type: 'reset' }) })) {
+          for await (const msg of tailThread(p, null, { signal: ac.signal, sessionId: id, fs: guardedFs, agentIdFor: (tu) => amap.get(tu), onReset: () => emit({ type: 'reset' }) })) {
             if (ac.signal.aborted) break;
             emit({ type: 'msg', msg });
           }
@@ -333,6 +349,7 @@ function createSessionRoutes(deps) {
         const now = await findTab(id);
         if (closed || now === null) return;            // tree read failed: try again next poll
         if (!now) { emit({ type: 'gone' }); res.end(); done(); return; }
+        await refreshAgents();
         const { session } = await describe(now, requestDeps(), await unreadFor(now.tab));
         if (!closed && session.status !== lastStatus) {
           emit({ type: 'status', status: session.status });
@@ -343,12 +360,95 @@ function createSessionRoutes(deps) {
     st = setInterval(statusTick, statusPollMs);
   }
 
+  // ---- A10 sub-agents ----------------------------------------------------------------------------
+  // The session's main transcript, real and checked, or null (not claude / no join / refused).
+  async function mainTranscript(entry) {
+    const { session, join } = await describe(entry, requestDeps(), null);
+    if (session.kind !== 'claude' || !join) return { session, path: null };
+    const o = await safeOpen(join.path);
+    if (!o) return { session, path: null };
+    await o.fh.close().catch(() => {});
+    return { session, path: join.path };
+  }
+
+  async function subagentList(res, entry) {
+    const { path: tp } = await mainTranscript(entry);
+    if (!tp) return send(res, 200, { subagents: [], total: 0 });
+    const r = await subagents.listSubagents(tp, { home, now: Date.now() });
+    send(res, 200, { subagents: r.subagents, total: r.total });
+  }
+
+  async function subagentThread(res, entry, agentId, u) {
+    const { session, path: tp } = await mainTranscript(entry);
+    const o = tp && await subagents.openSubagent(tp, agentId, { home });
+    if (!o) return send(res, 404, { error: 'not_found' });
+    const meta = await subagents.subagentMeta(tp, agentId);
+    return page(res, u, o.path, o, { sessionId: session.id, sidechain: true }, (meta && typeof meta.description === 'string' && meta.description) || session.title);
+  }
+
+  async function subagentStream(req, res, entry, agentId) {
+    const { session, path: tp } = await mainTranscript(entry);
+    const probe = tp && await subagents.openSubagent(tp, agentId, { home });
+    if (!probe) return send(res, 404, { error: 'not_found' });
+    await probe.fh.close().catch(() => {});
+    if (streams >= LIMITS.maxStreams) return send(res, 429, { error: 'too_many_streams' });
+    streams++;
+    const id = session.id;
+    let closed = false;
+    const ac = new AbortController();
+    const emit = (ev) => { if (!closed) res.write(`data: ${JSON.stringify({ ...ev, session: id, agentId })}\n\n`); };
+    const done = () => {
+      if (closed) return;
+      closed = true;
+      streams--;
+      ac.abort();
+      clearInterval(hb); clearInterval(st);
+    };
+    req.on('close', done);
+    res.on('close', done);
+    sseHead(res);
+    const hb = setInterval(() => { if (!closed) res.write(': hb\n\n'); }, LIMITS.streamHeartbeatMs);
+    // Every open re-runs the full sub-agent check (the path the reader passes is ignored).
+    const subFs = { async open() { const o = await subagents.openSubagent(tp, agentId, { home }); if (!o) { const e = new Error('refused'); e.code = 'ENOENT'; throw e; } return o.fh; } };
+    (async () => {
+      try {
+        for await (const msg of tailThread(probe.path, null, { signal: ac.signal, sessionId: id, sidechain: true, fs: subFs, onReset: () => emit({ type: 'reset' }) })) {
+          if (ac.signal.aborted) break;
+          emit({ type: 'msg', msg });
+        }
+      } catch (_) { /* a broken tail ends quietly */ }
+    })();
+    const st = setInterval(async () => {
+      try {
+        const now = await findTab(id);
+        if (closed || now === null) return;
+        if (!now) { emit({ type: 'gone' }); res.end(); done(); }
+      } catch (_) { /* next tick */ }
+    }, statusPollMs);
+  }
+
   // true when answered. `u` is the parsed URL.
   function handle(req, res, u) {
     const p = u.pathname;
     if (p === '/cmux/sessions') {
       if (req.method !== 'GET') return false;
       list(res).catch(() => send(res, 500, { error: 'sessions_failed' }));
+      return true;
+    }
+    const sm = /^\/cmux\/sessions\/([^/]+)\/subagents(?:\/([^/]+)\/(thread|thread-stream))?$/.exec(p);
+    if (sm && req.method === 'GET') {
+      let id;
+      let agentId = null;
+      try { id = decodeURIComponent(sm[1]); if (sm[2] != null) agentId = decodeURIComponent(sm[2]); } catch (_) { send(res, 404, { error: 'not_found' }); return true; }
+      if (agentId != null && !subagents.isAgentId(agentId)) { send(res, 400, { error: 'bad_agent_id' }); return true; }
+      (async () => {
+        const entry = await findTab(id);
+        if (entry === null) return send(res, 502, { error: 'cmux_failed' });
+        if (!entry) return send(res, 404, { error: 'not_found' });
+        if (agentId == null) return subagentList(res, entry);
+        if (sm[3] === 'thread') return subagentThread(res, entry, agentId, u);
+        return subagentStream(req, res, entry, agentId);
+      })().catch(() => { if (!res.headersSent) send(res, 500, { error: 'sessions_failed' }); });
       return true;
     }
     const m = /^\/cmux\/sessions\/([^/]+)\/(thread|thread-stream|attachment\/([^/]+))$/.exec(p);

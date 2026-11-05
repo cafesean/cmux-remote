@@ -116,11 +116,34 @@ passes requests through to the right bridge. The session `id` goes in the path, 
 | Live stream | `GET /cmux/sessions/:id/thread-stream` | `GET /api/sessions/:id/thread-stream` |
 | Attachment bytes | `GET /cmux/sessions/:id/attachment/:n` | `GET /api/sessions/:id/attachment/:n` |
 | Send text and keys | `WS /cmux/sessions/:id/input` | `WS /api/sessions/:id/input` |
+| List sub-agents (A10) | `GET /cmux/sessions/:id/subagents` | `GET /api/sessions/:id/subagents` |
+| Sub-agent thread page (A10) | `GET /cmux/sessions/:id/subagents/:agentId/thread?before=&limit=` | `GET /api/sessions/:id/subagents/:agentId/thread?before=&limit=` |
+| Sub-agent live stream (A10) | `GET /cmux/sessions/:id/subagents/:agentId/thread-stream` | `GET /api/sessions/:id/subagents/:agentId/thread-stream` |
 
 The list returns a Session list, `{machineId, sessions: Session[]}`, where `machineId` is the bridge's own
 machine and every session in it has that `machine`. The thread read returns a Thread; `limit` is the page
 size in messages and defaults to 80. The stream returns Stream events. The attachment route returns the
 image bytes. New routes are additive; no existing bridge route changes shape.
+
+### Sub-agents (A10)
+
+Claude Code sub-agents of a session (its Agent/Task calls). Additive: a client that ignores them is unaffected.
+
+- `Session.subagents`: `{running: number, total: number}`, on Claude sessions with a transcript only. Cached
+  per session for `LIMITS.subagentCountTtlMs`.
+- List: `{subagents: Subagent[], total}`, newest `startedAt` first, at most `LIMITS.subagentsMax` entries;
+  `total` counts all. A non-Claude session answers `{subagents: [], total: 0}`.
+- `Subagent`: `{agentId, description, agentType, model, toolUseId, status: 'running'|'done', startedAt,
+  lastActivity, preview}` (times in ms; strings may be `''` when the sub-agent has no meta file).
+  `status` is `done` when its meta says `finished`, or its last record is an assistant turn with no tool call
+  pending; otherwise `running` while the file was written within `LIMITS.subagentLiveMs`, else `done`.
+  (A parent tool_result is NOT used: a background agent gets one at launch.)
+- `agentId` matches `^a[A-Za-z0-9][A-Za-z0-9-]{4,78}$` (plain `a`+hex, or a named teammate
+  `a<name>-<16 hex>`). Anything else is 400 `bad_agent_id`; an unknown or refused sub-agent is 404.
+- Thread and stream: the same Thread and Stream event shapes as the session's own, with an opaque cursor.
+  Stream events carry `agentId` beside `session`; types are `msg`, `reset`, `gone` (no `status`).
+- `Tool.agentId` (optional): set on an `Agent`/`Task` tool when its sub-agent is known (the result's
+  `toolUseResult.agentId`, else a meta file whose `toolUseId` is the tool id). Use it to open that thread.
 
 ### Input WebSocket
 
