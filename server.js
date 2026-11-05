@@ -343,6 +343,50 @@ function serveStatic(req, res, file) {
   });
 }
 
+// p41 S2c: /api/cmux/accounts relay. 503 not_secured with an empty SERVER_TOKEN (the API would be
+// open). Setup + delete: lib/accounts-limits.js (10/h per caller, 30/h per machine); `fresh=1` once
+// per 3 s per caller, else the bridge's cached list is served. Bodies are relayed raw, 1 KiB cap.
+const { createAccountLimits, callerKeyOf } = require('./lib/accounts-limits');
+const accountLimits = createAccountLimits();
+const ACCOUNT_BODY_MAX = 1024;                 // accountBodyMax
+const ACCOUNT_NAME_RE = /^[a-z][a-z0-9]{0,5}$/;
+function accountCaller(req, u) {
+  const h = req.headers['authorization'] || '';
+  return callerKeyOf((h.startsWith('Bearer ') ? h.slice(7) : '') || req.headers['x-app-token'] || u.searchParams.get('token') || '');
+}
+function readRaw(req, cap, cb) {
+  const chunks = []; let size = 0, over = false;
+  req.on('data', (c) => { if (over) return; size += c.length; if (size > cap) { over = true; return; } chunks.push(c); });
+  req.on('end', () => cb(over ? null : Buffer.concat(chunks)));
+  req.on('error', () => cb(null));
+}
+function accountsRelay(req, res, u, p) {
+  if (!SERVER_TOKEN) return sendJson(res, 503, { error: 'not_secured' });
+  const m = findMachine(u.searchParams.get('machine'));
+  if (!m) return sendJson(res, 404, { error: 'no_machine' });
+  const caller = accountCaller(req, u);
+  if (req.method === 'GET' && p === '/api/cmux/accounts') {
+    const fresh = u.searchParams.get('fresh') === '1' && accountLimits.fresh(caller);
+    return relay(res, bridge(m, '/cmux/accounts' + (fresh ? '?fresh=1' : ''), { timeout: 20000 }));
+  }
+  if (req.method === 'POST' && p === '/api/cmux/accounts/setup') {
+    return readRaw(req, ACCOUNT_BODY_MAX, (buf) => {
+      if (!buf) return sendJson(res, 413, { error: 'too_large' });
+      if (!accountLimits.mutation(caller, m.id)) return sendJson(res, 429, { error: 'rate_limited' });
+      relay(res, bridge(m, '/cmux/accounts/setup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: buf, timeout: 30000 }));
+    });
+  }
+  const dm = /^\/api\/cmux\/accounts\/([^/]+)$/.exec(p);
+  if (req.method === 'DELETE' && dm) {
+    let name = '';
+    try { name = decodeURIComponent(dm[1]); } catch (_) { name = ''; }
+    if (!ACCOUNT_NAME_RE.test(name) || name === 'a') return sendJson(res, 400, { error: 'bad_name' });
+    if (!accountLimits.mutation(caller, m.id)) return sendJson(res, 429, { error: 'rate_limited' });
+    return relay(res, bridge(m, '/cmux/accounts/' + name, { method: 'DELETE', timeout: 30000 }));
+  }
+  return sendJson(res, 404, { error: 'not_found' });
+}
+
 async function handleApi(req, res, u) {
   const p = u.pathname;
   // THE ONE ROUTE THAT IS NOT SERVER_TOKEN-GATED, because it is reached by navigation rather than
@@ -372,6 +416,9 @@ async function handleApi(req, res, u) {
       try { return res.end(); } catch (_) { return; }
     }
   }
+
+  // ----- p41 S2c Claude accounts (names only; the token never passes through here) -----
+  if (p === '/api/cmux/accounts' || p.startsWith('/api/cmux/accounts/')) return accountsRelay(req, res, u, p);
 
   // ----- p27 Chrome "Allow remote debugging?" -----
   if (req.method === 'GET' && p === '/api/cmux/chrome-prompt') {

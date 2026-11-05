@@ -101,6 +101,9 @@ function cases() {
     '/api/cmux/fleet': [json('GET', '/api/cmux/fleet')],
     '/api/cmux/chrome-prompt': [json('GET', '/api/cmux/chrome-prompt'), post('/api/cmux/chrome-prompt', { action: 'nope' })],
     '/api/cmux/tree': [json('GET', '/api/cmux/tree'), json('GET', '/api/cmux/tree?machine=nope')],
+    // p41 S2c: only the no_machine path — a relayed list would run this host's real `security`
+    // (the contract bridges carry no HYPERMUX_SECURITY_BIN fake). test/p41-s2c-accounts.test.js covers the rest.
+    '/api/cmux/accounts': [json('GET', '/api/cmux/accounts?machine=nope')],
     '/api/cmux/fs/download-ticket': [json('GET', `/api/cmux/fs/download-ticket?path=${q(note)}`), json('GET', '/api/cmux/fs/download-ticket')],
     '/api/cmux/fs/download': [{ kind: 'download' }],
     '/api/cmux/fs/roots': [json('GET', '/api/cmux/fs/roots')],

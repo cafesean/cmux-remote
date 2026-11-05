@@ -2181,6 +2181,110 @@ function cmuxNotifications(res) {
   });
 }
 
+// ---------- p41 S2c: Claude accounts -------------------------------------------
+// Names only: the bridge never reads a token. Setup / remove run in a pane on THIS Mac, in the
+// private "Claude accounts" workspace (S2p gate: the phone can neither see nor type into it), and the
+// person at the Mac confirms there. Every refusal is a code; no stderr, no Keychain output.
+const accountsLib = require('./lib/accounts').createAccounts();
+const ACCOUNT_BIN_DIR = path.join(__dirname, 'bin');
+const ACCOUNT_BIN_DIR_OK = /^[A-Za-z0-9/._-]+$/.test(ACCOUNT_BIN_DIR);   // safe inside '…' in --command
+const ACCOUNTS_MAX = 32;                     // accountsMax
+const ACCOUNT_SETUP_TIMEOUT_MS = 600000;     // accountSetupTimeoutMs (pane flag + private mark)
+const ACCOUNT_BODY_MAX = 1024;               // accountBodyMax
+const ACCOUNT_LABEL_RE = /^[A-Za-z0-9 ._-]{1,40}$/;
+const ACCOUNT_NAME_RE = require('./lib/accounts').NAME_RE;
+let accountPane = null;      // { surface, until } — accountSetupOpen: 1 per Mac at a time
+let accountOpening = false;  // a setup/remove request is between its checks and its pane
+if (!ACCOUNT_BIN_DIR_OK) console.log('WARNING: bridge path has characters unsafe in a pane command — Claude account routes disabled');
+
+async function accountPaneOpen() {
+  if (!accountPane) return false;
+  if (Date.now() > accountPane.until) { accountPane = null; return false; }
+  const ws = await loadTree();
+  if (ws && accountPane.surface && !ws.some((w) => (w.tabs || []).some((t) => t.id === accountPane.surface))) { accountPane = null; return false; }
+  return true;   // still in the tree, or the tree is unreadable: keep refusing
+}
+
+// Open `<bin>/<script> <args…>` in the "Claude accounts" workspace. cmdline is built ONLY from
+// validated values. Uses cli (not cmux): flag adaptation must never drop --name or --command.
+async function openAccountPane(cmdline) {
+  const pre = await loadTree();
+  if (!pre) return null;
+  const before = new Set(pre.flatMap((w) => (w.tabs || []).map((t) => t.id)));
+  const ws = pre.find((w) => w.title === privateSurfaces.PRIVATE_WORKSPACE_TITLE);
+  const args = ws
+    ? ['new-surface', '--type', 'terminal', '--workspace', ws.ref || ws.id, '--focus', 'false', '--command', cmdline]
+    // focus true: a detached caller's unfocused new workspace may not have a live terminal yet
+    : ['new-workspace', '--name', privateSurfaces.PRIVATE_WORKSPACE_TITLE, '--focus', 'true', '--command', cmdline];
+  const ok = await new Promise((resolve) => cli(args, { timeout: 12000 }, (err) => resolve(!err)));
+  if (!ok) return null;
+  const post = await loadTree();
+  for (const w of post || []) for (const t of w.tabs || []) {
+    if (before.has(t.id)) continue;
+    privateSurfaces.mark({ surface: t.id, workspace: w.id, ttlMs: ACCOUNT_SETUP_TIMEOUT_MS });
+    return { surface: t.id };
+  }
+  return { surface: null };
+}
+
+async function accountOpen(res, cmdline) {
+  const r = await openAccountPane(cmdline);
+  if (!r) return send(res, 502, { error: 'cmux_failed' });
+  accountPane = { surface: r.surface, until: Date.now() + ACCOUNT_SETUP_TIMEOUT_MS };
+  if (!r.surface) return send(res, 502, { error: 'cmux_failed' });
+  send(res, 200, { ok: true, surface: r.surface });
+}
+
+function cmuxAccounts(req, res, u, p) {
+  if (!SECRET) return send(res, 503, { error: 'not_secured' });
+  if (tmuxCli) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
+  if (!ACCOUNT_BIN_DIR_OK) return send(res, 503, { error: 'accounts_disabled' });
+  const fail = (code, error) => () => { if (!res.headersSent) send(res, code, { error }); };
+  if (req.method === 'GET' && p === '/cmux/accounts') {
+    return accountsLib.list({ fresh: u.searchParams.get('fresh') === '1' })
+      .then((r) => send(res, 200, r), fail(502, 'keychain_read_failed'));
+  }
+  // setup / remove share one guard: one account pane per Mac at a time
+  const guarded = async (name, body) => {
+    if (accountOpening) return send(res, 429, { error: 'setup_open' });
+    accountOpening = true;
+    try { await body(); } finally { accountOpening = false; }
+  };
+  if (req.method === 'POST' && p === '/cmux/accounts/setup') {
+    return cmuxReadBody(req, (b) => {
+      if (!b) return send(res, 400, { error: 'bad_json' });
+      const name = b.name;
+      if (typeof name !== 'string' || !ACCOUNT_NAME_RE.test(name) || name === 'a') return send(res, 400, { error: 'bad_name' });
+      const alsoOn = b.alsoOn == null || b.alsoOn === '' ? null : b.alsoOn;
+      if (alsoOn !== null && (typeof alsoOn !== 'string' || !ACCOUNT_LABEL_RE.test(alsoOn))) return send(res, 400, { error: 'bad_label' });
+      const replace = b.replace === true;
+      guarded(name, async () => {
+        if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
+        if (!replace && await accountsLib.exists(name)) return send(res, 409, { error: 'exists' });
+        if (await accountPaneOpen()) return send(res, 429, { error: 'setup_open' });
+        const names = await accountsLib.listNames();
+        if (!names.includes(name) && names.length >= ACCOUNTS_MAX) return send(res, 409, { error: 'too_many' });
+        let cmd = `'${ACCOUNT_BIN_DIR}/hypermux-account-setup' ${name}`;
+        if (replace) cmd += ' --replace';
+        if (alsoOn !== null) cmd += ` --also-on '${alsoOn}'`;
+        await accountOpen(res, cmd);
+      }).catch(fail(502, 'accounts_failed'));
+    }, ACCOUNT_BODY_MAX);
+  }
+  const dm = /^\/cmux\/accounts\/([^/]+)$/.exec(p);
+  if (req.method === 'DELETE' && dm) {
+    let name = '';
+    try { name = decodeURIComponent(dm[1]); } catch (_) { name = ''; }
+    if (!ACCOUNT_NAME_RE.test(name) || name === 'a') return send(res, 400, { error: 'bad_name' });
+    return guarded(name, async () => {
+      if (!(await accountsLib.exists(name))) return send(res, 404, { error: 'not_found' });
+      if (await accountPaneOpen()) return send(res, 429, { error: 'setup_open' });
+      await accountOpen(res, `'${ACCOUNT_BIN_DIR}/hypermux-account-remove' ${name}`);
+    }).catch(fail(502, 'accounts_failed'));
+  }
+  return send(res, 404, { error: 'not_found' });
+}
+
 // ---------- routing ---------------------------------------------------------
 function handleCmux(req, res) {
   if (SECRET && !safeEqual(req.headers['x-bridge-secret'], SECRET)) return send(res, 403, { error: 'forbidden' });
@@ -2338,6 +2442,9 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'POST' && p === '/cmux/browser/scroll') return cmuxBrowserScroll(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/nav') return cmuxBrowserNav(req, res);
   if (req.method === 'POST' && p === '/cmux/browser/zoom') return cmuxBrowserZoom(req, res);
+
+  // ----- p41 S2c Claude accounts -----
+  if (p === '/cmux/accounts' || p.startsWith('/cmux/accounts/')) return cmuxAccounts(req, res, u, p);
   return send(res, 404, { error: 'not_found' });
 }
 
