@@ -5,10 +5,14 @@
 //   {op:'read',  items:[{pid,frame}]}   -> {results:[<read answer | {error}>]}   (one spawn per poll)
 //   {op:'press', pid, frame, title}     -> {ok:true} | {error}
 //   {op:'focus', pid, frame, kind}      -> {ok:true} | {error}      kind 'secure' | 'text'
+//   {op:'ocr', wid, frame}  | {op:'ocr', items:[...]} -> {lines:[{text, box:{fx,fy,fw,fh} (dialog fractions, top-left), conf}]}
+//      capture = screencapture -x -o -l <wid> (else -R frame) under the bridge's Screen Recording grant; Vision .accurate, en.
 //   {op:'windows', pid}                 -> {axError, windows:[{role,subrole,frame}]}   (diagnosis)
 // error: not_trusted | no_windows | no_window | no_button | no_field | press_failed | bad_request
 import ApplicationServices
 import Foundation
+import ImageIO
+import Vision
 
 let FRAME_TOL: CGFloat = 3, MAX_DEPTH = 10, MAX_NODES = 400, MAX_BUTTONS = 12, TEXT_MAX = 500, TITLE_MAX = 80
 
@@ -118,12 +122,42 @@ func focus(_ req: [String: Any]) -> [String: Any] {
   return ["ok": true]
 }
 
+let OCR_MAX_LINES = 40
+func ocr(_ req: [String: Any]) -> [String: Any] {
+  let dir = NSTemporaryDirectory(), file = dir + "axd-\(getpid())-\(Int.random(in: 0..<1_000_000)).png"
+  defer { try? FileManager.default.removeItem(atPath: file) }
+  var args = ["-x", "-o", "-t", "png"]
+  if let wid = (req["wid"] as? NSNumber)?.intValue, wid > 0 { args += ["-l", String(wid)] }
+  else if let f = req["frame"] as? [String: Any], let x = (f["x"] as? NSNumber)?.intValue, let y = (f["y"] as? NSNumber)?.intValue,
+          let w = (f["w"] as? NSNumber)?.intValue, let h = (f["h"] as? NSNumber)?.intValue, w > 0, h > 0 { args += ["-R", "\(x),\(y),\(w),\(h)"] }
+  else { return ["error": "bad_request"] }
+  let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture"); p.arguments = args + [file]
+  do { try p.run() } catch { return ["error": "capture_failed"] }
+  p.waitUntilExit()
+  guard p.terminationStatus == 0, let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: file) as CFURL, nil),
+        let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return ["error": "capture_failed"] }
+  let r = VNRecognizeTextRequest(); r.recognitionLevel = .accurate; r.recognitionLanguages = ["en-US"]; r.usesLanguageCorrection = true
+  do { try VNImageRequestHandler(cgImage: img, options: [:]).perform([r]) } catch { return ["error": "ocr_failed"] }
+  var lines: [[String: Any]] = []
+  for o in (r.results ?? []).prefix(OCR_MAX_LINES) {
+    guard let c = o.topCandidates(1).first else { continue }
+    let b = o.boundingBox   // normalised, bottom-left origin
+    lines.append(["text": String(c.string.prefix(200)), "conf": Double(c.confidence),
+                  "box": ["fx": Double(b.minX), "fy": Double(1 - b.maxY), "fw": Double(b.width), "fh": Double(b.height)]])
+  }
+  return ["lines": lines, "px": ["w": img.width, "h": img.height]]
+}
+
 func answer(_ o: Any) {
   let d = (try? JSONSerialization.data(withJSONObject: o)) ?? Data("{\"error\":\"encode\"}".utf8)
   FileHandle.standardOutput.write(d); FileHandle.standardOutput.write(Data("\n".utf8))
 }
 let input = FileHandle.standardInput.readDataToEndOfFile()
 guard input.count <= 64 * 1024, let req = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any] else { answer(["error": "bad_request"]); exit(0) }
+if (req["op"] as? String) == "ocr" {   // Screen Recording, not Accessibility
+  if let items = req["items"] as? [[String: Any]] { answer(["results": items.prefix(20).map { ocr($0) }]) } else { answer(ocr(req)) }
+  exit(0)
+}
 guard AXIsProcessTrusted() else { answer(["error": "not_trusted"]); exit(0) }
 switch req["op"] as? String {
 case "read":

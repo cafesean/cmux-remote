@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createMacScreen } = require('../lib/mac-screen');
-const { enrich, LIMITS } = require('../lib/mac-dialogs');
+const { enrich, classifyOcr, LIMITS } = require('../lib/mac-dialogs');
 const AXL = require('../lib/ax-helper').LIMITS;
 
 const DISPLAYS = [{ index: 1, x: 0, y: 0, w: 1512, h: 982, scale: 2 }];
@@ -93,6 +93,37 @@ test('type: never logs text, 256 cap, needs a field, focus then stdin type', asy
   assert.equal((await screen({ SCREEN_VIEW: '1' }).s.dialogType({ id, text: 'a' })).status, 403);
 });
 
+// Real Vision lines from this Mac's open universalAccessAuthWarn dialog (2026-11-06).
+const OCR = { lines: [
+  { text: 'Accessibility Access', conf: 1, box: { fx: 0.2, fy: 0.06, fw: 0.4, fh: 0.08 } },
+  { text: '"tux" would like to control this computer using', conf: 1, box: { fx: 0.2, fy: 0.29, fw: 0.7, fh: 0.07 } },
+  { text: 'devices on your networks.', conf: 1, box: { fx: 0.2, fy: 0.68, fw: 0.5, fh: 0.07 } },   // sentence tail, not a button
+  { text: 'Open System Settings', conf: 1, box: { fx: 0.45, fy: 0.80, fw: 0.3, fh: 0.08 } },
+  { text: 'Deny', conf: 1, box: { fx: 0.8, fy: 0.79, fw: 0.1, fh: 0.08 } },
+  { text: 'Maybe', conf: 0.3, box: { fx: 0.1, fy: 0.80, fw: 0.1, fh: 0.08 } },   // low confidence
+] };
+test('ocr classify: lower 40%, <=4 words, conf >= 0.5, no sentence tails; rects on the display', () => {
+  const c = classifyOcr(OCR, { rect: { fx: 0.5, fy: 0.5, fw: 0.5, fh: 0.5 } });
+  assert.deepEqual(c.buttons.map((b) => b.title), ['Open System Settings', 'Deny']);
+  assert.deepEqual(c.buttons[1].rect, { fx: 0.9, fy: 0.895, fw: 0.05, fh: 0.04 });
+  assert.match(c.text, /^Accessibility Access .*networks\.$/);
+  assert.equal(classifyOcr({ lines: [] }, { rect: { fx: 0, fy: 0, fw: 1, fh: 1 } }), null);
+});
+
+test('ocr path: AX no buttons -> OCR buttons, press = click (method click), title gone on re-OCR -> 409 dialog_changed', async () => {
+  setAx({ read: { results: [{ error: 'no_window' }] }, press: { error: 'no_window' }, focus: { ok: true }, ocr: { results: [OCR] } });
+  const { s, logs } = screen();
+  const d = (await s.dialogs()).body.dialogs[0];
+  assert.deepEqual([d.ocr, d.axError, d.password, d.buttons.map((b) => b.title)], [true, 'no_window', undefined, ['Open System Settings', 'Deny']]);
+  const r = await s.dialogPress({ id: d.id, button: 'Deny' });
+  assert.deepEqual(r.body, { ok: true, method: 'click' });
+  assert.match(logs.join('\n'), /button="Deny" method=click \(ocr\)/);
+  setAx({ read: { results: [{ error: 'no_window' }] }, press: {}, focus: {}, ocr: { results: [{ lines: OCR.lines.filter((l) => l.text !== 'Deny') }] } });
+  assert.deepEqual((await s.dialogPress({ id: d.id, button: 'Deny' })).body, { error: 'dialog_changed' });
+  setAx({ read: { results: [READ] }, press: { ok: true }, focus: { ok: true } });
+});
+
 test('limits', () => {
+  assert.deepEqual([LIMITS.OCR_BUTTON_MIN_FY, LIMITS.OCR_BUTTON_MAX_WORDS, LIMITS.OCR_MIN_CONF], [0.6, 4, 0.5]);
   assert.deepEqual([LIMITS.AX_WALK_MAX_DEPTH, LIMITS.AX_WALK_MAX_NODES, LIMITS.AX_FRAME_TOL, LIMITS.DIALOG_TYPE_MAX_CHARS, AXL.AX_HELPER_BUILD_TIMEOUT_MS], [10, 400, 3, 256, 60000]);
 });
