@@ -2692,6 +2692,13 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'GET' && p === '/cmux/screen/info') return macScreen.info().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
   if (req.method === 'GET' && p === '/cmux/screen/dialogs') return macScreen.dialogs().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));   // p41 D135
   if (req.method === 'GET' && p === '/cmux/screen/shot') return macScreen.shot(u.searchParams.get('display')).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+  if (req.method === 'POST' && (p === '/cmux/screen/dialogs/press' || p === '/cmux/screen/dialogs/type')) {   // p41 D136 (body never logged)
+    const fn = p.endsWith('/press') ? macScreen.dialogPress : macScreen.dialogType;
+    return cmuxReadBody(req, (b) => {
+      if (!b) return send(res, 400, { error: 'bad_json' });
+      fn(b).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+    }, require('./lib/mac-dialogs').LIMITS.DIALOG_BODY_MAX_BYTES);
+  }
   if (req.method === 'POST' && /^\/cmux\/screen\/(tap|scroll|type|key)$/.test(p)) {
     const op = p.slice('/cmux/screen/'.length);
     return cmuxReadBody(req, (b) => {

@@ -1036,10 +1036,10 @@ async function handleApi(req, res, u) {
   // p41 D97: Mac screen input — body relayed (never logged); bridge gates on SCREEN_CONTROL.
   if (req.method === 'POST' && p.startsWith('/api/cmux/screen/')) {
     const sub = p.slice('/api/cmux/screen/'.length);
-    if (!['tap', 'scroll', 'type', 'key'].includes(sub)) return sendJson(res, 404, { error: 'not_found' });
+    if (!['tap', 'scroll', 'type', 'key', 'dialogs/press', 'dialogs/type'].includes(sub)) return sendJson(res, 404, { error: 'not_found' });   // D136: + dialogs/press|type
     return readBody(req, (b) => {
       if (!b) return sendJson(res, 400, { error: 'bad_json' });
-      const m = findMachine(b.machine);
+      const m = findMachine(b.machine || u.searchParams.get('machine'));   // D136: ?machine= too
       if (!m) return sendJson(res, 404, { error: 'no_machine' });
       relay(res, bridge(m, `/cmux/screen/${sub}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b), timeout: 15000 }));
     });
