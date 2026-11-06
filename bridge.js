@@ -2690,6 +2690,7 @@ function dispatchCmux(req, res, u) {
 
   // ----- p41 D97 Mac screen (whole desktop; off unless SCREEN_VIEW / SCREEN_CONTROL) -----
   if (req.method === 'GET' && p === '/cmux/screen/info') return macScreen.info().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+  if (req.method === 'GET' && p === '/cmux/screen/dialogs') return macScreen.dialogs().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));   // p41 D135
   if (req.method === 'GET' && p === '/cmux/screen/shot') return macScreen.shot(u.searchParams.get('display')).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
   if (req.method === 'POST' && /^\/cmux\/screen\/(tap|scroll|type|key)$/.test(p)) {
     const op = p.slice('/cmux/screen/'.length);

@@ -167,6 +167,7 @@ function cases() {
     '/api/cmux/browser/unhideframe': [post('/api/cmux/browser/unhideframe', { surface: I.sfA1 })],
     '/api/cmux/screen/info': [json('GET', '/api/cmux/screen/info')],
     '/api/cmux/screen/shot': [json('GET', '/api/cmux/screen/shot?display=1')],
+    '/api/cmux/screen/dialogs': [json('GET', '/api/cmux/screen/dialogs')],   // p41 D135
     '/api/cmux/screen/tap': [post('/api/cmux/screen/tap', { fx: 0.5, fy: 0.5 })],
     '/api/cmux/screen/scroll': [post('/api/cmux/screen/scroll', { dy: 10 })],
     '/api/cmux/screen/type': [post('/api/cmux/screen/type', { text: 'a' })],
