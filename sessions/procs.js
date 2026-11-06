@@ -305,6 +305,22 @@ async function tmuxTargetFor(surfaceId, deps) {
   return null;
 }
 
+// p41 D140 (Sean: "Tapping allow doesn't work" -> Claude got a REJECT): a cmux pane that shows an ATTACHED tmux
+// session gets keys through cmux -> terminal -> `tmux attach`, where an arrow is ESC [ B. With tmux escape-time
+// 10 ms, a busy Mac writes those bytes >10 ms apart and tmux delivers a lone Escape = Claude's "No". KEYS for such
+// a pane go straight to that session's active pane with `tmux send-keys <Name>` (one atomic key). Text is not
+// routed here (its path is unchanged). Minted tmux-only ids keep tmuxTargetFor.
+async function tmuxKeyTargetFor(surfaceId, deps) {
+  const minted = await tmuxTargetFor(surfaceId, deps);
+  if (minted) return minted;
+  if (!surfaceId || /^%\d+$/.test(surfaceId)) return null;
+  const snap = await (deps && deps.procSnapshot ? deps.procSnapshot() : snapshot(deps));
+  const o = ownerOf((snap && snap.sessions) || [], surfaceId);
+  if (!o || !(o.attached > 0)) return null;
+  const pane = activePane(o);
+  return pane ? { socket: o.socket, pane: pane.id, session: o.name } : null;
+}
+
 // Type into a tmux pane the way lib/tmux-cli.js verbSend does (load-buffer + paste-buffer, bracketed
 // only for multi-line text), then Enter after a settle; or press one KEYMAP key. argv only, no shell.
 function tmuxRun(socket, args, input) {
@@ -344,4 +360,4 @@ async function tmuxSend(target, opts, deps) {
   return { ok: true };
 }
 
-module.exports = { tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxSend, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+module.exports = { tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };

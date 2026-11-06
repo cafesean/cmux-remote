@@ -629,6 +629,11 @@ function createSessionRoutes(deps) {
     if (backend !== 'cmux') return null;
     try { return await procs.tmuxTargetFor(surface, { procSnapshot: sharedSnapshot }); } catch (_) { return null; }
   }
+  // D140: where a KEY for this surface goes: a minted tmux-only id or a cmux pane attached to a tmux session.
+  async function tmuxKeyTarget(surface) {
+    if (backend !== 'cmux') return null;
+    try { return await procs.tmuxKeyTargetFor(surface, { procSnapshot: sharedSnapshot }); } catch (_) { return null; }
+  }
 
   // A14 POST /cmux/choose (bridge.js reads the body): recompute the surface's choice NOW and execute
   // the pick only if it is still the same question and the same option. io = {pressKey, sendText}.
@@ -667,7 +672,7 @@ function createSessionRoutes(deps) {
     return { code: 200, body: { ok: true, sessionId: b.sessionId, name: r.name || null, title: session.title } };
   }
 
-  return { handle, tmuxTarget, choose, rename };
+  return { handle, tmuxTarget, tmuxKeyTarget, choose, rename };
 }
 
 module.exports = { createSessionRoutes, LIMITS, accountErrorOf };

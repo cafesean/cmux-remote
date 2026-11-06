@@ -139,3 +139,12 @@ test('tmuxSend: text pasted, Enter after; key mapped; tmux target from a minted 
   assert.deepStrictEqual(await procs.tmuxTargetFor(tabs[0].id, d), { socket: SOCK, pane: '%48', session: 'x-chief' });
   assert.strictEqual(await procs.tmuxTargetFor(SURF, d), null);
 });
+
+test('D140 tmuxKeyTargetFor: a cmux pane ATTACHED to a tmux session gets that session\'s active pane (keys go via tmux send-keys, never split into a lone Esc)', async () => {
+  const { d } = fixture();
+  assert.deepStrictEqual(await procs.tmuxKeyTargetFor(SURF, d), { socket: SOCK, pane: '%53', session: 'x-cmux-native-2' });
+  assert.strictEqual(await procs.tmuxKeyTargetFor('29B341AB-0000-0000-0000-000000000000', d), null);   // x-chief: detached, not shown by that surface
+  assert.strictEqual(await procs.tmuxKeyTargetFor('00000000-0000-0000-0000-000000000001', d), null);   // a plain cmux terminal
+  const tabs = await procs.orphanTmuxTabs(new Set([SURF]), d);
+  assert.deepStrictEqual(await procs.tmuxKeyTargetFor(tabs[0].id, d), { socket: SOCK, pane: '%48', session: 'x-chief' });   // minted id: as before
+});
