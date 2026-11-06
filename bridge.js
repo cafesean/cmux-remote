@@ -1123,7 +1123,7 @@ function cmuxStream(req, res, surface) {
 }
 
 // ---------- input (addressed by surface) ------------------------------------
-// POST /cmux/send { surface, text, submit, expect_seq? } — type text into a tab, optionally press
+// POST /cmux/send { surface, text, submit, expect_seq?, sendId? } — type text into a tab, optionally press
 // enter to submit. Typing into a terminal is a BLIND WRITE, so this route owes its callers three
 // things the first version did not give them:
 //
@@ -1199,6 +1199,26 @@ function runSendCommand(args, cb, dispatched, tries) {
 const runSendCommandP = (args) => new Promise((resolve) => runSendCommand(args, resolve, false, 0));
 
 const SUBMIT_SETTLE_MS = Number(process.env.CMUX_SUBMIT_SETTLE_MS ?? 150);
+// p41 D133: optional sendId (the app's D121 uuid, passed through by the server on EVERY attempt,
+// including the server's D133 queue retries). The case it closes: attempt 1 typed the text but its
+// reply was slow (load spike, 15 s relay timeout), the server retries -> without this it types twice.
+// An executed id is remembered per surface (LRU, SEND_SEEN_LIMITS); a repeat answers the FIRST
+// outcome with duplicate: true and types nothing. A repeat that arrives while the first is still
+// running waits for it. Only outcomes where text MAY have landed are remembered (2xx and the
+// unproved-write 502s); a provably-untyped failure (400s, 409 seq, send_failed) is forgotten so the
+// retry really sends. In memory only: a bridge restart forgets them (the server's D121 store still
+// dedupes a send it saw succeed).
+const SEND_SEEN_LIMITS = Object.freeze({ max: 500, ttlMs: 10 * 60 * 1000 });
+const SEND_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const SEND_SEEN = new Map();       // key -> { at, code, body }; insertion order = age
+const SEND_INFLIGHT = new Map();   // key -> Promise<{ code, body }>
+const SEND_FORGET = new Set(['send_failed', 'bad_json', 'bad_surface', 'seq_unavailable', 'seq_changed']);
+function pruneSendSeen() {
+  const t = Date.now();
+  for (const [k, v] of SEND_SEEN) { if (t - v.at > SEND_SEEN_LIMITS.ttlMs) SEND_SEEN.delete(k); else break; }
+  while (SEND_SEEN.size > SEND_SEEN_LIMITS.max) SEND_SEEN.delete(SEND_SEEN.keys().next().value);
+}
+const dupBody = (body) => (body && typeof body === 'object' ? { ...body, duplicate: true } : { ok: true, duplicate: true });
 function cmuxSend(req, res) {
   cmuxReadBody(req, (b) => {
     if (!b) return send(res, 400, { error: 'bad_json' });
@@ -1213,8 +1233,32 @@ function cmuxSend(req, res) {
     const wants = Object.prototype.hasOwnProperty.call(b, 'expect_seq');
     if (wants && !Number.isFinite(b.expect_seq)) return send(res, 400, { error: 'bad_json' });
     const text = typeof b.text === 'string' ? b.text : '';
+    // D133: dedupe by sendId BEFORE the queue, so a retry never queues a second typing.
+    let sidKey = null;
+    let settle = null;
+    if (b.sendId != null) {
+      if (typeof b.sendId !== 'string' || !SEND_ID_RE.test(b.sendId)) return send(res, 400, { error: 'bad_send_id' });
+      sidKey = surface.toLowerCase() + '\u0000' + b.sendId;
+      pruneSendSeen();
+      const hit = SEND_SEEN.get(sidKey);
+      if (hit) return send(res, hit.code, dupBody(hit.body));
+      const pending = SEND_INFLIGHT.get(sidKey);
+      if (pending) return pending.then((r) => send(res, r.code, dupBody(r.body)));
+      SEND_INFLIGHT.set(sidKey, new Promise((r) => { settle = r; }));
+    }
     let replied = false;
-    const answer = (code, body) => { if (replied) return; replied = true; send(res, code, body); };
+    const answer = (code, body) => {
+      if (replied) return; replied = true;
+      if (sidKey) {
+        SEND_INFLIGHT.delete(sidKey);
+        if (!(code >= 400 && code < 500) && !(body && SEND_FORGET.has(body.error))) {
+          SEND_SEEN.set(sidKey, { at: Date.now(), code, body });
+          pruneSendSeen();
+        }
+        settle({ code, body });
+      }
+      send(res, code, body);
+    };
     serializeSend(surface, async () => {
       // A tmux-only session (p41: a detached tmux worker no cmux pane shows) is typed into with tmux.
       const tgt = tmuxCli ? null : await sessionRoutes.tmuxTarget(surface);
@@ -2662,7 +2706,12 @@ function dispatchCmux(req, res, u) {
 
 const server = http.createServer((req, res) => {
   if (req.url === '/healthz') return graceful.health(res);
-  if (req.url && req.url.startsWith('/cmux/')) return handleCmux(req, res);
+  if (req.url && req.url.startsWith('/cmux/')) {
+    // p41 D133: capability flag. The server queues + retries /cmux/send ONLY for a bridge that
+    // advertises sendId dedupe, so a new server relaying to an old bridge never double-types.
+    res.setHeader('x-cmux-send-idem', '1');
+    return handleCmux(req, res);
+  }
   return send(res, 404, { error: 'not_found' });
 });
 // p41 A18: SIGTERM -> `event: restarting` on every open SSE stream, short drain, exit.
