@@ -50,6 +50,10 @@ const TARGET_MAX = 300;
 const POLL_MS = 1000;
 const IMAGE_MARK = Buffer.from('"type":"image"');
 const NL = 10;
+// D130: the names Claude Code's /color writes as agent-color.agentColor. Anything else (a reset,
+// 'default', a future name) means no color.
+const SESSION_COLORS = new Set(['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan']);
+const sessionColor = (c) => (typeof c === 'string' && SESSION_COLORS.has(c) ? c : '');
 
 // A Claude Code sub-agent id (A10): `a` + hex, or a named teammate `a<name>-<16 hex>`. Never `.`, `/`, `\\`.
 // The one definition: sessions/subagents.js and lib/sessions-proxy.js use this.
@@ -149,6 +153,7 @@ class Normaliser {
     this.group = null;
     this.rel = 0;
     this.title = '';
+    this.color = null;       // D130: null = no agent-color record seen; '' = reset/unknown name
     this.lastTs = 0;
     this.queuedText = null;  // D55: the queued message just shown, until anything else is shown
     this.peers = new Set();  // D60: sender + body of every peer message shown
@@ -184,6 +189,10 @@ class Normaliser {
     const changed = [];
     if (rec.type === 'custom-title') {
       if (typeof rec.customTitle === 'string') this.title = rec.customTitle;
+      return changed;
+    }
+    if (rec.type === 'agent-color') {
+      this.color = sessionColor(rec.agentColor);
       return changed;
     }
     if (rec.isSidechain && !this.sidechain) return changed;
@@ -339,7 +348,7 @@ function parseLines(buf, base) {
       try {
         const rec = JSON.parse(buf.toString('utf8', s, e));
         if (rec && (rec.type === 'user' || rec.type === 'assistant' || rec.type === 'custom-title' ||
-          (rec.type === 'attachment' && (isQueuedHuman(rec.attachment) || peerOf(rec))))) entries.push({ off: base + s, rec });
+          rec.type === 'agent-color' || (rec.type === 'attachment' && (isQueuedHuman(rec.attachment) || peerOf(rec))))) entries.push({ off: base + s, rec });
       } catch { /* half-written or foreign line */ }
     }
     s = e + 1;
@@ -475,13 +484,18 @@ async function uploadRefs(p, opts = {}) {
   }
 }
 
-// The last custom-title in the first chunk: used when the pages read from the end held none.
-async function headTitle(h, size, chunkSize) {
+// The last custom-title and agent-color in the first chunk: used when the pages read from the end
+// held none. color is null when the chunk holds no agent-color record.
+async function headMeta(h, size, chunkSize) {
   const buf = await readAt(h, 0, Math.min(size, chunkSize));
   const end = buf.length < size ? buf.lastIndexOf(NL) + 1 : buf.length;
   let title = '';
-  for (const { rec } of parseLines(buf.subarray(0, end), 0)) if (rec.type === 'custom-title' && typeof rec.customTitle === 'string') title = rec.customTitle;
-  return title;
+  let color = null;
+  for (const { rec } of parseLines(buf.subarray(0, end), 0)) {
+    if (rec.type === 'custom-title' && typeof rec.customTitle === 'string') title = rec.customTitle;
+    else if (rec.type === 'agent-color') color = sessionColor(rec.agentColor);
+  }
+  return { title, color };
 }
 
 // The record a cursor points at, read alone: it must start a line and must hold the cursor's message.
@@ -539,9 +553,17 @@ async function readThread(p, opts = {}) {
       for (const m of messages) if (m.kind === 'attachment') norm.numberAttachment(m, base, sessionId);
     }
     let title = norm.title;
-    if (!title && !finished) title = await headTitle(h, size, chunkSize);
+    let color = norm.color;
+    if ((!title || color == null) && !finished) {
+      const head = await headMeta(h, size, chunkSize);
+      if (!title) title = head.title;
+      if (color == null) color = head.color;
+    }
     const cursor = hasOlder ? encodeCursor(messages[0].id, norm.offs.get(messages[0].id)) : null;
-    return withEnd({ title, messages, cursor }, br, size);
+    const thread = withEnd({ title, messages, cursor }, br, size);
+    // D130: the session's /color name (allowed names only); not part of the thread JSON reply.
+    Object.defineProperty(thread, 'color', { value: color || null, enumerable: false });
+    return thread;
   } finally {
     await h.close();
   }

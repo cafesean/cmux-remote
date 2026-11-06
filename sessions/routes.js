@@ -268,6 +268,7 @@ function createSessionRoutes(deps) {
     const o2 = await safeOpen(join.path);
     const cu = o2 ? await contextUsage(join.path, { fs: shim(o2.fh) }) : null;
     s.title = titleOf(thread && thread.title, false);
+    if (thread && thread.color) s.color = thread.color;   // D130: Claude Code /color; omitted when none
     const lastMsgs = thread ? thread.messages : [];
     const tail = lastMsgs[lastMsgs.length - 1];
     const running = tail && tail.kind === 'tools' ? (tail.items || []).filter((t) => t.status === 'running').pop() : null;
