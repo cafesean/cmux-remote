@@ -36,7 +36,6 @@ process.stdin.on('end', () => {
   fs.appendFileSync(D + '/osa-stdin.log', s + '\n<<END>>\n');
   if (fs.existsSync(D + '/hang-osa')) return setTimeout(() => process.stdout.write('ok\n'), 6000);   // D102: slower than the timeout
   if (s.includes('canCapture')) return process.stdout.write(JSON.stringify({ displays: [{ index: 1, x: 0, y: 0, w: 1512, h: 982, scale: 2 }], canCapture: true, canControl: true }) + '\n');
-  if (fs.existsSync(D + '/secure-input') && /"op":"(type|key)"/.test(s)) return process.stdout.write('secure\n');   // D104
   process.stdout.write(fs.existsSync(D + '/deny-ax') ? 'noax\n' : 'ok\n');
 });
 `);
@@ -215,15 +214,13 @@ test('D103 shot wakes the display (caffeinate -u -t 30), at most once per 15 s; 
   assert.equal((await get(off, '/cmux/screen/shot')).status, 403);
 });
 
-test('D104 Secure Input (locked Mac): type/key -> 409 secure_input with plain words; tap still works', async () => {
-  await pause(1100);
-  fs.writeFileSync(path.join(dir, 'secure-input'), '');
-  try {
-    for (const [op, body] of [['type', { text: 'hello' }], ['key', { key: 'esc' }]]) {
-      const r = await post(on, '/cmux/screen/' + op, body);
-      assert.equal(r.status, 409, r.text); assert.equal(r.json.error, 'secure_input'); assert.match(r.json.message, /locked/);
-    }
-    const t = await post(on, '/cmux/screen/tap', { fx: 0.5, fy: 0.5 });
-    assert.equal(t.status, 200, t.text);
-  } finally { fs.rmSync(path.join(dir, 'secure-input'), { force: true }); }
+test('D106 Secure Input typing: ASCII -> real US keycodes (+shift), other chars unicode; no 409 gate', () => {
+  const { JXA_INPUT } = require('../lib/mac-screen');
+  assert.ok(!/'secure'/.test(JXA_INPUT), 'no secure_input refusal: lock-screen keycodes reach the field (probe 2026-11-06)');
+  assert.match(JXA_INPUT, /if\(!\$\.IsSecureEventInputEnabled\(\)\)return typeUni/); assert.match(JXA_INPUT, /length>100\)return.toolong/);
+  const src = JXA_INPUT.replace(/ObjC\.import\([^)]*\);/g, '');
+  const kc = new Function('$', 'delay', 'post', src + ';return kc;')({}, () => {}, () => {});
+  const want = { a: [0, false], A: [0, true], z: [6, false], '1': [18, false], '!': [18, true], '\\': [42, false], '|': [42, true], '`': [50, false], '~': [50, true], '"': [39, true], ' ': [49, false], '?': [44, true] };
+  for (const [ch, [c, sh]] of Object.entries(want)) assert.deepEqual(kc(ch), { c, s: sh }, ch);
+  assert.equal(kc('é'), null);
 });
