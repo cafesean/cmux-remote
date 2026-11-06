@@ -292,6 +292,10 @@ async function relay(res, upstreamPromise, opt = {}) {
   }
 }
 
+// D121: remembered sendIds for /api/cmux/send (persisted next to push.json; SEND_IDS_FILE overrides).
+const sendIdem = require('./lib/send-idem');
+const sendIds = sendIdem.createSendIdem();
+
 const readBody = require('./lib/read-body').createReadBody({ ensureMachine, sendJson });
 
 // ---- download tickets -------------------------------------------------------
@@ -770,10 +774,22 @@ async function handleApi(req, res, u) {
       if (Object.prototype.hasOwnProperty.call(b, 'expect_seq')) {
         return sendJson(res, 400, { error: 'expect_seq_unsupported' });
       }
-      relay(res, bridge(m, '/cmux/send', {
+      const send = () => bridge(m, '/cmux/send', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ surface: b.surface, text: b.text, submit: b.submit }),
-      }), { restarting: true });
+      });
+      // D121: a sendId makes the send idempotent (lib/send-idem.js): a retry of a send the bridge
+      // already took answers the first result and types nothing. No sendId = the old behaviour.
+      if (b.sendId == null) return relay(res, send(), { restarting: true });
+      if (!sendIdem.validId(b.sendId)) return sendJson(res, 400, { error: 'bad_send_id' });
+      const once = sendIds.run(sendIdem.idemId(m.id, String(b.surface), b.sendId), async () => {
+        const r = await send();
+        return { status: r.status, body: await r.json().catch(() => ({ error: 'bad_upstream' })) };
+      });
+      relay(res, once.then((r) => ({
+        status: r.status,
+        json: async () => (r.duplicate && r.body && typeof r.body === 'object' ? { ...r.body, duplicate: true } : r.body),
+      })), { restarting: true });
     });
   }
   // p41 A14: answer a Session.choice atomically (the bridge re-reads and refuses a stale pick).
