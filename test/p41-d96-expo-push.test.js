@@ -113,3 +113,22 @@ test('route: POST/DELETE /api/push/register needs the server credential', async 
   const del = await call(s.base, 'DELETE', '/api/push/register', { body: { installationId: 'inst-1' }, token: 'test-token-d96' });
   assert.deepStrictEqual(del.json, { ok: true, devices: 0 });
 });
+
+test('D120: only NEEDS YOU pushes; a finished turn stays silent unless pushDone', async () => {
+  for (const pushDone of [false, true]) {
+    const file = tmpFile();
+    let list = [{ id: 'old', title: 'Claude Code', is_read: false, surface_id: 'S1' }];
+    const bridge = async () => ({ ok: true, json: async () => ({ notifications: list }) });
+    const { posts, fetchImpl } = fakeExpo();
+    const a = createAlerts({ machines: [{ id: 'default', label: 'Mac' }], bridge, file, pollMs: 1e9, log: quiet, fetchImpl, pushDone });
+    a.registerExpo({ token: tok(1), installationId: 'i1' });
+    await a.tick();
+    list = [...list,
+      { id: 'd', title: 'Completed in /repo', body: 'turn done', is_read: false, surface_id: 'S3' },
+      { id: 'n', title: '⛔ NEEDS YOU — m-x', body: 'Pick 1', is_read: false, surface_id: 'S4' }];
+    await a.tick();
+    a.stop();
+    const surfaces = posts.map((p) => p[0].data.surface).sort();
+    assert.deepStrictEqual(surfaces, pushDone ? ['S3', 'S4'] : ['S4']);
+  }
+});
