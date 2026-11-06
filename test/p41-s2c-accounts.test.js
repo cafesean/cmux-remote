@@ -234,6 +234,17 @@ test('bridge: setup with no "Claude accounts" workspace -> new-workspace --name,
   closeSurface(r.json.surface);
 });
 
+test('D128 bridge: paste -> setup pane runs the bin with --paste (token read hidden in the pane, never in the request)', async () => {
+  await new Promise((res) => setTimeout(res, 1100));   // tree caches
+  const ok = await call('POST', '/cmux/accounts/setup', { name: 'acme', replace: true, paste: true });
+  assert.equal(ok.status, 200, ok.text);
+  const ns = lastOf('new-surface');
+  assert.equal(ns[ns.length - 1], `'${BIN()}/hypermux-account-setup' acme --replace --paste`);
+  closeSurface(ok.json.surface);
+  const bad = await call('POST', '/cmux/accounts/setup', { name: 'acme', replace: true, paste: 'yes' });
+  assert.equal(bad.status, 400); assert.deepEqual(bad.json, { error: 'bad_paste' });
+});
+
 test('bridge: existing name -> 409 exists; replace -> new-surface into the existing private workspace', async () => {
   await new Promise((res) => setTimeout(res, 1100));   // tree caches
   const r = await call('POST', '/cmux/accounts/setup', { name: 'acme' });
