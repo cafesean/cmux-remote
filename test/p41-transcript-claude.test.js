@@ -105,6 +105,21 @@ test('title from last custom-title', async () => {
   assert.strictEqual((await readThread(p)).title, 'second');
 });
 
+test('D130: color from last agent-color record; unknown name -> none; omitted from JSON', async () => {
+  const one = file('color1', [{ type: 'agent-color', agentColor: 'yellow', sessionId: 's' }, user(1, 'a')]);
+  const t1 = await readThread(one);
+  assert.strictEqual(t1.color, 'yellow');
+  assert.ok(!('color' in JSON.parse(JSON.stringify(t1))));
+  const later = file('color2', [
+    { type: 'agent-color', agentColor: 'yellow' }, user(1, 'a'),
+    { type: 'agent-color', agentColor: 'blue' }, asst(2, 'b'),
+  ]);
+  assert.strictEqual((await readThread(later)).color, 'blue');
+  const unknown = file('color3', [{ type: 'agent-color', agentColor: 'blue' }, user(1, 'a'), { type: 'agent-color', agentColor: 'chartreuse' }]);
+  assert.strictEqual((await readThread(unknown)).color, null);
+  assert.strictEqual((await readThread(file('color4', [user(1, 'a')]))).color, null);
+});
+
 test('AskUserQuestion becomes question with options', async () => {
   const p = file('ask', [asst(1, [use('q', 'AskUserQuestion', { questions: [
     { header: 'Cursor', question: 'How to page?', multiSelect: true,
@@ -290,6 +305,7 @@ test('pages backwards with cursor and never reads whole file (60 MB, bytes read 
   const fd = fs.openSync(p, 'w');
   const filler = 'x'.repeat(2000);
   fs.writeSync(fd, JSON.stringify({ type: 'custom-title', customTitle: 'Big one' }) + '\n');
+  fs.writeSync(fd, JSON.stringify({ type: 'agent-color', agentColor: 'purple' }) + '\n');
   let size = 0;
   let n = 0;
   while (size < 60 * 1024 * 1024) {
@@ -315,6 +331,7 @@ test('pages backwards with cursor and never reads whole file (60 MB, bytes read 
   const page = await readThread(p, { fs: counting });
   assert.strictEqual(page.messages.length, 80);
   assert.strictEqual(page.title, 'Big one');
+  assert.strictEqual(page.color, 'purple');   // D130: head-chunk fallback
   assert.ok(page.cursor);
   assert.ok(bytes < 2 * 1024 * 1024, `read ${bytes} bytes`);
   assert.match(page.messages[79].text, new RegExp(`^(question|answer) ${n} `));
