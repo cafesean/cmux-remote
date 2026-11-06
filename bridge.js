@@ -1712,7 +1712,7 @@ function cmuxChromePrompt(req, res) {
 // basename with anything exotic stripped, a size cap, and no execute bit. It is reachable only with
 // the bridge secret, i.e. only through the token-gated server.
 const UPLOAD_DIR = require('./lib/hm-home').uploadDir();   // p62 S1: UPLOAD_DIR, else $HYPERMUX_HOME/uploads, else ~/Downloads/cmux-remote
-const UPLOAD_MAX_BYTES = Number(process.env.UPLOAD_MAX_BYTES || 32 * 1024 * 1024);
+const UPLOAD_MAX_BYTES = require('./lib/upload-limits').uploadMaxBytes();   // p41 D116: 512 MB default (phone videos)
 function safeName(raw) {
   let n = String(raw || '').split(/[\\/]/).pop() || '';        // basename: no traversal, no directories
   // control chars out, then an allow-list: a leading dot would make it hidden, and nothing a
