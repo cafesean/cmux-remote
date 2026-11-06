@@ -188,15 +188,28 @@ const sessionsProxy = require('./lib/sessions-proxy').createSessionsProxy({ mach
 // D52: ONE retry when the connect itself was refused (no byte reached the bridge, so no double send;
 // a bridge mid-restart looks exactly like this). Any other failure is not retried. A failure carries
 // err.relay = { machine, path, cause, ms, attempts } for relay()'s log line and status choice.
+// p41 D133: machines whose bridge advertised sendId dedupe (`x-cmux-send-idem: 1`, set on every
+// /cmux/* reply). Per machine, in memory, refreshed on every reply (a downgraded bridge drops out).
+// Only these get the send queue + retries; any other machine keeps the one-shot relay, so deploying
+// the server before a bridge (max <-> mini) can never type a retried send twice.
+const sendIdemMachines = new Set();
+function noteSendIdem(m, r) {
+  try {
+    const v = r && r.headers && typeof r.headers.get === 'function' ? r.headers.get('x-cmux-send-idem') : null;
+    if (v === '1') sendIdemMachines.add(m.id); else sendIdemMachines.delete(m.id);
+  } catch (_) {}
+}
 async function bridgeOnce(m, pathAndQuery, opt) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opt.timeout || 15000);
   try {
-    return await upstream(m, pathAndQuery, {
+    const r = await upstream(m, pathAndQuery, {
       ...opt,
       headers: { 'x-bridge-secret': m.secret, ...accessHeaders(m), ...(opt.headers || {}) },
       signal: ctrl.signal,
     });
+    noteSendIdem(m, r);
+    return r;
   } finally { clearTimeout(timer); }
 }
 async function bridge(m, pathAndQuery, opt = {}) {
@@ -809,13 +822,24 @@ async function handleApi(req, res, u) {
         return sendJson(res, 400, { error: 'expect_seq_unsupported' });
       }
       const send = () => bridge(m, '/cmux/send', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
+        method: 'POST', headers: { 'content-type': 'application/json' }, timeout: SEND_RELAY_TIMEOUT_MS,   // 15 s (as before)
         body: JSON.stringify({ surface: b.surface, text: b.text, submit: b.submit }),
       });
       // D121: a sendId makes the send idempotent (lib/send-idem.js): a retry of a send the bridge
       // already took answers the first result and types nothing. No sendId = the old behaviour.
       if (b.sendId == null) return relay(res, send(), { restarting: true });
       if (!sendIdem.validId(b.sendId)) return sendJson(res, 400, { error: 'bad_send_id' });
+      if (!sendIdemMachines.has(m.id)) {
+        // D133: bridge not known to dedupe by sendId -> D121 one-shot (no queue, no 202, no retry).
+        const once = sendIds.run(sendIdem.idemId(m.id, String(b.surface), b.sendId), async () => {
+          const r = await send();
+          return { status: r.status, body: await r.json().catch(() => ({ error: 'bad_upstream' })) };
+        });
+        return relay(res, once.then((r) => ({
+          status: r.status,
+          json: async () => (r.duplicate && r.body && typeof r.body === 'object' ? { ...r.body, duplicate: true } : r.body),
+        })), { restarting: true });
+      }
       // D133: through the per-surface queue. The first attempt answers like before (200 / duplicate /
       // bridge error); a transient failure -> 202 queued and the queue keeps retrying.
       const once = sendQueue.submit({ machine: m.id, target: m, surface: String(b.surface), sendId: b.sendId,

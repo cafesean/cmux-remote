@@ -106,10 +106,11 @@ test('D133 queue: more than 20 per surface -> full (429); a repeat of a queued i
 
 // ---- route: real server.js child, stub bridge -------------------------------------------------
 
-function stubBridge(plan) {
+function stubBridge(plan, { idem = true } = {}) {
   const seen = [];
   let n = 0;
   const srv = http.createServer((req, res) => {
+    if (idem) res.setHeader('x-cmux-send-idem', '1');   // the capability a D133 bridge advertises
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
@@ -135,6 +136,8 @@ const statusOf = async (base, id) => {
   const r = await fetch(`${base}/api/cmux/send/status?machine=default&sendId=${id}`);
   return { status: r.status, body: await r.json() };
 };
+// Any relayed reply teaches the server the bridge's capability (here: the tree route, 404 from the stub).
+const learn = (base) => fetch(`${base}/api/cmux/tree?machine=default`).then((r) => r.text());
 const tmpFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'd133-')), 'send-ids.json');
 
 test('D133 route: timeout -> 202 queued -> retried with the same sendId -> status sent; unknown -> 404', async (t) => {
@@ -144,6 +147,7 @@ test('D133 route: timeout -> 202 queued -> retried with the same sendId -> statu
   const srv = await bootServer({ env });
   t.after(async () => { await srv.stop(); await up.close(); });
   const id = 'dddddddd-1333-4333-8333-333333333333';
+  await learn(srv.base);
   const a = await post(srv.base, { surface: 's1', text: 'hi', submit: true, sendId: id });
   assert.equal(a.status, 202);
   assert.deepEqual(a.body, { queued: true, sendId: id });
@@ -173,11 +177,37 @@ test('D133 route: a bridge write-phase 502 is passed through unchanged (not queu
   const env = { CMUX_MACHINE_URL: up.base, CMUX_MACHINE_SECRET: 'd133-secret', PUSH_ENABLED: '0', SEND_IDS_FILE: tmpFile(), SEND_QUEUE_BACKOFF_MS: '100' };
   const srv = await bootServer({ env });
   t.after(async () => { await srv.stop(); await up.close(); });
+  await learn(srv.base);
   const r = await post(srv.base, { surface: 's1', text: 'hi', submit: true, sendId: 'ffffffff-1333-4333-8333-333333333333' });
   assert.equal(r.status, 502);
   assert.equal(r.body.error, 'text_command_unconfirmed');
   await new Promise((res) => setTimeout(res, 300));
   assert.equal(up.seen.length, 1);
+});
+
+test('D133 route: a bridge WITHOUT x-cmux-send-idem gets no queue and no retry (old timeout error)', async (t) => {
+  const up = await stubBridge(() => 'hang', { idem: false });
+  const env = { CMUX_MACHINE_URL: up.base, CMUX_MACHINE_SECRET: 'd133-secret', PUSH_ENABLED: '0', SEND_IDS_FILE: tmpFile(),
+    SEND_RELAY_TIMEOUT_MS: '300', SEND_QUEUE_BACKOFF_MS: '100' };
+  const srv = await bootServer({ env });
+  t.after(async () => { await srv.stop(); await up.close(); });
+  await learn(srv.base);
+  const id = '12121212-1333-4333-8333-333333333333';
+  const r = await post(srv.base, { surface: 's1', text: 'hi', submit: true, sendId: id });
+  assert.equal(r.status, 502);
+  assert.equal(r.body.error, 'bridge_unreachable');
+  await new Promise((res) => setTimeout(res, 600));   // room for a 100 ms-backoff retry to show
+  assert.equal(up.seen.length, 1, 'no retry');
+  assert.ok(!('sendId' in up.seen[0]), 'sendId not forwarded to an old bridge');
+  assert.equal((await statusOf(srv.base, id)).status, 404);
+});
+
+test('D133 bridge: every /cmux/* reply advertises x-cmux-send-idem: 1', async (t) => {
+  const br = await bootBridge({});
+  t.after(() => br.stop());
+  const r = await fetch(`${br.base}/cmux/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' });
+  assert.equal(r.headers.get('x-cmux-send-idem'), '1');
+  await r.text();
 });
 
 // ---- bridge: real bridge.js child, fake cmux --------------------------------------------------

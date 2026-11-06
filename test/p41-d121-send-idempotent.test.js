@@ -125,8 +125,8 @@ test('D121 route: the same sendId is typed once, also after a server restart', a
   assert.equal((await post(srv.base, { ...msg, sendId: 'bbbbbbbb-1111-4222-8333-444444444444' })).status, 200);
   assert.equal((await post(srv.base, { surface: 's1', text: 'legacy', submit: true })).status, 200);
   assert.equal(up.sends.length, 3);
-  // D133: the sendId IS forwarded (the bridge dedupes a retry by it); the no-id path sends none.
-  assert.deepEqual(up.sends.map((s) => s.sendId), [msg.sendId, 'bbbbbbbb-1111-4222-8333-444444444444', undefined]);
+  // D133: this stub bridge does not advertise x-cmux-send-idem -> one-shot path, sendId not forwarded.
+  assert.ok(up.sends.every((s) => !('sendId' in s)), 'sendId is not forwarded to a bridge without dedupe');
 
   assert.equal((await post(srv.base, { ...msg, sendId: 'bad id' })).status, 400);
   assert.equal(up.sends.length, 3);

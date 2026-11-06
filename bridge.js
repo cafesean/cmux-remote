@@ -2706,7 +2706,12 @@ function dispatchCmux(req, res, u) {
 
 const server = http.createServer((req, res) => {
   if (req.url === '/healthz') return graceful.health(res);
-  if (req.url && req.url.startsWith('/cmux/')) return handleCmux(req, res);
+  if (req.url && req.url.startsWith('/cmux/')) {
+    // p41 D133: capability flag. The server queues + retries /cmux/send ONLY for a bridge that
+    // advertises sendId dedupe, so a new server relaying to an old bridge never double-types.
+    res.setHeader('x-cmux-send-idem', '1');
+    return handleCmux(req, res);
+  }
   return send(res, 404, { error: 'not_found' });
 });
 // p41 A18: SIGTERM -> `event: restarting` on every open SSE stream, short drain, exit.
