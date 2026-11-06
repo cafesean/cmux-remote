@@ -23,6 +23,9 @@ if (fs.existsSync(D + '/deny-cap')) { process.stderr.write('could not create ima
 fs.writeFileSync(out, Buffer.concat([Buffer.from([0xff,0xd8,0xff,0xe0]), Buffer.alloc(60, 9)]));
 try { fs.appendFileSync(D + '/mode.log', (fs.statSync(out).mode & 0o777).toString(8) + ' ' + (fs.statSync(require('path').dirname(out)).mode & 0o777).toString(8) + '\n'); } catch (_) {}
 `);
+const FAKE_CAFF = fake(String.raw`
+fs.appendFileSync(D + '/caff.log', JSON.stringify(process.argv.slice(2)) + '\n');
+`);
 const FAKE_SIPS = fake(String.raw`
 const a = process.argv.slice(2); const o = a[a.indexOf('--out') + 1]; fs.copyFileSync(a[a.indexOf('--out') - 1], o);
 `);
@@ -41,9 +44,9 @@ let off, on, dir;
 const rd = (f) => { try { return fs.readFileSync(path.join(dir, f), 'utf8'); } catch (_) { return ''; } };
 before(async () => {
   dir = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 'd97-')));
-  for (const [n, src] of [['screencapture', FAKE_CAP], ['sips', FAKE_SIPS], ['osascript', FAKE_OSA]]) fs.writeFileSync(path.join(dir, n), src, { mode: 0o755 });
+  for (const [n, src] of [['screencapture', FAKE_CAP], ['sips', FAKE_SIPS], ['osascript', FAKE_OSA], ['caffeinate', FAKE_CAFF]]) fs.writeFileSync(path.join(dir, n), src, { mode: 0o755 });
   const base = { FAKE_DIR: dir, NODE_ENV: 'test', COMPLETIONS_ENABLED: '0',
-    SCREEN_SCREENCAPTURE_BIN: path.join(dir, 'screencapture'), SCREEN_SIPS_BIN: path.join(dir, 'sips'), SCREEN_OSASCRIPT_BIN: path.join(dir, 'osascript'),
+    SCREEN_SCREENCAPTURE_BIN: path.join(dir, 'screencapture'), SCREEN_SIPS_BIN: path.join(dir, 'sips'), SCREEN_OSASCRIPT_BIN: path.join(dir, 'osascript'), SCREEN_CAFFEINATE_BIN: path.join(dir, 'caffeinate'),
     HYPERMUX_PRIVATE_FILE: path.join(dir, 'cfg', 'private-surfaces.json') };
   off = await bootBridge({ env: { ...base } });
   on = await bootBridge({ env: { ...base, SCREEN_VIEW: '1', SCREEN_CONTROL: '1', TMPDIR: dir, SCREEN_SHOT_MIN_MS: '60000', SCREEN_OSA_TIMEOUT_MS: '1500' } });
@@ -197,4 +200,16 @@ test('D102 osascript slower than the timeout: 502 cause timeout + one log line, 
   assert.equal(i.status, 200, i.text);
   const r = await post(on, '/cmux/screen/scroll', { dy: 1, shot: true });
   assert.equal(r.status, 200, r.text);
+});
+
+test('D103 shot wakes the display (caffeinate -u -t 30), at most once per 15 s; flags off -> never', async () => {
+  for (let k = 0; k < 20 && !rd('caff.log'); k++) await pause(50);   // detached child: give it a moment
+  const lines = rd('caff.log').trim().split('\n').filter(Boolean);
+  assert.equal(lines.length, 1, 'earlier shots asserted user activity exactly once');
+  assert.deepEqual(JSON.parse(lines[0]), ['-u', '-t', '30']);
+  const r = await get(on, '/cmux/screen/shot?display=3');
+  assert.equal(r.status, 200, r.text);
+  await pause(200);
+  assert.equal(rd('caff.log').trim().split('\n').filter(Boolean).length, 1, 'inside 15 s: no second caffeinate');
+  assert.equal((await get(off, '/cmux/screen/shot')).status, 403);
 });
