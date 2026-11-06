@@ -1304,7 +1304,8 @@ function pressKeyP(surface, key) {
   return new Promise((resolve) => {
     const viaCmux = () => cmux(['send-key', '--surface', surface, '--', key], (e) => resolve(e ? { ok: false, error: 'cmux_failed' } : { ok: true }));
     if (tmuxCli) return viaCmux();
-    sessionRoutes.tmuxTarget(surface).then(async (tgt) => {
+    // D140: keys for a tmux-hosted pane (attached or not) go to tmux directly — never split into a lone Esc.
+    sessionRoutes.tmuxKeyTarget(surface).then(async (tgt) => {
       if (!tgt) return viaCmux();
       resolve(await require('./sessions/procs').tmuxSend(tgt, { press: key }));
     }).catch(() => resolve({ ok: false, error: 'cmux_failed' }));
@@ -1359,7 +1360,7 @@ function cmuxKey(req, res) {
     if (!CMUX_KEYS.has(key)) return send(res, 400, { error: 'bad_key' });
     const viaCmux = () => cmux(['send-key', '--surface', surface, '--', key], (e) => (e ? send(res, 502, { error: 'cmux_failed' }) : send(res, 200, { ok: true })));
     if (tmuxCli) return viaCmux();
-    sessionRoutes.tmuxTarget(surface).then(async (tgt) => {
+    sessionRoutes.tmuxKeyTarget(surface).then(async (tgt) => {   // D140: attached tmux panes too
       if (!tgt) return viaCmux();
       const r = await require('./sessions/procs').tmuxSend(tgt, { press: key });
       send(res, r.ok ? 200 : (r.error === 'bad_key' ? 400 : 502), r.ok ? { ok: true } : { error: r.error });
