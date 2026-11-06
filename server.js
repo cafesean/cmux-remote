@@ -265,6 +265,13 @@ if (process.platform === 'darwin' && process.env.NODE_ENV !== 'test' && !/^(0|fa
   if (t.unref) t.unref();
 }
 
+// p41 D135: system dialogs on each Mac (bridge /cmux/screen/dialogs, SCREEN_VIEW-gated) -> one NEEDS-YOU
+// push per new dialog. Detect + alert only. MAC_DIALOGS_ENABLED=0 turns the poll off.
+if (alerts && process.env.NODE_ENV !== 'test' && !/^(0|false|no|off)$/i.test(String(process.env.MAC_DIALOGS_ENABLED || '').trim())) {
+  require('./lib/mac-dialogs').createDialogWatch({ machines: MACHINES, bridge, notify: (pl) => alerts.notify(pl),
+    active: () => alerts.count() + alerts.expoCount() > 0 }).start();
+}
+
 function sendJson(res, code, obj) {
   res.writeHead(code, {
     'content-type': 'application/json',
@@ -1019,7 +1026,7 @@ async function handleApi(req, res, u) {
   // open to anyone who reaches this server (tunnel included). Refuse, like the accounts routes.
   if (p.startsWith('/api/cmux/screen/') && !SERVER_TOKEN) return sendJson(res, 503, { error: 'not_secured' });
   // p41 D97: Mac screen — info + one frame (bridge gates on SCREEN_VIEW, rate-limits, size-caps).
-  if (req.method === 'GET' && (p === '/api/cmux/screen/info' || p === '/api/cmux/screen/shot')) {
+  if (req.method === 'GET' && (p === '/api/cmux/screen/info' || p === '/api/cmux/screen/shot' || p === '/api/cmux/screen/dialogs')) {   // D135: + dialogs
     const m = findMachine(u.searchParams.get('machine'));
     if (!m) return sendJson(res, 404, { error: 'no_machine' });
     const d = u.searchParams.get('display');
