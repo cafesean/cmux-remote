@@ -133,6 +133,8 @@ function cases() {
     '/api/cmux/layout-stream': [sse(`/api/cmux/layout-stream?workspace=${I.wsA}`)],
     '/api/cmux/panes-stream': [sse(`/api/cmux/panes-stream?surfaces=${I.sfA1},${I.sfA2}`)],
     '/api/cmux/send': [post('/api/cmux/send', { surface: I.sfA1, text: 'echo p19' }), post('/api/cmux/send', { surface: I.sfA1, text: 'x', expect_seq: 1 })],
+    // p41 D133: an unknown sendId (404) and a bad one (400); test/p41-d133-send-queue.test.js covers the rest.
+    '/api/cmux/send/status': [json('GET', '/api/cmux/send/status?machine=default&sendId=dddddddd-1333-4333-8333-333333333333'), json('GET', '/api/cmux/send/status?machine=default&sendId=bad')],
     '/api/cmux/key': [post('/api/cmux/key', { surface: I.sfA1, key: 'enter' })],
     '/api/cmux/choose': [post('/api/cmux/choose', { surface: I.sfA1, choiceId: '0000000000000000', index: 0, label: 'x' })],
     '/api/cmux/new-surface': [post('/api/cmux/new-surface', { workspace: I.wsA, pane: I.paneA1 })],
