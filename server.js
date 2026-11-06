@@ -893,7 +893,7 @@ async function handleApi(req, res, u) {
   if (req.method === 'POST' && p === '/api/cmux/upload') {
     const m = findMachine(u.searchParams.get('machine'));
     if (!m) return sendJson(res, 404, { error: 'no_machine' });
-    const cap = Number(process.env.UPLOAD_MAX_BYTES || 32 * 1024 * 1024);
+    const cap = require('./lib/upload-limits').uploadMaxBytes();   // p41 D116: 512 MB default
     const chunks = []; let size = 0, dead = false;
     req.on('data', (c) => {
       if (dead) return;
@@ -908,7 +908,7 @@ async function handleApi(req, res, u) {
         headers: { 'content-type': 'application/octet-stream',
           'x-file-name': String(req.headers['x-file-name'] || 'file') },
         body: Buffer.concat(chunks),
-        timeout: 60000,
+        timeout: require('./lib/upload-limits').uploadRelayTimeoutMs(size),   // p41 D116: a big video needs longer than 60 s
       }));
     });
     return;

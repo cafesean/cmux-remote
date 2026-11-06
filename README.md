@@ -78,7 +78,7 @@ machines, secrets, or tunnels is ever committed — the repo ships only placehol
   some Safari builds) are picked up too, and a paste carrying no files is left alone so typing still
   works. Names are reduced to a
   basename with control characters and shell syntax stripped, files are never overwritten, and the
-  size cap (`UPLOAD_MAX_BYTES`, 32 MB) is enforced twice — at the server before the tunnel and at the
+  size cap (`UPLOAD_MAX_BYTES`, 512 MB) is enforced twice — at the server before the tunnel and at the
   bridge. See the warning in `.env.example`: this directory is writable by anyone holding
   `SERVER_TOKEN`.
 - **A pane opens at the top.** The source terminal is far taller than a mirrored pane, so landing at
