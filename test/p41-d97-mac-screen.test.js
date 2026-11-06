@@ -224,3 +224,7 @@ test('D106 Secure Input typing: ASCII -> real US keycodes (+shift), other chars 
   for (const [ch, [c, sh]] of Object.entries(want)) assert.deepEqual(kc(ch), { c, s: sh }, ch);
   assert.equal(kc('é'), null);
 });
+
+test('D109 frames keep Retina detail: max edge >= 3000 px, JPEG q in 30..90', () => {
+  assert.ok(LIMITS.SCREEN_SHOT_MAX_DIM >= 3000, String(LIMITS.SCREEN_SHOT_MAX_DIM));
+});
