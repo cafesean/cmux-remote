@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# hypermux-account-setup <name> [--replace]
+# hypermux-account-setup <name> [--replace] [--also-on <label>] [--paste]
 # Add a named Claude account on this Mac: confirm here, run `claude setup-token`, keep the token off the
 # screen, store it in the login Keychain. The token never touches argv, files or output.
 NAME="${1:-}"; [ $# -gt 0 ] && shift
-REPLACE=""; ALSO=""
+REPLACE=""; ALSO=""; PASTE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --replace) REPLACE="--replace"; shift;;
+    --paste) PASTE=1; shift;;
     --also-on) [ $# -ge 2 ] || { echo "usage: --also-on <label>" >&2; exit 2; }
       ALSO="$2"; shift 2
       [[ "$ALSO" =~ ^[A-Za-z0-9\ ._-]{1,40}$ ]] || { echo "bad --also-on label" >&2; exit 2; };;
-    *) echo "usage: hypermux-account-setup <name> [--replace] [--also-on <label>]" >&2; exit 2;;
+    *) echo "usage: hypermux-account-setup <name> [--replace] [--also-on <label>] [--paste]" >&2; exit 2;;
   esac
 done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,4 +46,12 @@ if [ "$RC" -gt 128 ]; then echo; echo "cancelled (no answer in ${CONFIRM_T} s)";
 case "$ANS" in y|Y) ;; *) echo "cancelled"; exit 1;; esac
 
 unset BROWSER
+if [ -n "$PASTE" ]; then
+  # D128: a long-lived token the user already has — read hidden in this pane instead of `claude setup-token`
+  # (no browser). It reaches lib/account-setup.js only through the pty pipe, which never shows token lines.
+  # The prompt is printed HERE, not by the captured command: the capture holds back its last 32 bytes
+  # (token guard), so a prompt printed inside it would show cut off.
+  printf 'Paste your Claude token, then press Enter (nothing shows while you paste):\n'
+  export HYPERMUX_SETUP_CMD='["bash","-c","read -rs t; echo; printf \"Your OAuth token: %s\\n\" \"$t\""]'
+fi
 exec "$NODE" "$HERE/lib/account-setup.js" "$NAME" ${REPLACE:+"$REPLACE"}

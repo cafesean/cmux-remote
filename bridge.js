@@ -2448,6 +2448,10 @@ function cmuxAccounts(req, res, u, p) {
       const alsoOn = b.alsoOn == null || b.alsoOn === '' ? null : b.alsoOn;
       if (alsoOn !== null && (typeof alsoOn !== 'string' || !ACCOUNT_LABEL_RE.test(alsoOn))) return send(res, 400, { error: 'bad_label' });
       const replace = b.replace === true;
+      // D128 (Sean: "I have the long-lived token. We just need to store it"): paste mode — the pane asks for the
+      // token with a hidden read on the Mac; the token is never in this request, argv or any log.
+      if (b.paste != null && typeof b.paste !== 'boolean') return send(res, 400, { error: 'bad_paste' });
+      const paste = b.paste === true;
       guarded(name, async () => {
         if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
         if (!replace && await accountsLib.exists(name)) return send(res, 409, { error: 'exists' });
@@ -2457,6 +2461,7 @@ function cmuxAccounts(req, res, u, p) {
         let cmd = `${shq(ACCOUNT_BIN_DIR + '/hypermux-account-setup')} ${name}`;
         if (replace) cmd += ' --replace';
         if (alsoOn !== null) cmd += ` --also-on ${shq(alsoOn)}`;
+        if (paste) cmd += ' --paste';
         await accountOpen(res, cmd);
       }).catch(fail(502, 'accounts_failed'));
     }, ACCOUNT_BODY_MAX);
