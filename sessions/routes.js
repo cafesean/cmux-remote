@@ -283,6 +283,7 @@ function createSessionRoutes(deps) {
     const accountError = accountErrorOf(lastMsgs);
     if (accountError) s.accountError = accountError;
     if (cu && cu.model) s.model = cu.model;
+    if (cu && cu.at) s.modelAt = cu.at;   // D145: last model response (prompt-cache age); lastActivity stays file mtime
     if (st.contextPct !== undefined) s.contextPct = st.contextPct;
     s.subagents = await subagents.countSubagents(join.path, { home, now: d.now() });
     await addStatusLine(s, join, tab, d);
