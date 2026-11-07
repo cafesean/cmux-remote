@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { detectKind, foregroundCommand } = require('../sessions/detect.js');
+const { detectKind, foregroundCommand, EXITED } = require('../sessions/detect.js');
 
 test('browser surface is a browser whatever else is known', () => {
   assert.strictEqual(detectKind({ surfaceType: 'browser', foregroundCmd: 'claude' }), 'browser');
@@ -109,7 +109,33 @@ test('cmux: a SessionEnd means claude is gone', async () => {
     { ts: 2, sessionId: 's', event: 'Stop', surfaceId: 'U12' }, { ts: 3, sessionId: 's', event: 'SessionEnd', surfaceId: 'U12' }] });
   const s = { id: 'U12', ref: 'surface:12', tty: null };
   assert.strictEqual(await foregroundCommand(s, 'cmux', { ps, readEvents: live, now: () => 10 }), 'claude');
-  assert.strictEqual(await foregroundCommand(s, 'cmux', { ps, readEvents: ended, now: () => 10 }), null);
+  assert.strictEqual(await foregroundCommand(s, 'cmux', { ps, readEvents: ended, now: () => 10 }), EXITED);
+});
+
+// D146: exit claude in a pane -> the pane is a terminal again (the old transcript does not keep it a
+// chat); run claude again -> a chat again. Same surface, so the same session id, both ways.
+test('D146: SessionEnd -> terminal despite the old transcript; a new SessionStart -> claude again', async () => {
+  const claudeT = '/Users/u/.claude/projects/-x/abc.jsonl';
+  const ps = async () => { throw new Error('no ps'); };
+  const s = { id: 'U12', ref: 'surface:12', tty: null };
+  const kindAt = async (events) => detectKind({ surfaceType: 'terminal', transcriptPath: claudeT,
+    foregroundCmd: await foregroundCommand(s, 'cmux', { ps, readEvents: async () => ({ events }), agentFor: async () => null, now: () => 10 }) });
+  const live = [{ ts: 2, sessionId: 'a', event: 'Stop', surfaceId: 'U12' }];
+  const exited = [...live, { ts: 3, sessionId: 'a', event: 'SessionEnd', surfaceId: 'U12' }];
+  const again = [...exited, { ts: 4, sessionId: 'b', event: 'SessionStart', surfaceId: 'U12' }];
+  assert.strictEqual(await kindAt(live), 'claude');
+  assert.strictEqual(await kindAt(exited), 'terminal');
+  assert.strictEqual(await kindAt(again), 'claude');
+  // no event at all is still unknown: the transcript hint stands (unchanged behaviour)
+  assert.strictEqual(await kindAt([]), 'claude');
+});
+
+test('D146: a live agent from the process table beats an older SessionEnd', async () => {
+  const readEvents = async () => ({ events: [{ ts: 3, sessionId: 'a', event: 'SessionEnd', surfaceId: 'U12' }] });
+  const agentFor = async () => ({ kind: 'claude', pid: 9, args: 'node /opt/bin/claude' });
+  const fg = await foregroundCommand({ id: 'U12', tty: null }, 'cmux', { readEvents, agentFor, now: () => 10 });
+  assert.strictEqual(detectKind({ surfaceType: 'terminal', foregroundCmd: fg, transcriptPath: null }), 'claude');
+  assert.strictEqual(detectKind({ surfaceType: 'terminal', foregroundCmd: EXITED, transcriptPath: '/h/.codex/sessions/r.jsonl' }), 'terminal');
 });
 
 test('cmux: event older than 6h -> not claude', async () => {
@@ -136,7 +162,7 @@ test('cmux: follows readEvents pages (more:true then false) so the newest events
       : { events: [{ ts: 200, sessionId: 's', event: 'SessionEnd', surfaceId: 'U1' }], more: false };
   };
   const cmd = await foregroundCommand({ id: 'U1', tty: null }, 'cmux', { ps: async () => '', readEvents, now: () => 300 });
-  assert.strictEqual(cmd, null);                      // the SessionEnd on page 2 decides
+  assert.strictEqual(cmd, EXITED);                    // the SessionEnd on page 2 decides
   assert.strictEqual(calls.length, 2);
   assert.ok(calls[1] >= 100);
 });
