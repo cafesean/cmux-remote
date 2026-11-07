@@ -550,6 +550,7 @@ are marked no-store; the `*stream*` endpoints are long-lived SSE.
 | `POST /api/cmux/upload?machine=` | raw body, filename in `x-file-name` (percent-encoded) — writes the file under `UPLOAD_DIR/<date>/` and answers `{path,name,bytes}`. The only non-JSON POST in the API |
 | `POST /api/cmux/close-pane` | `{machine, workspace, pane}` — kill a pane and every tab in it. cmux has no close-pane either: a pane exists only while it holds surfaces, so this closes them all (list read from the live tree, not from the client) |
 | `POST /api/cmux/drop-surface` | `{machine, workspace, surface, pane, edge}` — the drag-to-arrange move. `edge: 'center'` drops the tab **into** the target pane; `left\|right\|up\|down` drops it as a new pane on that side. Emptying the source pane collapses it |
+| `POST /api/cmux/move-to-workspace` | `{machine, workspace, pane, target}` or `{machine, surface, target}` — move a whole pane (every tab, order kept) into workspace `target` as its own pane, split right of that workspace's focused (else last) pane. Never takes focus. 404 `no_such_workspace` / `no_such_pane`, 423 for a private pane or workspace |
 | `POST /api/cmux/split-off` | `{machine, surface, direction, workspace?}` — move an existing tab out into its own pane. **Fails on a single-tab pane** (`invalid_state`); the UI uses `drop-surface` instead |
 | `POST /api/cmux/focus-pane` | `{machine, pane, workspace?}` — focus a pane on the desktop |
 | `POST /api/cmux/focus-surface` | `{machine, surface}` — select a tab inside its pane |
