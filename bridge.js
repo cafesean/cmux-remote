@@ -2612,6 +2612,23 @@ function cmuxAccounts(req, res, u, p) {
   return send(res, 404, { error: 'not_found' });
 }
 
+// ---------- p41 D152 task file (opt-in HYPERMUX_TASKS_DIR; lib/tasks.js) ----------
+const tasksLib = require('./lib/tasks');
+const tasks = tasksLib.createTasks();
+function cmuxTasks(req, res, u, p) {
+  const done = (pr) => pr.then((r) => send(res, r.code, r.body), () => { if (!res.headersSent) send(res, 500, { error: 'tasks_failed' }); });
+  if (!tasks.enabled) return send(res, 404, { error: 'disabled' });
+  if (req.method === 'GET' && p === '/cmux/tasks') return done(tasks.read(u.searchParams.get('name') || ''));
+  if ((req.method === 'POST' || req.method === 'PATCH') && p === '/cmux/tasks/item') {
+    return cmuxReadBody(req, (b) => {
+      if (!b || typeof b !== 'object') return send(res, 400, { error: 'bad_json' });
+      if (req.method === 'POST') return done(tasks.add(b.name, b.text));
+      return done(tasks.patch(b.name, { id: b.id, done: b.done, text: b.text }));
+    }, tasksLib.LIMITS.bodyMax);
+  }
+  return send(res, 404, { error: 'not_found' });
+}
+
 // ---------- routing ---------------------------------------------------------
 function handleCmux(req, res) {
   if (SECRET && !safeEqual(req.headers['x-bridge-secret'], SECRET)) return send(res, 403, { error: 'forbidden' });
@@ -2798,6 +2815,7 @@ function dispatchCmux(req, res, u) {
 
   // ----- p41 S2c Claude accounts -----
   if (p === '/cmux/accounts' || p.startsWith('/cmux/accounts/')) return cmuxAccounts(req, res, u, p);
+  if (p === '/cmux/tasks' || p === '/cmux/tasks/item') return cmuxTasks(req, res, u, p);   // p41 D152
   return send(res, 404, { error: 'not_found' });
 }
 
