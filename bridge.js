@@ -1700,7 +1700,7 @@ async function movePane(res, b) {
   send(res, 200, { ok: true, moved, workspaces: workspaces || [], layout });
 }
 
-// POST /cmux/move-to-workspace { workspace, pane, target } — p41 D148: move a WHOLE pane (every tab,
+// POST /cmux/move-to-workspace { workspace, pane, target } | { surface, target } — p41 D148: move a WHOLE pane (every tab,
 // order + active tab kept) out of `workspace` into workspace `target`, as its own new pane split to the
 // RIGHT of the target's focused pane (else its last pane). The sidebar row menu's "Move to workspace".
 // Same two-step as move-pane above, with the target workspace on every call:
@@ -1720,13 +1720,24 @@ function cmuxMoveToWorkspace(req, res) {
   });
 }
 async function moveToWorkspace(res, b) {
-  const pane = String(b.pane || '');
-  if (!PANE_RE.test(pane)) return send(res, 400, { error: 'bad_pane' });
-  const workspace = String(b.workspace || ''), target = String(b.target || '');
-  if (!WORKSPACE_RE.test(workspace) || !WORKSPACE_RE.test(target)) return send(res, 400, { error: 'bad_workspace' });
+  // `surface` instead of pane + workspace: the pane holding that tab (the app's session rows know
+  // their surface, not their pane).
+  const surface = b.surface != null && b.surface !== '' ? String(b.surface) : '';
+  if (surface && !SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
+  let pane = String(b.pane || '');
+  if (!surface && !PANE_RE.test(pane)) return send(res, 400, { error: 'bad_pane' });
+  let workspace = String(b.workspace || '');
+  const target = String(b.target || '');
+  if ((!surface && !WORKSPACE_RE.test(workspace)) || !WORKSPACE_RE.test(target)) return send(res, 400, { error: 'bad_workspace' });
 
   const tree = await loadTree();
   if (!tree) return send(res, 502, { error: 'cmux_failed', detail: 'tree unavailable' });
+  if (surface) {
+    const hit = tree.flatMap((w) => (w.panes || []).map((pn) => ({ w, pn })))
+      .find(({ pn }) => (pn.tabs || []).includes(surface));
+    if (!hit) return send(res, 404, { error: 'no_such_pane' });
+    pane = hit.pn.id; workspace = hit.w.id;
+  }
   const wsOf = (ref) => tree.find((w) => w.id === ref || w.ref === ref);
   const from = wsOf(workspace), to = wsOf(target);
   if (!from || !to) return send(res, 404, { error: 'no_such_workspace' });

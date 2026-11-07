@@ -167,3 +167,15 @@ test('a later tab refused -> 502 names moved / remaining; no more calls', async 
   assert.equal(r.json.rolledBack, false);
   assert.equal(calls().length, 3);
 });
+
+test('{ surface, target }: resolves the pane holding the tab + its workspace', async () => {
+  const r = await post({ surface: B, target: WS2 });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.json.moved, [A, C, B]);
+  assert.equal(calls()[0][4], Q2);
+  fs.writeFileSync(log, '');
+  assert.equal((await post({ surface: 'ccccccc1-3333-4333-8333-333333333339', target: WS2 })).json.error, 'no_such_pane');
+  assert.equal((await post({ surface: 'nope', target: WS2 })).json.error, 'bad_surface');
+  assert.equal((await post({ surface: S1, target: WS2 })).status, 423);
+  assert.deepEqual(calls(), []);
+});
