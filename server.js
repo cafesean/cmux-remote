@@ -889,6 +889,17 @@ async function handleApi(req, res, u) {
     const st = sendQueue.get(m.id, id);
     return st ? sendJson(res, 200, st) : sendJson(res, 404, { error: 'unknown' });
   }
+  // p41 D161: cancel a queued send (the app's 'Queued · Edit'). Only the server's own queue; a send the
+  // bridge already typed cannot be taken back.
+  if (req.method === 'POST' && p === '/api/cmux/send/cancel') {
+    return readBody(req, (b) => {
+      if (!b) return sendJson(res, 400, { error: 'bad_json' });
+      const m = findMachine(b.machine);
+      if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      if (!sendIdem.validId(b.sendId)) return sendJson(res, 400, { error: 'bad_send_id' });
+      return sendJson(res, 200, { state: sendQueue.cancel(m.id, b.sendId) });
+    });
+  }
   // p41 A14: answer a Session.choice atomically (the bridge re-reads and refuses a stale pick).
   if (req.method === 'POST' && p === '/api/cmux/choose') {
     return readBody(req, (b) => {
