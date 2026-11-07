@@ -1728,7 +1728,11 @@ async function moveToWorkspace(res, b) {
   if (!surface && !PANE_RE.test(pane)) return send(res, 400, { error: 'bad_pane' });
   let workspace = String(b.workspace || '');
   const target = String(b.target || '');
-  if ((!surface && !WORKSPACE_RE.test(workspace)) || !WORKSPACE_RE.test(target)) return send(res, 400, { error: 'bad_workspace' });
+  // D148b: `newWorkspace: { name }` in place of `target` — move into a NEW workspace instead.
+  const fresh = b.newWorkspace != null && (b.target == null || b.target === '');
+  if (b.newWorkspace != null && !fresh) return send(res, 400, { error: 'bad_workspace', detail: 'target and newWorkspace are exclusive' });
+  if (fresh && (typeof b.newWorkspace !== 'object' || Array.isArray(b.newWorkspace))) return send(res, 400, { error: 'bad_name' });
+  if ((!surface && !WORKSPACE_RE.test(workspace)) || (!fresh && !WORKSPACE_RE.test(target))) return send(res, 400, { error: 'bad_workspace' });
 
   const tree = await loadTree();
   if (!tree) return send(res, 502, { error: 'cmux_failed', detail: 'tree unavailable' });
@@ -1739,6 +1743,7 @@ async function moveToWorkspace(res, b) {
     pane = hit.pn.id; workspace = hit.w.id;
   }
   const wsOf = (ref) => tree.find((w) => w.id === ref || w.ref === ref);
+  if (fresh) return moveToNewWorkspace(res, b, tree, wsOf(workspace), pane);
   const from = wsOf(workspace), to = wsOf(target);
   if (!from || !to) return send(res, 404, { error: 'no_such_workspace' });
   if (from.id === to.id) return send(res, 400, { error: 'bad_workspace', detail: 'workspace and target are the same workspace' });
@@ -1785,6 +1790,90 @@ async function moveToWorkspace(res, b) {
   }
   const [workspaces, layout] = await Promise.all([treePayload(), layoutPayload(into)]);
   send(res, 200, { ok: true, moved, workspace: into, workspaces: workspaces || [], layout });
+}
+
+// D148b — the `newWorkspace: { name }` form of move-to-workspace: move the WHOLE pane into a brand-new
+// workspace. `cmux new-workspace --name <name> --focus false` prints `OK workspace:N`; that workspace
+// starts with ONE pane holding one fresh terminal surface. Every tab of the source pane then
+// `move-surface`s into that pane (first: --pane <its pane>; the rest --after|--before a moved tab, order
+// + active tab kept), and finally the fresh empty terminal is closed (close-surface, scoped to the new
+// workspace, never with an empty --surface). Name: trimmed, control chars dropped, <= 60 chars,
+// default '<source title> 2'. Rollback: the FIRST move refused -> the new (still empty) workspace is
+// closed again, 502 rolledBack; a later tab refused -> 502 moved / remaining (the new workspace keeps
+// what already moved, like D148). 200 { ok, moved, workspace: { id, ref, title }, workspaces, layout }.
+const NEW_WS_NAME_MAX = 60;
+function newWorkspaceName(raw, fallback) {
+  const clean = (v) => String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
+  const name = clean(raw) || (clean(fallback) + ' 2').trim();
+  return Array.from(name).slice(0, NEW_WS_NAME_MAX).join('').trim();
+}
+async function moveToNewWorkspace(res, b, tree, from, pane) {
+  if (!from) return send(res, 404, { error: 'no_such_workspace' });
+  const src = (from.panes || []).find((pn) => pn.id === pane || pn.ref === pane);
+  if (!src || !(src.tabs || []).length) return send(res, 404, { error: 'no_such_pane' });
+  const name = newWorkspaceName(b.newWorkspace.name, from.title || 'Workspace');
+  if (!name || name.startsWith('-')) return send(res, 400, { error: 'bad_name' });
+  // the private workspace is recognised by its title: never mint a second one through this route
+  if (name === privateSurfaces.PRIVATE_WORKSPACE_TITLE) return send(res, 400, { error: 'bad_name', detail: 'reserved name' });
+
+  const tabs = src.tabs.slice();
+  const active = tabs.includes(src.selected) ? src.selected : null;
+  const order = tabs.filter((t) => t !== active).concat(active ? [active] : []);
+  const moved = [];
+  const run = (args) => new Promise((resolve) =>
+    cmux(args, (err, stdout, stderr) => resolve(err ? { err: String(stderr || err.message || 'failed') } : { out: String(stdout || '') }), 15000));
+  const call = async (args) => (await run(args)).err || null;
+  const fail = (detail, extra) => send(res, 502, Object.assign({
+    error: 'cmux_failed', detail: String(detail || '').slice(0, 400),
+    moved: moved.slice(), remaining: tabs.filter((t) => !moved.includes(t)),
+  }, extra || {}));
+  const placement = (sf, pool) => {
+    const i = tabs.indexOf(sf);
+    for (let j = i - 1; j >= 0; j--) if (pool.includes(tabs[j])) return ['--after', tabs[j]];
+    for (let j = i + 1; j < tabs.length; j++) if (pool.includes(tabs[j])) return ['--before', tabs[j]];
+    return null;
+  };
+
+  const before = new Set(tree.map((w) => w.id));
+  const made = await run(['new-workspace', '--name', name, '--focus', 'false']);
+  if (made.err) return fail(made.err);
+  const m = made.out.match(/\b(workspace:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i);
+  const after = await loadTree();
+  const ws = after && ((m && after.find((w) => w.id === m[1] || w.ref === m[1]))
+    || after.filter((w) => !before.has(w.id)).pop());
+  if (!ws) {
+    const gone = m && !(await call(['close-workspace', '--workspace', m[1]]));
+    return fail('new workspace not found in tree', { rolledBack: !!gone });
+  }
+  const dst = (ws.panes || []).slice().sort((x, y) => x.index - y.index)[0];
+  const blank = dst && (dst.tabs || [])[0] ? String(dst.tabs[0]) : '';
+  if (!dst) {
+    const gone = !(await call(['close-workspace', '--workspace', ws.id]));
+    return fail('new workspace has no pane', { rolledBack: gone });
+  }
+
+  const first = order[0];
+  let e = await call(['move-surface', '--surface', first, '--pane', dst.id, '--workspace', ws.id, '--focus', 'false']);
+  if (e) {
+    const gone = !(await call(['close-workspace', '--workspace', ws.id]));
+    return fail(e, { rolledBack: gone, ...(gone ? {} : { strayed: [ws.id] }) });
+  }
+  moved.push(first);
+  for (const sf of order.slice(1)) {
+    const at = placement(sf, moved);
+    e = await call(['move-surface', '--surface', sf, '--workspace', ws.id, ...at, '--focus', 'false']);
+    if (e) return fail(e, { rolledBack: false, workspace: { id: ws.id, ref: ws.ref, title: name } });
+    moved.push(sf);
+  }
+  // the terminal the new workspace was born with — never close-surface with an empty --surface
+  let leftover = null;
+  if (blank && !tabs.includes(blank)) {
+    const ce = await call(['close-surface', '--surface', blank, '--workspace', ws.id]);
+    if (ce) leftover = blank;
+  }
+  const [workspaces, layout] = await Promise.all([treePayload(), layoutPayload(ws.id)]);
+  send(res, 200, Object.assign({ ok: true, moved, workspace: { id: ws.id, ref: ws.ref, title: name }, workspaces: workspaces || [], layout },
+    leftover ? { leftover } : {}));
 }
 
 // POST /cmux/reorder-tab { workspace, surface, target, place } — p23: drag a tab left/right in the
