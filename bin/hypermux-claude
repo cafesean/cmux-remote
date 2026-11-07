@@ -62,6 +62,14 @@ if [ "$NAME" != a ]; then
   # e. hand over
   export CLAUDE_CODE_OAUTH_TOKEN="$T"; unset T
   export COS_CLAUDE_ACCOUNT_ID="$NAME"
+  # f. D154: record which session runs on this account (exec keeps $$). A plain launch picks its own
+  #    session id so the transcript is known even after it ends. Best effort: never blocks the launch.
+  if [ $# -eq 0 ] && SID=$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z') && [[ "$SID" =~ ^[0-9a-f-]{36}$ ]]; then
+    set -- --session-id "$SID"
+  else
+    SID=
+  fi
+  "$NODE" "$HERE/lib/accounts-launches.js" add "$NAME" "$$" "$PWD" ${SID:+"$SID"} >/dev/null 2>&1 || true
 fi
 export CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
 
