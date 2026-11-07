@@ -463,6 +463,14 @@ function accountCaller(req, u) {
   for (const c of slots) { const dev = c && pairing.verifyKey(c); if (dev) return callerKeyOf('device:' + dev.id); }
   return null;
 }
+// D144: the request reached us over TLS — a TLS socket, or the cloudflared tunnel (TLS at the edge,
+// forwarded to loopback with x-forwarded-proto: https). A LAN http client gets tls_required.
+function tlsRequest(req) {
+  if (req.socket && req.socket.encrypted) return true;
+  const ra = (req.socket && req.socket.remoteAddress) || '';
+  const loop = ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1' || ra === '' /* unix socket */;
+  return loop && String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+}
 function readRaw(req, cap, cb) {
   const chunks = []; let size = 0, over = false;
   req.on('data', (c) => { if (over) return; size += c.length; if (size > cap) { over = true; return; } chunks.push(c); });
@@ -484,6 +492,18 @@ function accountsRelay(req, res, u, p) {
       if (!buf) return sendJson(res, 413, { error: 'too_large' });
       if (!accountLimits.mutation(caller, m.id)) return sendJson(res, 429, { error: 'rate_limited' });
       relay(res, bridge(m, '/cmux/accounts/setup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: buf, timeout: 30000 }));
+    });
+  }
+  // D144 (HMX-59): one pasted token stored on this machine (the app calls each picked Mac in turn).
+  // TLS only on both hops: the app must reach us over https (tunnel) and the bridge hop must be a unix
+  // socket, loopback or https. The body is relayed raw and never logged or echoed.
+  if (req.method === 'POST' && p === '/api/cmux/accounts/store') {
+    if (!tlsRequest(req)) return sendJson(res, 403, { error: 'tls_required' });
+    if (!(m.socketPath || loopbackHttp(m.baseUrl) || /^https:\/\//i.test(m.baseUrl || ''))) return sendJson(res, 403, { error: 'tls_required' });
+    return readRaw(req, ACCOUNT_BODY_MAX, (buf) => {
+      if (!buf) return sendJson(res, 413, { error: 'too_large' });
+      if (!accountLimits.mutation(caller, m.id)) { buf.fill(0); return sendJson(res, 429, { error: 'rate_limited' }); }
+      relay(res, bridge(m, '/cmux/accounts/store', { method: 'POST', headers: { 'content-type': 'application/json' }, body: buf, timeout: 30000 }));
     });
   }
   const dm = /^\/api\/cmux\/accounts\/([^/]+)$/.exec(p);

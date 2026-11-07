@@ -2489,6 +2489,8 @@ function cmuxNotifications(res) {
 // private "Claude accounts" workspace (S2p gate: the phone can neither see nor type into it), and the
 // person at the Mac confirms there. Every refusal is a code; no stderr, no Keychain output.
 const accountsLib = require('./lib/accounts').createAccounts();
+const accountStore = require('./lib/account-store');           // D144
+const accountStoreLib = accountStore.createAccountStore();
 const ACCOUNT_BIN_DIR = process.env.HYPERMUX_BIN_DIR || path.join(require('./lib/pkg-root').pkgRoot(), 'bin');   // D62
 // The pane command is shell-quoted (shq), so spaces are fine — releases live under
 // "~/Library/Application Support/…". Quotes, backslashes and control chars are still refused as a
@@ -2595,6 +2597,32 @@ function cmuxAccounts(req, res, u, p) {
         if (alsoOn !== null) cmd += ` --also-on ${shq(alsoOn)}`;
         if (paste) cmd += ' --paste';
         await accountOpen(res, cmd);
+      }).catch(fail(502, 'accounts_failed'));
+    }, ACCOUNT_BODY_MAX);
+  }
+  // D144 (HMX-59): store a token pasted ONCE in the app on this Mac, under the same name as on the
+  // other picked Macs. Token: request body only -> `security -i` stdin (lib/account-store.js); never
+  // argv, log, file or response. Same name + same fingerprint = exists_same; a different one needs replace.
+  if (req.method === 'POST' && p === '/cmux/accounts/store') {
+    return cmuxReadBody(req, (b) => {
+      if (!b) return send(res, 400, { error: 'bad_json' });
+      const name = b.name;
+      if (typeof name !== 'string' || !ACCOUNT_NAME_RE.test(name) || name === 'a') return send(res, 400, { error: 'bad_name' });
+      if (b.replace != null && typeof b.replace !== 'boolean') return send(res, 400, { error: 'bad_replace' });
+      let token = b.token; b.token = undefined;
+      if (!accountStore.validToken(token)) { token = ''; return send(res, 400, { error: 'bad_token' }); }
+      guarded(name, async () => {
+        try {
+          if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
+          const names = await accountsLib.listNames();
+          if (!names.includes(name) && names.length >= ACCOUNTS_MAX) return send(res, 409, { error: 'too_many' });
+          const r = await accountStoreLib.store(name, token, { replace: b.replace === true });
+          token = '';
+          accountsLib.invalidate();
+          if (r.error === 'exists_different') return send(res, 409, { error: 'exists_different', fp: r.fp });
+          if (r.error) return send(res, r.error === 'bad_name' || r.error === 'bad_token' ? 400 : 502, { error: r.error });
+          send(res, 200, { ok: true, result: r.result, fp: r.fp });
+        } finally { token = ''; }
       }).catch(fail(502, 'accounts_failed'));
     }, ACCOUNT_BODY_MAX);
   }
