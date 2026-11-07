@@ -28,6 +28,8 @@ One terminal, agent or browser surface on one machine.
   agent replied and the next move is yours).
 - `preview`: string. One short line of the latest activity.
 - `lastActivity`: number. When the session last changed.
+- `modelAt`: number, optional (D145). When the last model response came back (transcript timestamp of the last
+  non-sidechain assistant record with usage). Prompt-cache age is measured from this, never from `lastActivity`.
 - `model`: string, optional. The model name, for chat kinds.
 - `contextPct`: number 0 to 100, optional. How full the model context is.
 - `statusLine`: optional object, what Sean's terminal status line shows. Claude kind with a joined transcript only.

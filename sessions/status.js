@@ -76,7 +76,10 @@ async function contextUsage(file, deps) {
       try { row = JSON.parse(lines[i]); } catch (_) { continue; }
       if (row && row.type === 'assistant' && !row.isSidechain && row.message && row.message.usage
           && row.message.model !== '<synthetic>') {
-        return { usage: row.message.usage, model: row.message.model || '' };
+        // D145: `at` = when that model response came back (transcript timestamp). The prompt cache is warm
+        // from THIS time, not from the file mtime (titles, /color, hooks and snapshots touch the file too).
+        const at = Date.parse(row.timestamp);
+        return { usage: row.message.usage, model: row.message.model || '', at: Number.isFinite(at) ? at : null };
       }
     }
     return null;
