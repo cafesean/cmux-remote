@@ -3,7 +3,7 @@
 // browser. Two exports:
 //
 //   detectKind({surfaceType, foregroundCmd, transcriptPath}) -> 'claude'|'codex'|'terminal'|'browser'
-//   foregroundCommand(surface, backend, deps) -> Promise<string|null>
+//   foregroundCommand(surface, backend, deps) -> Promise<string|null>   (or EXITED, see below)
 //
 // Signal per backend:
 //   cmux  the tree's per-surface `tty` -> `ps -t <tty>`, foreground process group only. Current cmux
@@ -37,6 +37,10 @@ const TMUX_TIMEOUT = 3000;
 // leaves no SessionEnd, so without a bound a dead pane would read as claude for the whole retention.
 const EVENT_LIVE_MS = 6 * 60 * 60 * 1000;
 const MAX_EVENT_PAGES = 20;
+// D146: what foregroundCommand returns when the pane's newest hook event is a SessionEnd: claude was
+// there and has exited, so the shell is in front. Not null ("unknown"): an unknown command falls back
+// on the transcript, which an exited claude leaves behind, and the pane would stay a chat forever.
+const EXITED = '(agent exited)';
 
 const base = (tok) => path.basename(String(tok).replace(/^-+(?=[a-z])/i, ''));
 
@@ -66,6 +70,7 @@ function kindOfCommand(cmd) {
 function detectKind(info) {
   const o = info || {};
   if (o.surfaceType === 'browser') return 'browser';
+  if (o.foregroundCmd === EXITED) return 'terminal';  // D146: claude exited; its transcript is history
   const k = kindOfCommand(o.foregroundCmd);
   if (k === 'claude' || k === 'codex') return k;
   if (k === 'other') return 'terminal';             // something else is in front: any old transcript is history
@@ -136,10 +141,12 @@ async function latestSurfaceEvent(surface, deps, accept) {
   return last;
 }
 
-// Claude Code is "live" on a surface when its newest hook event is recent and not a SessionEnd.
+// Claude Code is "live" on a surface when its newest hook event is recent and not a SessionEnd; a
+// SessionEnd newest means it exited (EXITED); no recent event at all is unknown (null).
 async function eventsForeground(surface, deps) {
   const last = await latestSurfaceEvent(surface, deps);
-  return last && last.event !== 'SessionEnd' ? 'claude' : null;
+  if (!last) return null;
+  return last.event === 'SessionEnd' ? EXITED : 'claude';
 }
 
 async function tmuxForeground(surface, deps) {
@@ -171,4 +178,4 @@ async function foregroundCommand(surface, backend, deps) {
   return eventsForeground(s, d);
 }
 
-module.exports = { detectKind, foregroundCommand, kindOfCommand, latestSurfaceEvent };
+module.exports = { detectKind, foregroundCommand, kindOfCommand, latestSurfaceEvent, EXITED };
