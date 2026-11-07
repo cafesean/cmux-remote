@@ -2580,7 +2580,7 @@ function cmuxNotifications(res) {
 const accountsLib = require('./lib/accounts').createAccounts();
 const ACCOUNT_BIN_DIR = process.env.HYPERMUX_BIN_DIR || path.join(require('./lib/pkg-root').pkgRoot(), 'bin');   // D62
 // D154: passive limit status per account from the official CLI's own transcripts (no network, no token)
-const accountUsage = require('./lib/accounts-usage').createUsage({ accounts: accountsLib });
+const accountUsage = require('./lib/accounts-usage').createUsage({ accounts: accountsLib, usageFile: process.env.HYPERMUX_ACCOUNT_USAGE_FILE });   // D157 opt-in file
 // The pane command is shell-quoted (shq), so spaces are fine — releases live under
 // "~/Library/Application Support/…". Quotes, backslashes and control chars are still refused as a
 // second line of defence (no legitimate install path has them).
