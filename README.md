@@ -501,6 +501,8 @@ release it displaced) and never kills by port (that is what used to take the liv
 ./scripts/cmux-remote-deploy.sh list              # releases, newest first, LIVE / previous marked
 ```
 
+On the mini the plists live outside `~/Library/LaunchAgents`: set `CMUX_REMOTE_AGENTS_DIR=<mini-launchagents-dir>` (the real path is in the server inventory) before `deploy`. A deploy that stopped after export with no plist needs a re-run with `--force`.
+
 A release is `git archive <ref>` exploded into `releases/<sha12>`, plus the `.env` carried forward
 from the release currently live (`--env <file>` to seed the first one). **Only tracked content at a
 commit can ship** — uncommitted work cannot leak into, or silently differ from, what is running, and
