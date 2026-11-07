@@ -62,7 +62,7 @@ test('send: UTF-8 text lands in a cat pane, through stdin — no tmux argv ever 
   assert.equal((await srv.runOk(['list-buffers', '-F', '#{buffer_name}'])).trim(), '');
 });
 
-test('paste-buffer -p only when the text contains a newline', { skip }, async () => {
+test('paste-buffer -p only when the text contains a newline or is long (D163)', { skip }, async () => {
   const { pane } = await newWindow('cat');
   const pasteArgs = async (text) => {
     const from = spawned.length;
@@ -74,6 +74,9 @@ test('paste-buffer -p only when the text contains a newline', { skip }, async ()
   };
   const single = await pasteArgs('one line');
   assert.ok(!single.includes('-p'), single.join(' '));
+  // D163: a LONG single line is bracketed too, so the TUI takes it as one input, never typing + paste
+  const long = await pasteArgs('x'.repeat(200));
+  assert.ok(long.includes('-p'), long.join(' '));
   const multi = await pasteArgs('line one\nline two');
   assert.ok(multi.includes('-p'), multi.join(' '));
   assert.ok(multi.includes('-d'));
