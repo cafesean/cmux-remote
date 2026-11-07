@@ -530,6 +530,22 @@ async function handleApi(req, res, u) {
   // ----- p41 S2c Claude accounts (names only; the token never passes through here) -----
   if (p === '/api/cmux/accounts' || p.startsWith('/api/cmux/accounts/')) return accountsRelay(req, res, u, p);
 
+  // ----- p41 D152 task file: GET ?machine=&name= ; POST/PATCH /item {machine, name, text|id,done,text} -----
+  if (req.method === 'GET' && p === '/api/cmux/tasks') {
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    return relay(res, bridge(m, `/cmux/tasks?${new URLSearchParams({ name: u.searchParams.get('name') || '' })}`, { timeout: 10000 }));
+  }
+  if ((req.method === 'POST' || req.method === 'PATCH') && p === '/api/cmux/tasks/item') {
+    return readBody(req, (b) => {
+      if (!b) return sendJson(res, 400, { error: 'bad_json' });
+      const m = findMachine(b.machine);
+      if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      const fwd = req.method === 'POST' ? { name: b.name, text: b.text } : { name: b.name, id: b.id, done: b.done, text: b.text };
+      relay(res, bridge(m, '/cmux/tasks/item', { method: req.method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(fwd), timeout: 10000 }));
+    }, require('./lib/tasks').LIMITS.bodyMax);
+  }
+
   // ----- p27 Chrome "Allow remote debugging?" -----
   if (req.method === 'GET' && p === '/api/cmux/chrome-prompt') {
     return sendJson(res, 200, { machines: MACHINES.map((m) => ({ id: m.id, label: m.label, ...(chromePrompts.get(m.id) || { present: false }) })) });
