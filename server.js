@@ -479,6 +479,10 @@ function accountsRelay(req, res, u, p) {
     const fresh = u.searchParams.get('fresh') === '1' && accountLimits.fresh(caller);
     return relay(res, bridge(m, '/cmux/accounts' + (fresh ? '?fresh=1' : ''), { timeout: 20000 }));
   }
+  // D154: passive status (bridge reads transcripts, cached 60 s there)
+  if (req.method === 'GET' && p === '/api/cmux/accounts/usage') {
+    return relay(res, bridge(m, '/cmux/accounts/usage', { timeout: 20000 }));
+  }
   if (req.method === 'POST' && p === '/api/cmux/accounts/setup') {
     return readRaw(req, ACCOUNT_BODY_MAX, (buf) => {
       if (!buf) return sendJson(res, 413, { error: 'too_large' });

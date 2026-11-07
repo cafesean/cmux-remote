@@ -2579,6 +2579,8 @@ function cmuxNotifications(res) {
 // person at the Mac confirms there. Every refusal is a code; no stderr, no Keychain output.
 const accountsLib = require('./lib/accounts').createAccounts();
 const ACCOUNT_BIN_DIR = process.env.HYPERMUX_BIN_DIR || path.join(require('./lib/pkg-root').pkgRoot(), 'bin');   // D62
+// D154: passive limit status per account from the official CLI's own transcripts (no network, no token)
+const accountUsage = require('./lib/accounts-usage').createUsage({ accounts: accountsLib });
 // The pane command is shell-quoted (shq), so spaces are fine — releases live under
 // "~/Library/Application Support/…". Quotes, backslashes and control chars are still refused as a
 // second line of defence (no legitimate install path has them).
@@ -2652,6 +2654,9 @@ function cmuxAccounts(req, res, u, p) {
   if (req.method === 'GET' && p === '/cmux/accounts') {
     return accountsLib.list({ fresh: u.searchParams.get('fresh') === '1' })
       .then((r) => send(res, 200, r), fail(502, 'keychain_read_failed'));
+  }
+  if (req.method === 'GET' && p === '/cmux/accounts/usage') {
+    return accountUsage.usage().then((r) => send(res, 200, r), fail(502, 'usage_read_failed'));
   }
   // setup / remove share one guard: one account pane per Mac at a time
   const guarded = async (name, body) => {
