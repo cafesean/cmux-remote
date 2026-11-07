@@ -688,7 +688,9 @@ collector). A failure shows up as a radar-scoped error and a line on stderr, nev
 ### Mac screen (off by default)
 
 `SCREEN_VIEW=1` lets a paired device see the whole Mac desktop (`/api/cmux/screen/info`, `/api/cmux/screen/shot`);
-`SCREEN_CONTROL=1` lets it click, scroll, type and press allow-listed keys (`/api/cmux/screen/tap|scroll|type|key`).
+`SCREEN_CONTROL=1` lets it click, scroll, type and press allow-listed keys (`/api/cmux/screen/tap|scroll|type|key`),
+and move / press / drag / release the left button (`/api/cmux/screen/mouse` `{type: move|down|drag|up, fx, fy}`;
+moves capped 30/s and coalesced, a held button with no drag/up for 5 s gets a safety release).
 Unset, every screen route answers `403 screen_disabled`. macOS charges the grants to the binary the
 LaunchAgent runs (the `node` binary, or the compiled hypermux binary), not to `osascript`:
 Screen Recording (System Settings > Privacy & Security > Screen & System Audio Recording) for view,

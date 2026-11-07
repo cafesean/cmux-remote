@@ -2910,6 +2910,12 @@ function dispatchCmux(req, res, u) {
       fn(b).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
     }, require('./lib/mac-dialogs').LIMITS.DIALOG_BODY_MAX_BYTES);
   }
+  if (req.method === 'POST' && p === '/cmux/screen/mouse') {   // p41 D159 move|down|drag|up
+    return cmuxReadBody(req, (b) => {
+      if (!b) return send(res, 400, { error: 'bad_json' });
+      macScreen.mouse(b).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+    }, 4 * 1024);
+  }
   if (req.method === 'POST' && /^\/cmux\/screen\/(tap|scroll|type|key)$/.test(p)) {
     const op = p.slice('/cmux/screen/'.length);
     return cmuxReadBody(req, (b) => {
