@@ -148,3 +148,13 @@ test('D140 tmuxKeyTargetFor: a cmux pane ATTACHED to a tmux session gets that se
   const tabs = await procs.orphanTmuxTabs(new Set([SURF]), d);
   assert.deepStrictEqual(await procs.tmuxKeyTargetFor(tabs[0].id, d), { socket: SOCK, pane: '%48', session: 'x-chief' });   // minted id: as before
 });
+
+test('D163 tmuxSend: a long single line (or multi-line) is ONE bracketed paste; short text stays plain typing', async () => {
+  const seen = [];
+  const tmuxRun = async (sock, args, input) => { if (args[0] === 'load-buffer') seen.push([input, args.includes('-p')]); return { code: 0 }; };
+  const long = 'Couple issues I\'ve found when you\'re deleting or closing panes from the app while busy';
+  await procs.tmuxSend({ socket: SOCK, pane: '%48' }, { text: long }, { tmuxRun });
+  await procs.tmuxSend({ socket: SOCK, pane: '%48' }, { text: 'a\nb' }, { tmuxRun });
+  await procs.tmuxSend({ socket: SOCK, pane: '%48' }, { text: '/clear' }, { tmuxRun });
+  assert.deepStrictEqual(seen, [[long, true], ['a\nb', true], ['/clear', false]]);
+});

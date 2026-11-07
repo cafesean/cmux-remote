@@ -1274,6 +1274,14 @@ function cmuxSend(req, res) {
         if (!cur || !Number.isFinite(cur.seq)) return answer(409, { error: 'seq_unavailable' });
         if (cur.seq !== b.expect_seq) return answer(409, { error: 'seq_changed', seq: cur.seq });
       }
+      // p41 D163: a cmux pane ATTACHED to tmux gets its text (and the Enter) through tmux
+      // paste-buffer, bracketed when long — `cmux send` there types raw bytes through `tmux attach`
+      // and Claude Code splits a long message into typing + a "[Pasted text]" paste (two inputs).
+      const att = text && !tmuxCli ? await sessionRoutes.tmuxKeyTarget(surface) : null;
+      if (att) {
+        const r = await require('./sessions/procs').tmuxSend(att, { text, submit: !!b.submit });
+        return r.ok ? answer(200, { ok: true }) : answer(502, { error: r.error, detail: r.detail });
+      }
       if (text) {
         const e = await runSendCommandP(['send', '--surface', surface, '--', text]);   // argv (no shell) → no injection
         // The one provable case, and everything else. Enter is never attempted after either.
@@ -1316,6 +1324,8 @@ function sendTextP(surface, text, submit) {
     serializeSend(surface, async () => {
       const tgt = tmuxCli ? null : await sessionRoutes.tmuxTarget(surface);
       if (tgt) return resolve(await require('./sessions/procs').tmuxSend(tgt, { text, submit }));
+      const att = text && !tmuxCli ? await sessionRoutes.tmuxKeyTarget(surface) : null;   // D163
+      if (att) return resolve(await require('./sessions/procs').tmuxSend(att, { text, submit }));
       if (text) {
         const e = await runSendCommandP(['send', '--surface', surface, '--', text]);
         if (e) return resolve({ ok: false, error: e.dispatched ? 'text_command_unconfirmed' : 'send_failed' });

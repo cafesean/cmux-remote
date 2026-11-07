@@ -322,7 +322,7 @@ async function tmuxKeyTargetFor(surfaceId, deps) {
 }
 
 // Type into a tmux pane the way lib/tmux-cli.js verbSend does (load-buffer + paste-buffer, bracketed
-// only for multi-line text), then Enter after a settle; or press one KEYMAP key. argv only, no shell.
+// for multi-line or long text, D163), then Enter after a settle; or press one KEYMAP key. argv only, no shell.
 function tmuxRun(socket, args, input) {
   return new Promise((resolve) => {
     let child;
@@ -349,7 +349,7 @@ async function tmuxSend(target, opts, deps) {
   if (o.text) {
     const buf = `cmuxr-${process.pid}-${Date.now().toString(36)}`;
     const r = await run(target.socket, ['load-buffer', '-b', buf, '-', ';', 'paste-buffer', '-d',
-      ...(o.text.includes('\n') ? ['-p'] : []), '-b', buf, '-t', target.pane], o.text);
+      ...(tmuxCli.wantsBracket(o.text) ? ['-p'] : []), '-b', buf, '-t', target.pane], o.text);
     if (r.code !== 0) return { error: r.dispatched ? 'text_command_unconfirmed' : 'send_failed', detail: r.detail };
   }
   if (o.submit) {
