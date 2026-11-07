@@ -257,6 +257,10 @@ test('bridge: existing name -> 409 exists; replace -> new-surface into the exist
   assert.deepEqual(ns, ['new-surface', '--type', 'terminal', '--workspace', ws, '--focus', 'false', '--command',
     `'${BIN()}/hypermux-account-setup' acme --replace`]);
   assert.equal((await call('GET', '/cmux/screen?surface=' + ok.json.surface)).status, 423);
+  // D160: the setup pane is brought to the front on the Mac (it was opened unfocused in a hidden workspace)
+  assert.deepEqual(lastOf('select-workspace'), ['select-workspace', '--workspace', ws]);
+  assert.equal(lastOf('focus-panel')[0], 'focus-panel');
+  assert.equal(ok.json.workspace, 'Claude accounts');
   closeSurface(ok.json.surface);
 });
 

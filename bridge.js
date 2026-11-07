@@ -2635,7 +2635,18 @@ async function openAccountPane(cmdline) {
   const pick = (said && mine.find((x) => x.t.ref === said)) || (mine.length === 1 ? mine[0] : null);
   if (!pick) return { surface: null };
   privateSurfaces.mark({ surface: pick.t.id, workspace: pick.w.id, ttlMs: ACCOUNT_MARK_TTL_MS });
+  await showAccountPane(pick.w.ref || pick.w.id, pick.t.ref || pick.t.id);
   return { surface: pick.t.id };
+}
+
+// D160 (Sean: "it says it continues on the Mac, but on the Mac nothing happens, no pane opens"): the pane
+// was opened with --focus false in the hidden "Claude accounts" workspace, so the person at the Mac never
+// saw it. Setup is always asked for by that person, so bring the workspace + pane to the front. Best
+// effort: a cmux without these commands leaves it where it is (the reply still names the workspace).
+async function showAccountPane(wsRef, surfaceRef) {
+  const run = (args) => new Promise((resolve) => cli(args, { timeout: 5000 }, () => resolve()));
+  await run(['select-workspace', '--workspace', wsRef]);
+  await run(['focus-panel', '--panel', surfaceRef, '--workspace', wsRef]);
 }
 
 async function accountOpen(res, cmdline) {
@@ -2644,7 +2655,7 @@ async function accountOpen(res, cmdline) {
   if (!r || !r.surface) return send(res, 502, { error: 'cmux_failed' });
   // guard = mark TTL: the pane (30 s confirm + 600 s capture + grace + close delay) never outlives either
   accountPane = { surface: r.surface, until: Date.now() + ACCOUNT_MARK_TTL_MS };
-  send(res, 200, { ok: true, surface: r.surface });
+  send(res, 200, { ok: true, surface: r.surface, workspace: privateSurfaces.PRIVATE_WORKSPACE_TITLE });
 }
 
 function cmuxAccounts(req, res, u, p) {
