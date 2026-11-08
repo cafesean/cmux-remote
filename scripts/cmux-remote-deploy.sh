@@ -124,6 +124,12 @@ cmd_deploy() {
     (cd "$tmp" && node -c "$entry") || die "$entry fails to parse in $sha — nothing was activated"
   done
 
+  # D206: compile the AX helper now, while the old release still serves, so the new bridge never builds it
+  # under load at first use. Best effort (never fails the deploy); CMUX_REMOTE_AX_PREBUILD=0 skips it.
+  if [ "${CMUX_REMOTE_AX_PREBUILD:-1}" != 0 ] && [ -f "$tmp/scripts/ax-prebuild.js" ]; then
+    (cd "$tmp" && node scripts/ax-prebuild.js) || true
+  fi
+
   mv "$tmp" "$dir"
   trap - EXIT
   say "exported $ref -> $sha ($(git_repo log -1 --format=%s "$ref^{commit}"))"
