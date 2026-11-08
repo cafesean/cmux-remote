@@ -23,6 +23,7 @@
 //       Access service token, e.g. "accessIdEnv":"CMUX_MINI_CF_ACCESS_ID". The name wins over raw
 //       accessId/accessSecret (still accepted). Missing var -> no headers + a startup note naming the var.
 //     CMUX_CONFIG     — path to a gitignored JSON file { "machines": [ ... ] } (extends/overrides)
+require('./lib/log-ts').install();   // p41 D206b: ISO timestamp on every log line (see lib/log-ts.js)
 const { emptyShadowed } = require('./loadenv');
 // p62 S2: HYPERMUX_SECRETS_ON_STDIN=1 -> read the secrets line first, then run main()
 // (main() runs once loaded, so every const in it sees them). Unset -> no-op, today's behaviour.
