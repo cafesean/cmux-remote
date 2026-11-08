@@ -81,6 +81,7 @@ function run(script, args, { extraEnv = {}, expectFail = false } = {}) {
     CMUX_REMOTE_LABEL_PREFIX: PREFIX,
     CMUX_LAUNCHCTL: box.stub,
     CMUX_REMOTE_HEALTH_URL: '', // probe disabled unless a test overrides it
+    CMUX_REMOTE_AX_PREBUILD: '0', // D206: no real swiftc in the sandbox
     STUB_LOG: box.log,
     ...extraEnv,
   };

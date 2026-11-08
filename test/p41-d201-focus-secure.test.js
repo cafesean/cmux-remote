@@ -50,3 +50,25 @@ test('cached for SCREEN_FOCUS_CACHE_MS; a tap drops the cache', async () => {
   assert.equal((await ms.info()).body.focusSecure, true, 'tap moved focus -> re-read');
   assert.equal(reqs.length, 3);
 });
+
+test('D206: helper build pending -> info answers at once with focusSecure null, uncached; build kicked', async () => {
+  let isReady = false, readyCalls = 0; const reqs = [];
+  const ms = createMacScreen({ env: { SCREEN_VIEW: '1', SCREEN_CONTROL: '1', SCREEN_OSASCRIPT_BIN: osa },
+    host: '127.0.0.1', now: () => 1000, log: () => {},
+    axHelper: { ready: () => { readyCalls++; return isReady; },
+      run: async (r) => { reqs.push(r); await new Promise((res) => setTimeout(res, 30000).unref()); return { secure: true }; } } });
+  const t0 = Date.now();
+  const r = await ms.info();
+  assert.equal(r.status, 200);
+  assert.equal(r.body.focusSecure, null, 'unknown while the helper builds');
+  assert.ok(Date.now() - t0 < 5000, 'did not wait on the build');
+  assert.equal(reqs.length, 0, 'no helper run while not ready');
+  assert.ok(readyCalls >= 1, 'ready() asked (starts the background build)');
+  isReady = true;
+  const fast = createMacScreen({ env: { SCREEN_VIEW: '1', SCREEN_CONTROL: '1', SCREEN_OSASCRIPT_BIN: osa },
+    host: '127.0.0.1', now: () => 1000, log: () => {}, axHelper: { ready: () => isReady, run: async () => ({ secure: true }) } });
+  assert.equal((await fast.info()).body.focusSecure, true, 'ready -> real answer');
+  // the first screen was not cached as null: once ready it runs the helper
+  ms.info(); await new Promise((res) => setImmediate(res)); await new Promise((res) => setTimeout(res, 300));
+  assert.equal(reqs.length, 1, 'null was not cached; ready -> helper run');
+});
