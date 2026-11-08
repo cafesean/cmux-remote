@@ -928,7 +928,10 @@ async function handleApi(req, res, u) {
   if (req.method === 'GET' && p === '/api/cmux/start-dirs') {
     const m = findMachine(u.searchParams.get('machine'));
     if (!m) return sendJson(res, 404, { error: 'no_machine' });
-    return relay(res, bridge(m, '/cmux/start-dirs', { timeout: 15000 }));
+    const fwd = new URLSearchParams();
+    for (const k of ['workspace', 'pane', 'surface']) { const v = u.searchParams.get(k); if (v && v.length <= 64) fwd.set(k, v); }
+    const qs = fwd.toString();
+    return relay(res, bridge(m, '/cmux/start-dirs' + (qs ? '?' + qs : ''), { timeout: 15000 }));
   }
   // "+ Tab" — new tab (surface) inside a workspace.
   if (req.method === 'POST' && p === '/api/cmux/new-surface') {
@@ -942,7 +945,7 @@ async function handleApi(req, res, u) {
         method: 'POST', headers: { 'content-type': 'application/json' },
         // p41 S2d: `account` passes through when it is a short string; the bridge validates it
         // D176: `cwd` passes through when it is a string; the bridge validates it (400 bad_cwd)
-        body: JSON.stringify({ workspace: b.workspace, pane: b.pane, ...(typeof b.account === 'string' && b.account.length <= 16 ? { account: b.account } : {}), ...(typeof b.cwd === 'string' && b.cwd.length <= 1024 ? { cwd: b.cwd } : {}) }),
+        body: JSON.stringify({ workspace: b.workspace, pane: b.pane, ...(typeof b.account === 'string' && b.account.length <= 16 ? { account: b.account } : {}), ...(typeof b.cwd === 'string' && b.cwd.length <= 1024 ? { cwd: b.cwd } : {}), ...(typeof b.surface === 'string' && b.surface.length <= 64 ? { surface: b.surface } : {}) }),
         timeout: 20000,
       }));
     });

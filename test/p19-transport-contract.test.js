@@ -138,6 +138,7 @@ function cases() {
     '/api/cmux/key': [post('/api/cmux/key', { surface: I.sfA1, key: 'enter' })],
     '/api/cmux/choose': [post('/api/cmux/choose', { surface: I.sfA1, choiceId: '0000000000000000', index: 0, label: 'x' })],
     '/api/cmux/new-surface': [post('/api/cmux/new-surface', { workspace: I.wsA, pane: I.paneA1 })],
+    '/api/cmux/start-dirs': [json('GET', `/api/cmux/start-dirs?machine=default&workspace=${I.wsA}&pane=${I.paneA1}`)],
     '/api/cmux/new-workspace': [post('/api/cmux/new-workspace', { cwd: fakeDir })],
     '/api/cmux/close-tab': [post('/api/cmux/close-tab', { surface: I.sfA2 })],
     '/api/cmux/rename-workspace': [post('/api/cmux/rename-workspace', { workspace: I.wsA, title: 'renamed' })],

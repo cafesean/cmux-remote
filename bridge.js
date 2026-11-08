@@ -1403,14 +1403,20 @@ function cmuxNewSurface(req, res) {
     if (b.cwd != null && b.cwd !== '') {
       cwd = startDir.validStartDir(b.cwd);
       if (!cwd) return send(res, 400, { error: 'bad_cwd' });
-      args.push('--working-directory', cwd);
     }
+    const surface = String(b.surface || '');
+    if (surface && !SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
     // p41 S2d: `account` — absent / "terminal" = today's terminal; "default" = the launcher on the
     // Mac's own login (`a`); <name> = validated + present in the Keychain. The command is built only
     // from validated values; the launcher reads the token itself, the bridge never does.
     const account = b.account == null || b.account === 'terminal' ? null : b.account;
     const before = new Set();
     (async () => {
+      // D176 follow-up: no cwd sent (a terminal-only pane: Claude exited, no status line) -> the clicked
+      // pane's own folder, resolved here; still nothing known -> cmux's default as before.
+      // (tmux needs none: its split already starts in the split pane's #{pane_current_path})
+      if (!cwd && !tmuxCli) cwd = (await paneCwd({ workspace, pane, surface })).path;
+      if (cwd) args.push('--working-directory', cwd);
       if (account !== null) {
         // spec §4.2 / §6.1: sessions on an account only through a secured bridge
         if (!SECRET) return send(res, 503, { error: 'not_secured' });
@@ -1447,13 +1453,57 @@ function cmuxNewSurface(req, res) {
 // D177: GET /cmux/start-dirs — folders the "+" sheet offers: last used, open workspaces' folders,
 // HYPERMUX_START_DIRS (':'-separated), ~/Main, $HOME. Each one exists and is a directory right now.
 const startDir = require('./lib/start-dir');
+const { latestSurfaceEvent } = require('./sessions/detect');
 const startDirsLast = startDir.lastUsedStore(process.env.HYPERMUX_START_DIRS_FILE
   || require('./lib/hm-home').statePath('start-dirs.json', path.join(os.homedir(), '.config', 'cmux-remote', 'start-dirs.json')));
-async function cmuxStartDirs(req, res) {
+// The folder a pane is in, best signal first: the newest hook event (cwd) of any tab in that pane
+// (Claude may have exited; its events stay for EVENT_LIVE_MS), on tmux the pane's pane_current_path,
+// then its workspace's current_directory. -> { path, source } ({ path: null } when nothing is known).
+// Every answer passes validStartDir. cmux's tree carries no per-pane cwd and its tty is null.
+async function paneCwd({ workspace, pane, surface }) {
+  const none = { path: null, source: null };
+  if (!workspace && !pane && !surface) return none;
+  const tree = await loadTree().catch(() => null);
+  if (!tree) return none;
+  const ws = tree.find((w) => w.id === workspace || w.ref === workspace)
+    || tree.find((w) => (w.tabs || []).some((t) => (surface && t.id === surface) || (pane && (t.pane === pane || t.paneRef === pane))));
+  if (!ws) return none;
+  const tabs = (ws.tabs || []).filter((t) => (surface && t.id === surface) || (pane && (t.pane === pane || t.paneRef === pane)));
+  if (tabs.length && !tmuxCli) {
+    const evs = await Promise.all(tabs.map((t) => latestSurfaceEvent({ id: t.id }, { readEvents: eventlog.readEvents }, (e) => !!e.cwd).catch(() => null)));
+    const best = evs.filter(Boolean).sort((a, b2) => b2.ts - a.ts)[0];
+    const p = best && startDir.validStartDir(best.cwd);
+    if (p) return { path: p, source: 'pane' };
+  }
+  if (tabs.length && tmuxCli) {
+    const t = tabs.find((x) => x.inPane) || tabs[0];
+    const out = await new Promise((resolve) => require('child_process').execFile(process.env.TMUX_BIN || 'tmux',
+      [...(t.tmuxSocket ? ['-S', t.tmuxSocket] : []), 'display-message', '-p', '-t', String(t.tmuxPane || t.ref || t.id), '#{pane_current_path}'],
+      { timeout: 3000 }, (e, so) => resolve(e ? '' : String(so).trim())));
+    const p = startDir.validStartDir(out);
+    if (p) return { path: p, source: 'pane' };
+  }
+  if (!tmuxCli) {
+    const cwds = await cmuxWorkspaceCwds().catch(() => []);
+    const hit = cwds.find((c) => c.label && (c.label === ws.title || c.label === ws.ref));
+    const p = hit && startDir.validStartDir(hit.path);
+    if (p) return { path: p, source: 'workspace' };
+  }
+  return none;
+}
+
+// ?workspace=&pane=&surface= (all optional): `current` = that pane's folder, also listed first.
+async function cmuxStartDirs(req, res, u) {
+  const q = (k) => String((u && u.searchParams.get(k)) || '');
+  const workspace = q('workspace'), pane = q('pane'), surface = q('surface');
+  if (workspace && !WORKSPACE_RE.test(workspace)) return send(res, 400, { error: 'bad_workspace' });
+  if (pane && !PANE_RE.test(pane)) return send(res, 400, { error: 'bad_pane' });
+  if (surface && !SURFACE_RE.test(surface)) return send(res, 400, { error: 'bad_surface' });
+  const current = await paneCwd({ workspace, pane, surface }).catch(() => ({ path: null, source: null }));
   let workspaceCwds = [];
   try { workspaceCwds = tmuxCli ? [] : (await cmuxWorkspaceCwds()).map((c) => c.path); } catch (_) { workspaceCwds = []; }
-  const dirs = startDir.startDirs({ lastUsed: startDirsLast.read(), workspaceCwds, extras: startDir.extrasFromEnv(process.env.HYPERMUX_START_DIRS) });
-  send(res, 200, { dirs });
+  const dirs = startDir.startDirs({ current: current.path, lastUsed: startDirsLast.read(), workspaceCwds, extras: startDir.extrasFromEnv(process.env.HYPERMUX_START_DIRS) });
+  send(res, 200, { current: current.path, currentSource: current.source, dirs });
 }
 
 // POST /cmux/new-workspace { cwd?, command? } — create a whole new workspace.
@@ -2883,7 +2933,7 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'POST' && p === '/cmux/session-name') return cmuxSessionName(req, res);
   if (req.method === 'POST' && p === '/cmux/key') return cmuxKey(req, res);
   if (req.method === 'POST' && p === '/cmux/new-surface') return cmuxNewSurface(req, res);
-  if (req.method === 'GET' && p === '/cmux/start-dirs') return cmuxStartDirs(req, res);
+  if (req.method === 'GET' && p === '/cmux/start-dirs') return cmuxStartDirs(req, res, u);
   if (req.method === 'POST' && p === '/cmux/new-workspace') return cmuxNewWorkspace(req, res);
   if (req.method === 'POST' && p === '/cmux/close-tab') return cmuxCloseTab(req, res);
   if (req.method === 'POST' && p === '/cmux/rename-workspace') return cmuxRenameWorkspace(req, res);

@@ -63,7 +63,7 @@ before(async () => {
   br = await bootBridge({ cwd: dir, env: {
     BRIDGE_SECRET: SECRET, CMUX_BIN: path.join(dir, 'fake-cmux'), FAKE_DIR: dir,
     HYPERMUX_SECURITY_BIN: path.join(sec, 'security'), FAKE_SEC_DIR: sec, USER: 'tester',
-    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private.json'), HYPERMUX_START_DIRS_FILE: path.join(dir, 'start-dirs.json'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'),
+    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private.json'), HYPERMUX_START_DIRS_FILE: path.join(dir, 'start-dirs.json'), RADAR_DIR: path.join(dir, 'radar'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'),
     NODE_ENV: 'test', COMPLETIONS_ENABLED: '0',
   } });
 });
@@ -334,4 +334,30 @@ test('D177 start-dirs: lists the last-used folder first; every entry is a real d
   assert.ok(Array.isArray(j.dirs) && j.dirs.length >= 1, JSON.stringify(j));
   assert.deepEqual(j.dirs[0], { path: dir, name: path.basename(dir), source: 'recent' });
   for (const d of j.dirs) assert.ok(fs.statSync(d.path).isDirectory(), d.path);
+});
+
+// D176 follow-up: Sean's case — every session stopped, so the clicked pane is terminal-only (no status
+// line, the app sends no cwd). The bridge resolves the pane's own folder from its last hook event.
+test('D176 terminal-only pane, no cwd sent -> starts in the pane folder from its last hook event', async () => {
+  const work = path.join(dir, 'vault'); fs.mkdirSync(work, { recursive: true });
+  const SF = 'aaaaaaa1-3333-4333-8333-333333333331';
+  eventlog.appendEventSync(path.join(dir, 'radar'), { sessionId: 'sess-x', event: 'UserPromptSubmit', surfaceId: SF, cwd: path.join(dir, 'procs.json') }, Date.now() - 60000);
+  eventlog.appendEventSync(path.join(dir, 'radar'), { sessionId: 'sess-x', event: 'SessionEnd', surfaceId: SF, cwd: work }, Date.now() - 1000);
+  for (const body of [{ workspace: WS, pane: 'pane:1' }, { workspace: WS, surface: SF }]) {
+    const r = await ns(body);
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.ok(r.ns[0].includes('--working-directory'), JSON.stringify(r.ns));
+    assert.equal(r.ns[0][r.ns[0].indexOf('--working-directory') + 1], work);
+  }
+  // an explicit cwd still wins over the resolved one
+  const e = await ns({ workspace: WS, pane: 'pane:1', cwd: dir });
+  assert.equal(e.ns[0][e.ns[0].indexOf('--working-directory') + 1], dir);
+  // start-dirs: the clicked pane's folder is `current` and listed first
+  const s = await fetch(br.base + '/cmux/start-dirs?workspace=' + WS + '&pane=pane:1', { headers: { 'x-bridge-secret': SECRET } });
+  const j = await s.json();
+  assert.equal(j.current, work);
+  assert.equal(j.currentSource, 'pane');
+  assert.deepEqual(j.dirs[0], { path: work, name: 'vault', source: 'pane' });
+  const bad = await fetch(br.base + '/cmux/start-dirs?pane=x;y', { headers: { 'x-bridge-secret': SECRET } });
+  assert.equal(bad.status, 400);
 });
