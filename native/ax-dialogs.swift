@@ -8,6 +8,7 @@
 //   {op:'ocr', wid, frame}  | {op:'ocr', items:[...]} -> {lines:[{text, box:{fx,fy,fw,fh} (dialog fractions, top-left), conf}]}
 //      capture = screencapture -x -o -l <wid> (else -R frame) under the bridge's Screen Recording grant; Vision .accurate, en.
 //   {op:'windows', pid}                 -> {axError, windows:[{role,subrole,frame}]}   (diagnosis)
+//   {op:'focused'}                      -> {secure: Bool}   D201: is the focused UI element a password field? (no value read)
 // error: not_trusted | no_windows | no_window | no_button | no_field | press_failed | bad_request
 import ApplicationServices
 import Foundation
@@ -164,6 +165,12 @@ case "read":
   if let items = req["items"] as? [[String: Any]] { answer(["results": items.prefix(20).map { read($0) }]) } else { answer(read(req)) }
 case "press": answer(press(req))
 case "focus": answer(focus(req))
+case "focused":   // D201: role/subrole of the system-wide focused element only — never its value
+  let sys = AXUIElementCreateSystemWide()
+  AXUIElementSetMessagingTimeout(sys, 0.5)   // a hung app must not stall the poll
+  guard let f = attr(sys, kAXFocusedUIElementAttribute), CFGetTypeID(f) == AXUIElementGetTypeID() else { answer(["secure": false]); break }
+  let el = f as! AXUIElement
+  answer(["secure": str(el, kAXRoleAttribute) == "AXSecureTextField" || str(el, kAXSubroleAttribute) == "AXSecureTextField"])
 case "windows":   // diagnosis: AX window frames of one pid (no text)
   let app = AXUIElementCreateApplication((req["pid"] as? NSNumber)?.int32Value ?? 0)
   var v: CFTypeRef?; let e = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &v)
