@@ -36,7 +36,7 @@ test('D190: SNAPSHOT one-line `⛔ NEEDS YOU: <ask>` and a bold header lift too'
 test('D190: no false positives (prose, quoted, fenced, header with no asks, preset off)', () => {
   const none = (md, o = { seanBanner: true }) => assert.deepStrictEqual(splitCallouts(md, o), { text: md, callouts: [] });
   none('My replies used a plain "⛔ NEEDS YOU:" list instead of the banner.');
-  none('```\n⛔ NEEDS YOU:\n1. example\n```');
+  none('```\n⛔ NEEDS YOU:\n1. example\n```\n\nThat was the format.');  // D197: only a trailing fence lifts
   none('⛔ NEEDS YOU:\n\nNothing numbered here.');
   none('Nothing needs you.');
   none(fx('sweep-list.md'), {});
