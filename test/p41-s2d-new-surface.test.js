@@ -63,7 +63,7 @@ before(async () => {
   br = await bootBridge({ cwd: dir, env: {
     BRIDGE_SECRET: SECRET, CMUX_BIN: path.join(dir, 'fake-cmux'), FAKE_DIR: dir,
     HYPERMUX_SECURITY_BIN: path.join(sec, 'security'), FAKE_SEC_DIR: sec, USER: 'tester',
-    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private.json'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'),
+    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private.json'), HYPERMUX_START_DIRS_FILE: path.join(dir, 'start-dirs.json'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'),
     NODE_ENV: 'test', COMPLETIONS_ENABLED: '0',
   } });
 });
@@ -304,4 +304,34 @@ test('server without SERVER_TOKEN: new-surface with account 503 not_secured (not
     assert.equal(t.status, 200);
     assert.deepEqual(seen.pop(), { workspace: WS });
   } finally { await s.stop(); await new Promise((r) => srv.close(r)); }
+});
+
+// D176/D177: the folder a new session starts in.
+test('D176 cwd: valid dir -> --working-directory (terminal) and cd-prefixed launcher (account)', async () => {
+  const r = await ns({ workspace: WS, cwd: dir });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.ns, [TERMINAL_ARGV.concat(['--working-directory', dir])]);
+  const a = await ns({ workspace: WS, account: 'acme', cwd: dir });
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.deepEqual(a.ns, [TERMINAL_ARGV.concat(['--working-directory', dir, '--command', `cd '${dir}' && '${BIN}/hypermux-claude' acme`])]);
+});
+
+test('D176 cwd: relative / missing / a file / NUL / non-string -> 400 bad_cwd, nothing spawned', async () => {
+  const file = path.join(dir, 'procs.json');
+  for (const cwd of ['relative/dir', path.join(dir, 'nope'), file, dir + '\0x', 5, ['x'], '/' + 'a'.repeat(2000)]) {
+    const r = await ns({ workspace: WS, cwd });
+    assert.equal(r.status, 400, JSON.stringify(cwd));
+    assert.deepEqual(r.json, { error: 'bad_cwd' });
+    assert.deepEqual(r.ns, []);
+  }
+});
+
+test('D177 start-dirs: lists the last-used folder first; every entry is a real directory', async () => {
+  await ns({ workspace: WS, cwd: dir });
+  const r = await fetch(br.base + '/cmux/start-dirs', { headers: { 'x-bridge-secret': SECRET } });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.ok(Array.isArray(j.dirs) && j.dirs.length >= 1, JSON.stringify(j));
+  assert.deepEqual(j.dirs[0], { path: dir, name: path.basename(dir), source: 'recent' });
+  for (const d of j.dirs) assert.ok(fs.statSync(d.path).isDirectory(), d.path);
 });

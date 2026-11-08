@@ -140,7 +140,7 @@ function send(res, code, obj) {
 // Older cmux builds (e.g. 0.62.x) reject flags newer ones accept: `--id-format` is global-only there
 // (must precede the subcommand), and `new-surface`/`new-workspace` have no `--focus`. Rather than pin a
 // cmux version, retry once per rejected flag — relocate `--id-format`, drop anything else it doesn't know.
-const FLAG_VALUES = new Set(['--id-format', '--focus', '--type', '--lines', '--surface', '--workspace', '--pane']);
+const FLAG_VALUES = new Set(['--id-format', '--focus', '--type', '--lines', '--surface', '--workspace', '--pane', '--working-directory']);
 function adaptArgs(args, flag) {
   const i = args.indexOf(flag);
   if (i === -1) return null;
@@ -1397,6 +1397,14 @@ function cmuxNewSurface(req, res) {
     if (pane && !PANE_RE.test(pane)) return send(res, 400, { error: 'bad_pane' });
     const args = ['new-surface', '--type', 'terminal', '--workspace', workspace, '--focus', 'false'];
     if (pane) args.push('--pane', pane);
+    // D176/D177: `cwd` = the folder to start in (the clicked pane's, or the sheet's pick). Absent = cmux's
+    // default (before D176 that was always cmux's own folder, never the clicked pane's).
+    let cwd = null;
+    if (b.cwd != null && b.cwd !== '') {
+      cwd = startDir.validStartDir(b.cwd);
+      if (!cwd) return send(res, 400, { error: 'bad_cwd' });
+      args.push('--working-directory', cwd);
+    }
     // p41 S2d: `account` — absent / "terminal" = today's terminal; "default" = the launcher on the
     // Mac's own login (`a`); <name> = validated + present in the Keychain. The command is built only
     // from validated values; the launcher reads the token itself, the bridge never does.
@@ -1414,13 +1422,16 @@ function cmuxNewSurface(req, res) {
           if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
           if (!(await accountsLib.exists(account))) return send(res, 400, { error: 'bad_account' });
         }
-        args.push('--command', `${shq(ACCOUNT_BIN_DIR + '/hypermux-claude')} ${account === 'default' ? 'a' : account}`);
+        // the launcher checks $PWD's .claude settings, so it must start IN the folder: cd first too (a cmux
+        // without --working-directory then fails loudly rather than starting in the wrong folder)
+        args.push('--command', `${cwd ? `cd ${shq(cwd)} && ` : ''}${shq(ACCOUNT_BIN_DIR + '/hypermux-claude')} ${account === 'default' ? 'a' : account}`);
       }
       const pre = await loadTree();
       if (pre) for (const w of pre) for (const t of w.tabs) before.add(t.id);
       const done = async (err, stdout, stderr) => {
         // a named account never falls back to a plain terminal; its failure carries no cmux text
         if (err) return send(res, 502, account !== null ? { error: 'cmux_failed' } : { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 400) });
+        if (cwd) startDirsLast.add(cwd);
         const workspaces = await treePayload();
         let created = null;
         if (workspaces) for (const w of workspaces) for (const t of w.tabs) if (!before.has(t.id)) created = t.id;
@@ -1431,6 +1442,18 @@ function cmuxNewSurface(req, res) {
       else cmux(args, done, 12000);
     })().catch(() => { if (!res.headersSent) send(res, 502, { error: 'cmux_failed' }); });
   });
+}
+
+// D177: GET /cmux/start-dirs — folders the "+" sheet offers: last used, open workspaces' folders,
+// HYPERMUX_START_DIRS (':'-separated), ~/Main, $HOME. Each one exists and is a directory right now.
+const startDir = require('./lib/start-dir');
+const startDirsLast = startDir.lastUsedStore(process.env.HYPERMUX_START_DIRS_FILE
+  || require('./lib/hm-home').statePath('start-dirs.json', path.join(os.homedir(), '.config', 'cmux-remote', 'start-dirs.json')));
+async function cmuxStartDirs(req, res) {
+  let workspaceCwds = [];
+  try { workspaceCwds = tmuxCli ? [] : (await cmuxWorkspaceCwds()).map((c) => c.path); } catch (_) { workspaceCwds = []; }
+  const dirs = startDir.startDirs({ lastUsed: startDirsLast.read(), workspaceCwds, extras: startDir.extrasFromEnv(process.env.HYPERMUX_START_DIRS) });
+  send(res, 200, { dirs });
 }
 
 // POST /cmux/new-workspace { cwd?, command? } — create a whole new workspace.
@@ -2860,6 +2883,7 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'POST' && p === '/cmux/session-name') return cmuxSessionName(req, res);
   if (req.method === 'POST' && p === '/cmux/key') return cmuxKey(req, res);
   if (req.method === 'POST' && p === '/cmux/new-surface') return cmuxNewSurface(req, res);
+  if (req.method === 'GET' && p === '/cmux/start-dirs') return cmuxStartDirs(req, res);
   if (req.method === 'POST' && p === '/cmux/new-workspace') return cmuxNewWorkspace(req, res);
   if (req.method === 'POST' && p === '/cmux/close-tab') return cmuxCloseTab(req, res);
   if (req.method === 'POST' && p === '/cmux/rename-workspace') return cmuxRenameWorkspace(req, res);
