@@ -37,7 +37,15 @@ else if (args[0] === 'rpc') out = '{}';
 else if (args[0] === 'browser' && args[2] === 'screenshot') fs.writeFileSync(args[args.indexOf('--out') + 1], Buffer.alloc(64, 7));
 else if (args[0] === 'browser' && args[2] === 'eval') {
   const js = args[args.indexOf('--script') + 1];
-  if (js.includes('elementFromPoint') && js.includes('mousedown')) out = JSON.stringify({ hit: 'INPUT', editable: true, secure: true, value: '', x: 1, y: 1 });
+  const elFile = require('path').join(require('path').dirname(process.env.FAKE_CMUX_LOG), 'tap-el.json');
+  if (js.includes('elementFromPoint') && js.includes('mousedown') && fs.existsSync(elFile)) {
+    // D199: run the REAL tap script against a stub DOM whose hit element comes from tap-el.json.
+    const spec = JSON.parse(fs.readFileSync(elFile, 'utf8'));
+    const el = Object.assign({ focus() {}, closest() { return null; }, dispatchEvent() {} }, spec);
+    const ctx = { innerWidth: 800, innerHeight: 600, location: { href: 'https://page.example/' }, JSON, String, Math, getComputedStyle: () => ({ position: 'static' }),
+      MouseEvent: function MouseEvent() {}, window: {}, document: { elementFromPoint: () => el, body: {}, documentElement: {} } };
+    out = String(require('vm').runInNewContext(js, ctx));
+  } else if (js.includes('elementFromPoint') && js.includes('mousedown')) out = JSON.stringify({ hit: 'INPUT', editable: true, secure: true, value: '', x: 1, y: 1 });
   else if (js.includes('scrollBy')) out = '"doc:120"';
   else out = '""';
 }
@@ -118,6 +126,34 @@ test('tap on a password field: secure:true, value never echoed', async () => {
   assert.equal(r.json.editable, true);
   assert.equal(r.json.value, '');
   assert.match(argv(), /var sec=el\.tagName==='INPUT'/);
+});
+
+// p41 D199 (D195): tapping an IMG returns its currentSrc so the app's viewer shows the image itself.
+const tapEl = (spec) => fs.writeFileSync(path.join(dir, 'tap-el.json'), JSON.stringify(spec));
+test('tap on an IMG: src = currentSrc (http(s) only, <= 2048 chars); other hits carry no src', async () => {
+  try {
+    tapEl({ tagName: 'IMG', currentSrc: 'https://cdn.example/a.jpg?w=1200' });
+    let r = await post('/cmux/browser/tap', { surface: S2, fx: 0.5, fy: 0.5 });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.hit, 'IMG');
+    assert.equal(r.json.src, 'https://cdn.example/a.jpg?w=1200');
+    for (const bad of ['data:image/png;base64,QUJD', 'blob:https://page.example/1', 'javascript:alert(1)', 'https://cdn.example/' + 'x'.repeat(2048), '']) {
+      tapEl({ tagName: 'IMG', currentSrc: bad });
+      r = await post('/cmux/browser/tap', { surface: S2, fx: 0.5, fy: 0.5 });
+      assert.equal(r.status, 200);
+      assert.equal(r.json.hit, 'IMG');
+      assert.equal('src' in r.json, false, `no src for ${bad.slice(0, 30)}`);
+    }
+    tapEl({ tagName: 'IMG', currentSrc: 'https://cdn.example/' + 'x'.repeat(2048 - 'https://cdn.example/'.length) });
+    r = await post('/cmux/browser/tap', { surface: S2, fx: 0.5, fy: 0.5 });
+    assert.equal(r.json.src.length, 2048, 'exactly the cap is kept');
+    tapEl({ tagName: 'DIV', currentSrc: 'https://cdn.example/a.jpg' });
+    r = await post('/cmux/browser/tap', { surface: S2, fx: 0.5, fy: 0.5 });
+    assert.equal(r.json.hit, 'DIV');
+    assert.equal('src' in r.json, false, 'only IMG hits carry src');
+  } finally {
+    fs.rmSync(path.join(dir, 'tap-el.json'), { force: true });
+  }
 });
 
 test('type: text goes over the cmux socket (authed), never argv, never logged or echoed', async () => {
