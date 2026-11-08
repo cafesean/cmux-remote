@@ -55,3 +55,23 @@ test('cache: file re-read only after the 60 s usage cache expires', async () => 
   t += lib.USAGE_CACHE_MS - 1; assert.equal((await u.usage()).accounts[0].util7d, 0.42);
   t += 2; assert.equal((await u.usage()).accounts[0].util7d, 0.9);
 });
+
+// D175 (HMX-61): the response says WHY there is no 5h / 7d reading, so the app can show it instead of a blank.
+test('usageFile: unset / unreadable / no_readings / ok, with updatedAt + count of accounts that have a reading', async () => {
+  assert.deepEqual((await mk(undefined).usage()).usageFile, { state: 'unset', updatedAt: null, withData: 0 });
+  assert.deepEqual((await mk('rel.json').usage()).usageFile, { state: 'unset', updatedAt: null, withData: 0 });
+  for (const f of [path.join(dir, 'nope2.json'), put('bad2.json', '{nope'), put('shape2.json', '{"accounts":1}')]) {
+    assert.deepEqual((await mk(f).usage()).usageFile, { state: 'unreadable', updatedAt: null, withData: 0 }, f);
+  }
+  // the chief-of-staff producer before any status-line sample: every row present, every util null
+  const empty = put('empty.json', { updatedAt: '2026-11-08T06:24:12+00:00', accounts: ['mux2', 'rej'].map((name) => ({ name, status: 'unknown', util5h: null, util7d: null, reset5h: null, reset7d: null, checkedAt: null, source: 'cli-statusline' })) });
+  const e = await mk(empty).usage();
+  assert.deepEqual(e.usageFile, { state: 'no_readings', updatedAt: '2026-11-08T06:24:12.000Z', withData: 0 });
+  assert.equal(e.accounts.find((a) => a.name === 'mux2').util5h, null);
+  assert.deepEqual((await mk(put('ok.json', FILE)).usage()).usageFile, { state: 'ok', updatedAt: '2026-11-07T03:59:00.000Z', withData: 2 });
+});
+
+test('usageFile: keychain locked still says nothing about the file', async () => {
+  const u = lib.createUsage({ usageFile: put('l.json', FILE), now: () => NOW, readLaunches: () => [], accounts: { list: async () => ({ keychain: 'locked', accounts: [] }) } });
+  assert.deepEqual(await u.usage(), { keychain: 'locked', accounts: [] });
+});
