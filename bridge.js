@@ -22,6 +22,7 @@
 //   CMUX_BIN       path to the cmux CLI (default: the macOS app bundle path)
 //   BACKEND        cmux (default) | tmux — tmux drives a headless tmux server through lib/tmux-cli.js
 //   TMUX_BIN / TMUX_SOCKET / TMUX_SESSION   the tmux backend's binary, server socket, default session
+require('./lib/log-ts').install();   // p41 D206b: ISO timestamp on every log line (see lib/log-ts.js)
 const { emptyShadowed } = require('./loadenv');
 // p62 S2: see server.js: stdin secrets first, then main() runs. Unset -> no-op.
 const secretsIn = require('./lib/secrets-stdin');
