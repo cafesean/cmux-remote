@@ -76,9 +76,38 @@ function plainBlock(lines, start) {
   return { end: asks.length ? end : start + 1, callout: asks.length ? needsYou(asks) : null };
 }
 
+// D197: a session sometimes wraps its NEEDS YOU banner in a code fence. When the LAST non-blank block of the
+// message is a fence whose whole content is a banner, drop the fence lines so it lifts like the unfenced form.
+// A fenced banner anywhere else (a quoted rule, docs) stays example text.
+function unfenceTrailingBanner(lines) {
+  let last = lines.length - 1;
+  while (last >= 0 && !lines[last].trim()) last--;
+  const close = last >= 0 ? FENCE.exec(lines[last]) : null;
+  if (!close || lines[last].slice(close[0].length).trim()) return lines;
+  let fence = null;
+  let open = -1;
+  for (let i = 0; i <= last; i++) {
+    const f = FENCE.exec(lines[i]);
+    if (fence) {
+      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !lines[i].slice(f[0].length).trim()) {
+        if (i === last) break;
+        fence = null;
+      }
+    } else if (f && !(f[1][0] === '`' && lines[i].includes('`', f[0].length))) {
+      fence = f[1];
+      open = i;
+    }
+  }
+  if (!fence || open < 0) return lines;
+  const inner = lines.slice(open + 1, last);
+  const r = splitCallouts(inner.join('\n'), { seanBanner: true });
+  if (!r.callouts.length || r.text.trim()) return lines;
+  return [...lines.slice(0, open), ...inner, ...lines.slice(last + 1)];
+}
+
 function splitCallouts(markdown, { seanBanner = false } = {}) {
   if (typeof markdown !== 'string') return { text: '', callouts: [] };
-  const lines = markdown.split('\n');
+  const lines = seanBanner ? unfenceTrailingBanner(markdown.split('\n')) : markdown.split('\n');
   const keep = [];
   const callouts = [];
   let fence = null;      // the opening fence marker while inside a code fence

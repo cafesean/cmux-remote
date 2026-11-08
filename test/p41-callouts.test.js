@@ -96,7 +96,8 @@ test('20k-line █ run without ask parses in < 100 ms', () => {
 });
 
 test('banner inside a code fence ignored', () => {
-  const md = ['```', BANNER, '```'].join('\n');
+  // D197: a fenced banner is example text unless it is the last block (see p41-d197-fenced-banner).
+  const md = ['```', BANNER, '```', '', 'That was the format.'].join('\n');
   assert.deepStrictEqual(parseCallouts(md, { seanBanner: true }), []);
 });
 
