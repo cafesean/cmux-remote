@@ -2454,7 +2454,7 @@ const browserShotLimiter = require('./lib/shot-limiter').createShotLimiter({ min
 const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => secretsIn.childEnv(),
   secret: SECRET, host: HOST, socket: SOCKET });
 // p41 D189: Remote Desktop setup (TCC grants the Mac screen needs) — probe cached, reminder flag.
-const rdSetup = require('./lib/rd-setup').createRdSetup({ childEnv: () => secretsIn.childEnv(), flags: () => macScreen.flags });
+const rdSetup = require('./lib/rd-setup').createRdSetup({ childEnv: () => secretsIn.childEnv(), flags: () => macScreen.flags, observed: () => macScreen.observed() });
 function cmuxBrowserShot(res, surface) {
   const gate = browserShotLimiter.take(surface);
   if (!gate.ok) return send(res, 429, { error: 'rate_limited', retryMs: gate.retryMs });
