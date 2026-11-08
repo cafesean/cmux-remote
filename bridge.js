@@ -1414,7 +1414,7 @@ function cmuxNewSurface(req, res) {
           if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
           if (!(await accountsLib.exists(account))) return send(res, 400, { error: 'bad_account' });
         }
-        args.push('--command', `${shq(ACCOUNT_BIN_DIR + '/hypermux-claude')} ${account === 'default' ? 'a' : account}`);
+        args.push('--command', `${SKIP_PERMS_PREFIX}${shq(ACCOUNT_BIN_DIR + '/hypermux-claude')} ${account === 'default' ? 'a' : account}`);
       }
       const pre = await loadTree();
       if (pre) for (const w of pre) for (const t of w.tabs) before.add(t.id);
@@ -2594,6 +2594,9 @@ const accountUsage = require('./lib/accounts-usage').createUsage({ accounts: acc
 // The pane command is shell-quoted (shq), so spaces are fine — releases live under
 // "~/Library/Application Support/…". Quotes, backslashes and control chars are still refused as a
 // second line of defence (no legitimate install path has them).
+// D178: server setting HYPERMUX_SKIP_PERMISSIONS=1 (default off). The pane env comes from cmux, not the
+// bridge, so the launcher gets the switch as a fixed literal prefix; only the exact value "1" enables it.
+const SKIP_PERMS_PREFIX = process.env.HYPERMUX_SKIP_PERMISSIONS === '1' ? 'HYPERMUX_SKIP_PERMISSIONS=1 ' : '';
 const ACCOUNT_BIN_DIR_OK = /^[^\x00-\x1f\x7f'"\\]+$/.test(ACCOUNT_BIN_DIR);
 // POSIX single-quote: 'a'\''b' — same as gitpanel shellQuote.
 const shq = (v) => "'" + String(v).split("'").join("'\\''") + "'";

@@ -73,4 +73,10 @@ if [ "$NAME" != a ]; then
 fi
 export CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
 
+# D178: opt-in unattended mode. Only the literal "1" counts; the flags are fixed here (no free text
+# from the app/env ever reaches argv). Matches the chief-of-staff spawn.sh launch flags.
+if [ "${HYPERMUX_SKIP_PERMISSIONS:-}" = 1 ]; then
+  HM_ARGS=(${HM_ARGS[@]+"${HM_ARGS[@]}"} --effort high --dangerously-skip-permissions)
+fi
+
 exec "$CLAUDE_BIN" ${HM_ARGS[@]+"${HM_ARGS[@]}"} "$@"
