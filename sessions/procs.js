@@ -117,7 +117,9 @@ async function tmuxSocketState(tmux, socket) {
   let out;
   try {
     out = await tmux(socket, ['list-panes', '-a', '-F',
-      ['#{session_name}', '#{pane_id}', '#{pane_pid}', '#{pane_active}', '#{window_active}', '#{session_attached}', '#{start_time}', '#{pane_current_path}', '#{session_created}'].join(SEP)]);
+      ['#{session_name}', '#{pane_id}', '#{pane_pid}', '#{pane_active}', '#{window_active}', '#{session_attached}', '#{start_time}', '#{pane_current_path}', '#{session_created}',
+        // D188 (appended, so older fixtures still parse): window, foreground command, dead flag
+        '#{window_id}', '#{pane_current_command}', '#{pane_dead}'].join(SEP)]);
   } catch (_) { return null; }
   const sessions = new Map();
   for (const line of String(out || '').split('\n')) {
@@ -129,7 +131,8 @@ async function tmuxSocketState(tmux, socket) {
       s = { socket, name: f[0], attached: Number(f[5]) || 0, epoch: Number(f[6]) || 0, created: Number(f[8]) || 0, panes: [], surfaceId: null, clientPids: [] };
       sessions.set(f[0], s);
     }
-    s.panes.push({ id: f[1], pid: Number(f[2]), active: f[3] === '1' && f[4] === '1', cwd: f[7] || null });
+    s.panes.push({ id: f[1], pid: Number(f[2]), active: f[3] === '1' && f[4] === '1', cwd: f[7] || null,
+      window: f[9] || null, command: f[10] || null, dead: f[11] === '1' });
   }
   // Client pids per session (`tmux attach` processes): a session whose client descends from the cmux
   // app is shown by that cmux surface (cmux reports no tty, so the process tree is the signal).
@@ -387,4 +390,4 @@ async function tmuxGrid(target, deps) {
   return { seq, grid: redactGrid(grid) };
 }
 
-module.exports = { tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+module.exports = { underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
