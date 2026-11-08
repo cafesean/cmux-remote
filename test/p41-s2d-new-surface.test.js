@@ -305,3 +305,21 @@ test('server without SERVER_TOKEN: new-surface with account 503 not_secured (not
     assert.deepEqual(seen.pop(), { workspace: WS });
   } finally { await s.stop(); await new Promise((r) => srv.close(r)); }
 });
+
+// D178: HYPERMUX_SKIP_PERMISSIONS=1 on the bridge -> fixed literal env prefix on the launcher command
+test('D178: bridge switch prefixes the launcher command; default (above) does not', async () => {
+  const b2 = await bootBridge({ cwd: dir, env: {
+    BRIDGE_SECRET: SECRET, CMUX_BIN: path.join(dir, 'fake-cmux'), FAKE_DIR: dir,
+    HYPERMUX_SECURITY_BIN: path.join(sec, 'security'), FAKE_SEC_DIR: sec, USER: 'tester',
+    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private.json'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'),
+    NODE_ENV: 'test', COMPLETIONS_ENABLED: '0', HYPERMUX_SKIP_PERMISSIONS: '1',
+  } });
+  try {
+    fs.writeFileSync(path.join(dir, 'cmux.log'), '');
+    const r = await fetch(b2.base + '/cmux/new-surface', { method: 'POST', headers: { 'x-bridge-secret': SECRET, 'content-type': 'application/json' }, body: JSON.stringify({ workspace: WS, account: 'default' }) });
+    assert.equal(r.status, 200);
+    const calls = fs.readFileSync(path.join(dir, 'cmux.log'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse).filter((a) => a[0] === 'new-surface');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][calls[0].indexOf('--command') + 1], `HYPERMUX_SKIP_PERMISSIONS=1 '${BIN}/hypermux-claude' a`);
+  } finally { await b2.stop(); }
+});
