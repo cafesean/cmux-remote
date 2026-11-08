@@ -83,7 +83,8 @@ test('D52: send to a bridge that is restarting retries once, then 503 bridge_res
   assert.equal(r.headers.get('retry-after'), String(LIMITS.retryAfterSec));
   assert.ok(Date.now() - t0 >= LIMITS.connectRetryDelayMs, 'waited for the one retry');
   assert.ok(await until(() => /relay_fail /.test(srv.stderr())), 'structured log line written');
-  const line = srv.stderr().split('\n').find((l) => l.startsWith('relay_fail '));
+  // D206b: lines carry an ISO timestamp prefix (lib/log-ts.js)
+  const line = srv.stderr().split('\n').map((l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z /, '')).find((l) => l.startsWith('relay_fail '));
   const rec = JSON.parse(line.slice('relay_fail '.length));
   assert.equal(rec.path, '/cmux/send');
   assert.equal(rec.machine, 'default');
