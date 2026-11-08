@@ -23,6 +23,8 @@ const path = require('path');
 const { kindOfCommand } = require('./detect');
 const tmuxCli = require('../lib/tmux-cli');
 const tmuxIds = require('../lib/tmux-ids');
+const { ansiToGrid } = require('../lib/tmux-grid');
+const { redactGrid } = require('../lib/redact-tokens');
 const { SWAP } = require('./join');
 
 // Every limit this module adds (LIMITS.md rows).
@@ -360,4 +362,29 @@ async function tmuxSend(target, opts, deps) {
   return { ok: true };
 }
 
-module.exports = { tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+// p41 D179 (Sean: "option menus don't show in the app"): a tmux-only session (a cos worker no cmux pane shows)
+// had NO screen for the live-menu parser, so its permission prompt / selector never became answer buttons.
+// Its current screen as a cmux render_grid: one `display` + `capture-pane -e` (visible rows only, read-only),
+// rebuilt by lib/tmux-grid.js exactly like the tmux backend's terminal.replay. `seq` changes exactly when the
+// screen or cursor changes (the choose readback only compares it for "a newer frame"). null on any failure.
+async function tmuxGrid(target, deps) {
+  if (!target || !target.socket || !/^%\d+$/.test(String(target.pane || ''))) return null;
+  const exec = (deps && deps.run) || ((args) => run(tmuxCli.resolveTmuxBin(process.env.TMUX_BIN || ''), args, LIMITS.tmuxTimeoutMs));
+  let out;
+  try {
+    out = await exec(['-S', target.socket, 'display', '-p', '-t', target.pane, tmuxCli.HDR_FMT, ';',
+      'capture-pane', '-p', '-e', '-N', '-t', target.pane]);
+  } catch (_) { return null; }
+  out = String(out || '');
+  const nl = out.indexOf('\n');
+  const hdr = out.slice(0, nl < 0 ? undefined : nl).split('\x1f');
+  if (hdr[0] !== 'CMUXR1' || hdr.length !== 9) return null;
+  const [, , w, h, cx, cy, cflag, alt] = hdr;
+  const capture = nl < 0 ? '' : out.slice(nl + 1);
+  const grid = ansiToGrid(capture, { columns: Number(w), rows: Number(h), alt: alt === '1',
+    cursor: { column: Number(cx), row: Number(cy), visible: cflag === '1' } });
+  const seq = parseInt(require('crypto').createHash('md5').update(`${capture}\x1f${cx},${cy},${cflag},${alt}`).digest('hex').slice(0, 12), 16);
+  return { seq, grid: redactGrid(grid) };
+}
+
+module.exports = { tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };

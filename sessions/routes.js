@@ -104,7 +104,14 @@ function createSessionRoutes(deps) {
   const statusPollMs = deps.statusPollMs || LIMITS.streamStatusMs;
   const readEventsRaw = deps.readEvents || eventlog.readEvents;
   // A14: the surface's current screen (bridge gridPayload) for the live-menu choice source.
-  const choices = choice.createChoiceReader({ readGrid: deps.readGrid || null });
+  // D179: a tmux-only session (minted tmux id, no cmux pane) is read with tmux capture-pane instead.
+  const readGridCmux = deps.readGrid || null;
+  const tmuxGridOf = deps.tmuxGrid || procs.tmuxGrid;
+  const choices = choice.createChoiceReader({ readGrid: async (surface) => {
+    const t = await tmuxTarget(surface);
+    if (t) return tmuxGridOf(t);
+    return readGridCmux ? readGridCmux(surface) : null;
+  } });
   // Process/tmux snapshot for the agent probe (sessions/procs.js). On tmux only the bridge's own
   // socket is looked at, so a pane id never matches another server's pane. Tests inject procSnapshot.
   const procOpts = { home };
@@ -289,7 +296,7 @@ function createSessionRoutes(deps) {
     await addStatusLine(s, join, tab, d);
     if (choice.WAITING.has(s.status)) {
       try {
-        const c = await choices.choiceFor({ status: s.status, lastMsgs, surface: tab.id, screen: !tab.tmuxPane, fresh: !!d.freshChoice });
+        const c = await choices.choiceFor({ status: s.status, lastMsgs, surface: tab.id, screen: true, fresh: !!d.freshChoice });
         if (c) s.choice = c;
       } catch (_) { /* optional */ }
     }
