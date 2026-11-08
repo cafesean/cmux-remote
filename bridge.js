@@ -1576,6 +1576,25 @@ async function d188TmuxClose(plan) {
   const r = await hostedTmux._run(plan.args);
   return { session: plan.session, action: plan.action, ok: r.code === 0 };
 }
+// D188b: Close on a tmux-only row (minted id, no cmux pane): the chief stop first (it kills the pid
+// itself), then kill-session =NAME on the hosted socket. Re-resolved at request time; other sockets never.
+async function d188bCloseTmuxOnly(res, surface) {
+  if (tmuxCli || !hostedTmux) return send(res, 404, { error: 'no_such_surface' });
+  const snap = await d188Snapshot().catch(() => null);
+  const plan = tmuxClose.tmuxOnlyPlan(snap, surface, HOSTED_TMUX_SOCKET);
+  if (!plan) return send(res, 404, { error: 'no_such_surface' });
+  const tdir = require('./lib/tasks').tasksDir();
+  const name = await tmuxClose.cosWorkerOf(snap, plan.session, {
+    stopBin: COS_STOP_BIN, socket: HOSTED_TMUX_SOCKET,
+    taskExists: async (n) => !!tdir && fs.existsSync(path.join(tdir, `${n}.md`)),
+    envOf: d188EnvOf,
+  }).catch(() => null);
+  const cos = name ? await d188CosStop(name) : null;
+  const tmux = await d188TmuxClose(plan);
+  if (!tmux.ok) return send(res, 502, { error: 'tmux_failed' });
+  const workspaces = await treePayload();
+  send(res, 200, { ok: true, closed: surface, tmux, ...(cos ? { cos: { name, code: cos.code } } : {}), workspaces: workspaces || [] });
+}
 // GET /cmux/orphans · POST /cmux/orphans/close {names:[…]} — idle tmux sessions no cmux pane shows.
 async function d188Orphans() {
   const snap = await d188Snapshot();
@@ -1616,7 +1635,7 @@ function cmuxCloseTab(req, res) {
       const tree = await loadTree();
       if (tree == null) return send(res, 502, { error: 'cmux_failed', detail: 'tree unavailable' });
       let ws = tree.find((w) => (w.tabs || []).some((t) => t.id === surface || t.ref === surface));
-      if (!ws) return send(res, 404, { error: 'no_such_surface' });
+      if (!ws) return d188bCloseTmuxOnly(res, surface);
       // D188: what this close does to the tmux session the pane shows (planned BEFORE the attach client goes).
       const tab = ws.tabs.find((t) => t.id === surface || t.ref === surface);
       const d188 = await d188ClosePlan(tab && tab.id).catch(() => null);

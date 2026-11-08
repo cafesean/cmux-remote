@@ -134,3 +134,17 @@ test('snapshot parses the appended window/command/dead fields and still reads th
   const o = await procs.snapshot({ psAll: async () => PS, tmuxSockets: [HOSTED], tmuxAt: tmuxAt([]) });
   assert.deepEqual({ w: o.sessions[0].panes[0].window, c: o.sessions[0].panes[0].command, d: o.sessions[0].panes[0].dead }, { w: null, c: null, d: false });
 });
+
+// ---- D188b: closing a tmux-only row -----------------------------------------------------------------
+const tmuxIds = require('../lib/tmux-ids');
+test('D188b tmux-only close: minted id -> kill-session =NAME on the hosted socket only, live claude or not', () => {
+  const live = { ...sess('m-live', { panes: [pane('%7', 300, { command: 'claude' })] }), epoch: 1789991468 };
+  const id = tmuxIds.mint('surface', 1789991468, 7);
+  assert.deepEqual(tc.tmuxOnlyPlan(snap(live), id, HOSTED), { socket: HOSTED, session: 'm-live', action: 'kill-session', args: ['kill-session', '-t', '=m-live'] });
+  // same pane on another socket: never
+  assert.equal(tc.tmuxOnlyPlan(snap({ ...live, socket: OTHER }), id, HOSTED), null);
+  // pane gone / another server epoch / a cmux uuid: nothing
+  assert.equal(tc.tmuxOnlyPlan(snap(live), tmuxIds.mint('surface', 1789991468, 8), HOSTED), null);
+  assert.equal(tc.tmuxOnlyPlan(snap(live), tmuxIds.mint('surface', 1700000000, 7), HOSTED), null);
+  assert.equal(tc.tmuxOnlyPlan(snap(live), SURF, HOSTED), null);
+});

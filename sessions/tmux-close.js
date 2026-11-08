@@ -18,6 +18,7 @@
 //
 // Pure planning over a procs.snapshot(); the caller runs the argv (execFile, never a shell).
 const { ownerOf, findAgent } = require('./procs');
+const tmuxIds = require('../lib/tmux-ids');
 
 const LIMITS = {
   orphansMax: 64,          // names listed / accepted per request
@@ -52,6 +53,23 @@ function closePlan(snap, surfaceId, hostedSocket) {
     if (p && p.window) return { ...base, action: 'kill-window', args: ['kill-window', '-t', p.window] };
   }
   return { ...base, action: 'kill-session', args: ['kill-session', '-t', `=${o.name}`] };
+}
+
+/**
+ * D188b: close a tmux-only row (a minted surface id, no cmux pane). The user asked for it, claude or not.
+ * The pane must exist NOW on the hosted socket under the id's epoch -> { socket, session, action, args } | null.
+ */
+function tmuxOnlyPlan(snap, surfaceId, hostedSocket) {
+  const p = tmuxIds.parse(String(surfaceId || ''));
+  if (!p || p.kind !== 4 || !snap || !hostedSocket) return null;
+  for (const s of snap.sessions || []) {
+    if (s.socket !== hostedSocket) continue;              // never another socket
+    if (!tmuxIds.sameEpoch(p.epoch, s.epoch)) continue;
+    if (!s.panes.some((x) => x.id === `%${p.n}`)) continue;
+    if (!SESSION_RE.test(s.name)) return null;
+    return { socket: s.socket, session: s.name, action: 'kill-session', args: ['kill-session', '-t', `=${s.name}`] };
+  }
+  return null;
 }
 
 /** True when no pane of `s` runs anything but an idle shell (or is dead). Unknown table = false. */
@@ -129,4 +147,4 @@ async function cosWorkerOf(snap, sessionName, opts) {
 /** The stop argv for execFile(bin, argv). Never a shell string. */
 const cosStopArgv = (name) => (COS_NAME_RE.test(String(name)) ? [String(name), 'STOPPED', '--force'] : null);
 
-module.exports = { closePlan, listOrphans, parseNames, closeOrphans, cosWorkerOf, cosStopArgv, isShell, LIMITS, SESSION_RE, COS_NAME_RE };
+module.exports = { closePlan, tmuxOnlyPlan, listOrphans, parseNames, closeOrphans, cosWorkerOf, cosStopArgv, isShell, LIMITS, SESSION_RE, COS_NAME_RE };
