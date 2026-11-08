@@ -1,6 +1,6 @@
 'use strict';
 // D183: a configured start folder that is a symlink is returned AS GIVEN (the mini vault symlink
-// resolves to /Volumes/Data/Obsidian, whose argv the mini's system-guardian kills); dedupe still uses
+// resolves to a real mount path that a host process guard kills); dedupe still uses
 // the real folder; the server's own releases/<sha> dirs are never suggested.
 const test = require('node:test');
 const assert = require('node:assert');
