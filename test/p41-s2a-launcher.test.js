@@ -229,3 +229,15 @@ test('meta write failure (unwritable path) -> exit 2, claude not run', () => {
   assert.strictEqual(res.status, 2);
   assert.strictEqual(res.stdout.includes('hasToken'), false);
 });
+
+// D178: unattended flags only when HYPERMUX_SKIP_PERMISSIONS=1 (fixed allowlist, exact "1")
+test('D178: skip-permissions switch adds the fixed flags; absent/other values do not', () => {
+  const r = rig();
+  const argv = (extra) => { const res = run(r, ['acme', '--', '-p', 'hi'], extra); assert.strictEqual(res.status, 0, res.stderr); return JSON.parse(res.stdout).argv; };
+  const on = argv({ HYPERMUX_SKIP_PERMISSIONS: '1' });
+  assert.ok(on.includes('--dangerously-skip-permissions') && on.includes('--effort') && on[on.indexOf('--effort') + 1] === 'high', on.join(' '));
+  assert.deepEqual(on.slice(-2), ['-p', 'hi']);
+  for (const extra of [{}, { HYPERMUX_SKIP_PERMISSIONS: '0' }, { HYPERMUX_SKIP_PERMISSIONS: 'true' }, { HYPERMUX_SKIP_PERMISSIONS: '--evil' }]) {
+    assert.ok(!argv(extra).some((a) => /dangerously|effort|evil/.test(a)), JSON.stringify(extra));
+  }
+});

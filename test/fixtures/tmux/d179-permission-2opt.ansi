@@ -1,0 +1,16 @@
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m [2m│[0m Hook [1mtool.check[0m requires confirmation for
+ [2m│[0m this command:
+ [2m│[0m This call's input holds your account email
+ [2m│[0m address, which may leave this machine. If
+ [2m│[0m nobody asked to send it, go on without it.
+ [2m│[0m [2m[plugin:cc-plugin-privacy][0m
+ [38;5;246mplugin[39m [38;5;246mhooks.json[39m [38;5;246mto[39m [38;5;246mupdate[39m [38;5;246mhooks[39m
+
+ Do you want to proceed?
+ [38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mYes[39m
+   [38;5;246m2.[39m No
+
+ [38;5;246mEsc[39m [38;5;246mto[39m [38;5;246mcancel[39m [38;5;246m·[39m [38;5;246mTab[39m [38;5;246mto[39m [38;5;246mamend[39m
+[38;5;110m─────────────────────────────[38;5;16m[48;5;110m x-worker-0001 [38;5;110m[49m─
+

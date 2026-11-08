@@ -50,7 +50,8 @@ One terminal, agent or browser surface on one machine.
      pane's current screen by `public/menuparse.js` `menuChoice` (the PWA's own parser). Items must be numbered
      1..n consecutively with exactly one `❯` row. Slash/@ completion menus are not offered (the operator is typing).
   2. `ask`: the transcript's pending AskUserQuestion (the last message), single-select, ONLY when no live menu
-     was readable (e.g. a `reach: 'tmux'` row, or a screen read that timed out). Executed as the option's
+     was readable (e.g. a screen read that timed out). A `reach: 'tmux'` row's screen is read with
+     `tmux capture-pane -e` (D179, `procs.tmuxGrid`), so its permission prompt is a `menu` choice too; its keys go by `tmux send-keys`. Executed as the option's
      1-based number typed without Enter.
   3. `callout`: the last callout with `options:` in the last assistant message. `question` is its title.
      Executed as the option text sent as a normal message plus Enter.
