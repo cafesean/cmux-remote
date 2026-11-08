@@ -10,7 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createPairing } = require('../lib/pairing');
+const { createPairing, thisMacName, THIS_MAC_LABEL } = require('../lib/pairing');
 const { bootServer } = require('./helpers/server-boot');
 
 const TOKEN = 'srv-token-for-tests';
@@ -513,4 +513,28 @@ test('real server: PAIR_LOCAL=off disables local pairing (hello autoPair false, 
     assert.strictEqual(t.status, 403);
     assert.deepStrictEqual(t.json, { error: 'local_only' });
   } finally { await s.stop(); }
+});
+
+// p41 D199 (HMX-86): the iOS-on-Mac build sent its iPad model; the dialog read "Device: iPad Pro (12.9-inch) ...".
+test('local pair: an iPad/iPhone model label from loopback is shown and saved as this Mac; the number check stays', async () => {
+  const confirm = fakeConfirm('allow');
+  const m = await mount({ pairing: { confirm, localMachine: 'local-a' } });
+  try {
+    const r = await post(m.base, '/api/pair/local', lh(m), { deviceName: 'iPad Pro (12.9-inch) (3rd generation)' });
+    assert.strictEqual(r.status, 202, r.text);
+    assert.strictEqual(confirm.calls[0].deviceName, THIS_MAC_LABEL);
+    assert.strictEqual(confirm.calls[0].number, r.json.number, 'the dialog still shows the app\'s number');
+    const w = await post(m.base, '/api/pair/local/wait', lh(m), { requestId: r.json.requestId });
+    assert.strictEqual(w.status, 200, w.text);
+    assert.strictEqual(devicesOnDisk(m.file).find((d) => d.id === w.json.id).deviceName, THIS_MAC_LABEL);
+  } finally { await m.close(); }
+});
+
+test('thisMacName: iOS model / empty -> This Mac; the app\'s own label or a Mac name kept', () => {
+  assert.strictEqual(THIS_MAC_LABEL, 'This Mac (HyprMux app)');
+  for (const n of ['iPad Pro (12.9-inch) (3rd generation)', 'iPad', 'iPhone 15 Pro', 'ipod touch', '', '  ', undefined, 'device']) assert.strictEqual(thisMacName(n), THIS_MAC_LABEL, String(n));
+  assert.strictEqual(thisMacName("This Mac (HyprMux app) · Sean's Mac mini"), "This Mac (HyprMux app) · Sean's Mac mini");
+  assert.strictEqual(thisMacName('这台 Mac（HyprMux 应用）'), '这台 Mac（HyprMux 应用）');
+  assert.strictEqual(thisMacName('Desk app'), 'Desk app');
+  assert.strictEqual(thisMacName('x'.repeat(200)).length, 64, 'still capped at NAME_MAX');
 });

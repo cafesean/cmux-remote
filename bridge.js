@@ -2571,6 +2571,13 @@ function cmuxBrowserHits(res, surface) {
   });
 }
 
+// p41 D199: max length of an IMG hit's src in a browser tap reply (longer = dropped; data: / blob: never sent).
+const BROWSER_TAP_SRC_MAX = 2048;
+function tapImageSrc(r) {
+  const v = r && r.hit === 'IMG' ? r.src : null;
+  return typeof v === 'string' && /^https?:\/\//i.test(v) && v.length <= BROWSER_TAP_SRC_MAX ? v : null;
+}
+
 // POST /cmux/browser/tap { surface, fx, fy } — click the page at a fraction of the viewport.
 function cmuxBrowserTap(req, res) {
   cmuxReadBody(req, (b) => {
@@ -2586,10 +2593,14 @@ function cmuxBrowserTap(req, res) {
     // are real. So a tap on an ANCHOR never dispatches the click at all — the eval only reports the
     // href (nav) and the handler drives a `goto`. Everything else gets the full synthetic click:
     // DOM interaction (buttons, inputs, SPA handlers) works fine.
-    const js = `(function(fx,fy){var x=Math.round(fx*innerWidth),y=Math.round(fy*innerHeight);var el=document.elementFromPoint(x,y);if(!el)return JSON.stringify({hit:null,x:x,y:y});try{if(el.focus)el.focus();}catch(e){}if(el.tagName==='IFRAME'){var xo=false;try{xo=!el.contentDocument;}catch(e){xo=true;}if(xo){var fl=null;for(var n=el;n&&n!==document.body&&n!==document.documentElement;n=n.parentElement){var ps=getComputedStyle(n).position;if(ps==='fixed'||ps==='sticky'){fl=n;}}if(fl){fl.setAttribute('data-cmr-hidden','1');fl.style.setProperty('display','none','important');return JSON.stringify({hit:'IFRAME',xframe:true,closed:true,x:x,y:y,loc:location.href});}try{el.focus();}catch(e){}return JSON.stringify({hit:'IFRAME',xframe:true,closed:false,x:x,y:y,loc:location.href});}}var a=el.closest?el.closest('a[href]'):null;var href=(a&&a.href&&/^https?:/i.test(a.href)&&a.href!==location.href)?a.href:null;var ed=(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable===true);if(!href){['mousedown','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0}));});}var sec=el.tagName==='INPUT'&&String(el.type).toLowerCase()==='password';var val=ed&&!sec?String(el.value!==undefined?el.value:(el.textContent||'')).slice(0,2000):(sec?'':null);return JSON.stringify({hit:el.tagName,editable:ed,secure:sec,value:val,x:x,y:y,nav:href,loc:location.href});})(${fx},${fy})`;
+    const js = `(function(fx,fy){var x=Math.round(fx*innerWidth),y=Math.round(fy*innerHeight);var el=document.elementFromPoint(x,y);if(!el)return JSON.stringify({hit:null,x:x,y:y});try{if(el.focus)el.focus();}catch(e){}if(el.tagName==='IFRAME'){var xo=false;try{xo=!el.contentDocument;}catch(e){xo=true;}if(xo){var fl=null;for(var n=el;n&&n!==document.body&&n!==document.documentElement;n=n.parentElement){var ps=getComputedStyle(n).position;if(ps==='fixed'||ps==='sticky'){fl=n;}}if(fl){fl.setAttribute('data-cmr-hidden','1');fl.style.setProperty('display','none','important');return JSON.stringify({hit:'IFRAME',xframe:true,closed:true,x:x,y:y,loc:location.href});}try{el.focus();}catch(e){}return JSON.stringify({hit:'IFRAME',xframe:true,closed:false,x:x,y:y,loc:location.href});}}var a=el.closest?el.closest('a[href]'):null;var href=(a&&a.href&&/^https?:/i.test(a.href)&&a.href!==location.href)?a.href:null;var ed=(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable===true);if(!href){['mousedown','mouseup','click'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y,button:0}));});}var sec=el.tagName==='INPUT'&&String(el.type).toLowerCase()==='password';var val=ed&&!sec?String(el.value!==undefined?el.value:(el.textContent||'')).slice(0,2000):(sec?'':null);var cs=el.tagName==='IMG'?String(el.currentSrc||''):'';var src=(/^https?:/i.test(cs)&&cs.length<=${BROWSER_TAP_SRC_MAX})?cs:null;return JSON.stringify({hit:el.tagName,editable:ed,secure:sec,value:val,x:x,y:y,nav:href,loc:location.href,src:src});})(${fx},${fy})`;
     (async () => {
       const out = await browserEval(surface, js);
       let r = {}; try { r = JSON.parse(out) || {}; } catch (_) { r = { raw: String(out || '').slice(0, 300) }; }
+      // p41 D199 (D195): an IMG hit carries its own currentSrc so the app's viewer shows the image itself. The page
+      // wrote this JSON, so the shape is checked again here: http(s) only, <= BROWSER_TAP_SRC_MAX, IMG hits only.
+      r.src = tapImageSrc(r);
+      if (r.src === null) delete r.src;
       noteAction(surface);   // SSE bursts frames for the next 2.5s — no screenshot inside the response
       if (r.nav) {
         // Anchor tap → real navigation via cmux. Fire-and-forget; ack instantly with the target url.
