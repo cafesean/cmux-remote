@@ -963,6 +963,24 @@ async function handleApi(req, res, u) {
       }));
     });
   }
+  // D188: idle tmux sessions no cmux pane shows (the bridge re-checks every name before it kills it).
+  if (req.method === 'GET' && p === '/api/cmux/orphans') {
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    return relay(res, bridge(m, '/cmux/orphans', { timeout: 15000 }));
+  }
+  if (req.method === 'POST' && p === '/api/cmux/orphans/close') {
+    return readBody(req, (b) => {
+      if (!b) return sendJson(res, 400, { error: 'bad_json' });
+      const m = findMachine(b.machine);
+      if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      relay(res, bridge(m, '/cmux/orphans/close', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ names: b.names }),
+        timeout: 20000,
+      }));
+    });
+  }
   if (req.method === 'POST' && p === '/api/cmux/close-tab') {
     return readBody(req, (b) => {
       if (!b) return sendJson(res, 400, { error: 'bad_json' });
@@ -971,7 +989,7 @@ async function handleApi(req, res, u) {
       relay(res, bridge(m, '/cmux/close-tab', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ surface: b.surface }),
-        timeout: 20000,
+        timeout: 45000,   // D188: may wait on HYPERMUX_COS_STOP_BIN (30 s cap)
       }));
     });
   }
