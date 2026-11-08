@@ -63,7 +63,7 @@ before(async () => {
   br = await bootBridge({ cwd: dir, env: {
     BRIDGE_SECRET: SECRET, CMUX_BIN: path.join(dir, 'fake-cmux'), FAKE_DIR: dir,
     HYPERMUX_SECURITY_BIN: path.join(sec, 'security'), FAKE_SEC_DIR: sec, USER: 'tester',
-    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private.json'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'),
+    HYPERMUX_PRIVATE_FILE: path.join(dir, 'private.json'), HYPERMUX_START_DIRS_FILE: path.join(dir, 'start-dirs.json'), RADAR_DIR: path.join(dir, 'radar'), P41_PROCS_FIXTURE: path.join(dir, 'procs.json'),
     NODE_ENV: 'test', COMPLETIONS_ENABLED: '0',
   } });
 });
@@ -322,4 +322,60 @@ test('D178: bridge switch prefixes the launcher command; default (above) does no
     assert.equal(calls.length, 1);
     assert.equal(calls[0][calls[0].indexOf('--command') + 1], `HYPERMUX_SKIP_PERMISSIONS=1 '${BIN}/hypermux-claude' a`);
   } finally { await b2.stop(); }
+});
+
+// D176/D177: the folder a new session starts in.
+test('D176 cwd: valid dir -> --working-directory (terminal) and cd-prefixed launcher (account)', async () => {
+  const r = await ns({ workspace: WS, cwd: dir });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.ns, [TERMINAL_ARGV.concat(['--working-directory', dir])]);
+  const a = await ns({ workspace: WS, account: 'acme', cwd: dir });
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.deepEqual(a.ns, [TERMINAL_ARGV.concat(['--working-directory', dir, '--command', `cd '${dir}' && '${BIN}/hypermux-claude' acme`])]);
+});
+
+test('D176 cwd: relative / missing / a file / NUL / non-string -> 400 bad_cwd, nothing spawned', async () => {
+  const file = path.join(dir, 'procs.json');
+  for (const cwd of ['relative/dir', path.join(dir, 'nope'), file, dir + '\0x', 5, ['x'], '/' + 'a'.repeat(2000)]) {
+    const r = await ns({ workspace: WS, cwd });
+    assert.equal(r.status, 400, JSON.stringify(cwd));
+    assert.deepEqual(r.json, { error: 'bad_cwd' });
+    assert.deepEqual(r.ns, []);
+  }
+});
+
+test('D177 start-dirs: lists the last-used folder first; every entry is a real directory', async () => {
+  await ns({ workspace: WS, cwd: dir });
+  const r = await fetch(br.base + '/cmux/start-dirs', { headers: { 'x-bridge-secret': SECRET } });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.ok(Array.isArray(j.dirs) && j.dirs.length >= 1, JSON.stringify(j));
+  assert.deepEqual(j.dirs[0], { path: dir, name: path.basename(dir), source: 'recent' });
+  for (const d of j.dirs) assert.ok(fs.statSync(d.path).isDirectory(), d.path);
+});
+
+// D176 follow-up: Sean's case — every session stopped, so the clicked pane is terminal-only (no status
+// line, the app sends no cwd). The bridge resolves the pane's own folder from its last hook event.
+test('D176 terminal-only pane, no cwd sent -> starts in the pane folder from its last hook event', async () => {
+  const work = path.join(dir, 'vault'); fs.mkdirSync(work, { recursive: true });
+  const SF = 'aaaaaaa1-3333-4333-8333-333333333331';
+  eventlog.appendEventSync(path.join(dir, 'radar'), { sessionId: 'sess-x', event: 'UserPromptSubmit', surfaceId: SF, cwd: path.join(dir, 'procs.json') }, Date.now() - 60000);
+  eventlog.appendEventSync(path.join(dir, 'radar'), { sessionId: 'sess-x', event: 'SessionEnd', surfaceId: SF, cwd: work }, Date.now() - 1000);
+  for (const body of [{ workspace: WS, pane: 'pane:1' }, { workspace: WS, surface: SF }]) {
+    const r = await ns(body);
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.ok(r.ns[0].includes('--working-directory'), JSON.stringify(r.ns));
+    assert.equal(r.ns[0][r.ns[0].indexOf('--working-directory') + 1], work);
+  }
+  // an explicit cwd still wins over the resolved one
+  const e = await ns({ workspace: WS, pane: 'pane:1', cwd: dir });
+  assert.equal(e.ns[0][e.ns[0].indexOf('--working-directory') + 1], dir);
+  // start-dirs: the clicked pane's folder is `current` and listed first
+  const s = await fetch(br.base + '/cmux/start-dirs?workspace=' + WS + '&pane=pane:1', { headers: { 'x-bridge-secret': SECRET } });
+  const j = await s.json();
+  assert.equal(j.current, work);
+  assert.equal(j.currentSource, 'pane');
+  assert.deepEqual(j.dirs[0], { path: work, name: 'vault', source: 'pane' });
+  const bad = await fetch(br.base + '/cmux/start-dirs?pane=x;y', { headers: { 'x-bridge-secret': SECRET } });
+  assert.equal(bad.status, 400);
 });
