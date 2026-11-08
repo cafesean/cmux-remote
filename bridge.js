@@ -97,9 +97,14 @@ function probeCmuxVersion(cb) {
 // CAPABILITIES plus, on the cmux backend, `cmux: {version, min, supported}` (additive, p18 path: the
 // server relays `capabilities` whole). `supported: null` = not probed yet / version unreadable.
 function capabilities() {
-  if (tmuxCli) return CAPABILITIES;
+  if (tmuxCli) return { ...CAPABILITIES, ...rdScreenCap() };
   if (Date.now() - cmuxCompatAt > CMUX_VERSION_TTL_MS) probeCmuxVersion();
-  return { ...CAPABILITIES, cmux: cmuxCompat || { version: null, min: cmuxVersion.MIN_CMUX_VERSION, supported: null } };
+  return { ...CAPABILITIES, cmux: cmuxCompat || { version: null, min: cmuxVersion.MIN_CMUX_VERSION, supported: null }, ...rdScreenCap() };
+}
+// p41 D189: `screen` = Remote Desktop TCC setup status (lib/rd-setup.js), last cached probe. rdSetup is
+// built further down (after macScreen); capabilities() only runs on requests, the try covers the gap.
+function rdScreenCap() {
+  try { const s = rdSetup.cached(); return s ? { screen: s } : {}; } catch (_) { return {}; }
 }
 // One spawn point for both backends. cmux: the exact execFile cmux() always made.
 function cli(args, opts, cb) {
@@ -275,6 +280,7 @@ async function privateGate(allRefs) {
 const gateRefuse = (res, code) => send(res, code, code === 423 ? { error: 'private' } : { error: 'gate_unavailable' });
 const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   machineId: MACHINE_ID,
+  screenStatus: () => rdSetup.cached() || rdSetup.status(),   // p41 D189: stale-while-revalidate; awaits only the first probe (rdSetup is built below; per request only)
   privateCheck: (refs) => privacy.verdict(refs),
   backend: BACKEND,
   loadTree: () => loadTree(),
@@ -2447,6 +2453,8 @@ const browserShotLimiter = require('./lib/shot-limiter').createShotLimiter({ min
 // p41 D97: Mac screen — lib/mac-screen.js owns flags, TCC errors, limits; text rides osascript stdin.
 const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => secretsIn.childEnv(),
   secret: SECRET, host: HOST, socket: SOCKET });
+// p41 D189: Remote Desktop setup (TCC grants the Mac screen needs) — probe cached, reminder flag.
+const rdSetup = require('./lib/rd-setup').createRdSetup({ childEnv: () => secretsIn.childEnv(), flags: () => macScreen.flags, observed: () => macScreen.observed() });
 function cmuxBrowserShot(res, surface) {
   const gate = browserShotLimiter.take(surface);
   if (!gate.ok) return send(res, 429, { error: 'rate_limited', retryMs: gate.retryMs });
@@ -3086,6 +3094,13 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'POST' && p === '/cmux/browser/zoom') return cmuxBrowserZoom(req, res);
 
   // ----- p41 D97 Mac screen (whole desktop; off unless SCREEN_VIEW / SCREEN_CONTROL) -----
+  // p41 D189: Remote Desktop setup status (?fresh=1 re-probes, floor 2 s) + the phone's "Remind on Mac" flag.
+  if (req.method === 'GET' && p === '/cmux/rd-setup') {
+    return rdSetup.status({ fresh: u.searchParams.get('fresh') === '1' }).then((s) => send(res, s ? 200 : 404, s ? { ok: true, screen: s } : { error: 'not_mac' }), () => send(res, 502, { error: 'probe_failed' }));
+  }
+  if (req.method === 'POST' && p === '/cmux/rd-setup/remind') {
+    return cmuxReadBody(req, (b) => send(res, 200, rdSetup.setRemind(!!(b && b.clear))), 1024);
+  }
   if (req.method === 'GET' && p === '/cmux/screen/info') return macScreen.info().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
   if (req.method === 'GET' && p === '/cmux/screen/dialogs') return macScreen.dialogs().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));   // p41 D135
   if (req.method === 'GET' && p === '/cmux/screen/shot') return macScreen.shot(u.searchParams.get('display')).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));

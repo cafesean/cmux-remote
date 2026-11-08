@@ -1,7 +1,7 @@
 'use strict';
 // p41 A6 — the bridge routes that expose sessions (spec §4.1, sessions/CONTRACT.md "Routes"):
 //
-//   GET  /cmux/sessions                          -> {machineId, sessions: Session[]}
+//   GET  /cmux/sessions                          -> {machineId, sessions: Session[], screen?}  (D189 screen: Remote Desktop setup)
 //   GET  /cmux/sessions/:id/thread?before=&limit= -> {title, messages, cursor}
 //   GET  /cmux/sessions/:id/thread-stream        -> SSE of Stream events (msg | status | reset)
 //   GET  /cmux/sessions/:id/attachment/:n        -> image bytes
@@ -350,7 +350,10 @@ function createSessionRoutes(deps) {
       if (w && w !== r) (w.session.aliases = w.session.aliases || []).push(r.session.id);
     }
     const sessions = results.filter((r) => { const k = keyOf(r); return !k || keep.get(k) === r; }).map((r) => r.session);
-    send(res, 200, { machineId, sessions });
+    // p41 D189 (additive): Remote Desktop TCC setup status, so the app can say "needs setup on this Mac".
+    let screen = null;
+    if (deps.screenStatus) { try { screen = await deps.screenStatus(); } catch (_) { screen = null; } }
+    send(res, 200, { machineId, sessions, ...(screen ? { screen } : {}) });
   }
 
   async function thread(res, entry, u) {
