@@ -1084,6 +1084,20 @@ async function handleApi(req, res, u) {
   // p41 D97: no SERVER_TOKEN -> authed() lets everyone in, so the whole-desktop view/control would be
   // open to anyone who reaches this server (tunnel included). Refuse, like the accounts routes.
   if (p.startsWith('/api/cmux/screen/') && !SERVER_TOKEN) return sendJson(res, 503, { error: 'not_secured' });
+  // p41 D189: Remote Desktop setup — status (?fresh=1) and the phone's "Remind on Mac" flag on that Mac's bridge.
+  if (req.method === 'GET' && p === '/api/cmux/rd-setup') {
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    return relay(res, bridge(m, `/cmux/rd-setup${u.searchParams.get('fresh') === '1' ? '?fresh=1' : ''}`, { timeout: 10000 }));
+  }
+  if (req.method === 'POST' && p === '/api/cmux/rd-setup/remind') {
+    return readBody(req, (b) => {
+      if (!b) return sendJson(res, 400, { error: 'bad_json' });
+      const m = findMachine(b.machine || u.searchParams.get('machine'));
+      if (!m) return sendJson(res, 404, { error: 'no_machine' });
+      relay(res, bridge(m, '/cmux/rd-setup/remind', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clear: !!b.clear }), timeout: 10000 }));
+    });
+  }
   // p41 D97: Mac screen — info + one frame (bridge gates on SCREEN_VIEW, rate-limits, size-caps).
   if (req.method === 'GET' && (p === '/api/cmux/screen/info' || p === '/api/cmux/screen/shot' || p === '/api/cmux/screen/dialogs')) {   // D135: + dialogs
     const m = findMachine(u.searchParams.get('machine'));
