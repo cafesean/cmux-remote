@@ -1533,6 +1533,73 @@ function cmuxNewWorkspace(req, res) {
   });
 }
 
+// ---------- p41 D188: close kills the pane's tmux session; orphan cleanup (sessions/tmux-close.js) ----------
+const tmuxClose = require('./sessions/tmux-close');
+const d188Snapshot = () => { const k = p41ProcSnapshotKnob(); return k ? k() : require('./sessions/procs').snapshot(); };
+// Opt-in (public repo): HYPERMUX_COS_STOP_BIN = absolute path to the chief-of-staff stop.sh. Unset = off.
+const COS_STOP_BIN = (() => { const b = process.env.HYPERMUX_COS_STOP_BIN; return b && path.isAbsolute(b) ? b : null; })();
+async function d188ClosePlan(surfaceId) {
+  if (tmuxCli || !surfaceId) return null;
+  const snap = await d188Snapshot();
+  const plan = tmuxClose.closePlan(snap, surfaceId, HOSTED_TMUX_SOCKET);
+  if (!plan) return null;
+  const tdir = require('./lib/tasks').tasksDir();
+  const cos = await tmuxClose.cosWorkerOf(snap, plan.session, {
+    stopBin: COS_STOP_BIN, socket: HOSTED_TMUX_SOCKET,
+    taskExists: async (n) => !!tdir && fs.existsSync(path.join(tdir, `${n}.md`)),
+    envOf: d188EnvOf,
+  }).catch(() => null);
+  return { plan, cos };
+}
+// A live pid's environment (`ps eww`, own user only) -> { COS_WORKER } when present.
+function d188EnvOf(pid) {
+  return new Promise((resolve) => require('child_process').execFile('/bin/ps', ['eww', '-o', 'command=', '-p', String(Number(pid))], { timeout: 3000 },
+    (e, so) => { const m = !e && /(?:^|\s)COS_WORKER=([a-z0-9][a-z0-9-]{0,63})(?=\s|$)/.exec(String(so)); resolve(m ? { COS_WORKER: m[1] } : {}); }));
+}
+function d188CosStop(name) {
+  const argv = tmuxClose.cosStopArgv(name);
+  if (!COS_STOP_BIN || !argv) return Promise.resolve(null);
+  return new Promise((resolve) => require('child_process').execFile(COS_STOP_BIN, argv, { timeout: tmuxClose.LIMITS.cosStopTimeoutMs },
+    (e, so, se) => {
+      const code = e ? (typeof e.code === 'number' ? e.code : 1) : 0;
+      if (code) console.log(`d188: cos stop ${name} exited ${code}: ${String(se || '').slice(0, 200)}`);
+      resolve({ code });
+    }));
+}
+// Kill what the plan says, once the cmux pane is gone. Already gone (stop.sh did it) = ok.
+async function d188TmuxClose(plan) {
+  if (!plan.args || !hostedTmux) return { session: plan.session, action: plan.action, ok: true };
+  if (plan.action === 'kill-session') {
+    const has = await hostedTmux._run(['has-session', '-t', `=${plan.session}`]);
+    if (has.code !== 0) return { session: plan.session, action: plan.action, ok: true, already: true };
+  }
+  const r = await hostedTmux._run(plan.args);
+  return { session: plan.session, action: plan.action, ok: r.code === 0 };
+}
+// GET /cmux/orphans · POST /cmux/orphans/close {names:[…]} — idle tmux sessions no cmux pane shows.
+async function d188Orphans() {
+  const snap = await d188Snapshot();
+  return { snap, list: tmuxClose.listOrphans(snap, HOSTED_TMUX_SOCKET, { underCmuxApp: require('./sessions/procs').underCmuxApp }) };
+}
+function cmuxOrphans(req, res, p) {
+  if (tmuxCli || !hostedTmux) return send(res, 200, { orphans: [] });
+  if (req.method === 'GET' && p === '/cmux/orphans') {
+    return d188Orphans().then(({ list }) => send(res, 200, { orphans: list.map((o) => ({ name: o.name, panes: o.panes })) }),
+      () => send(res, 502, { error: 'tmux_failed' }));
+  }
+  if (req.method === 'POST' && p === '/cmux/orphans/close') {
+    return cmuxReadBody(req, (b) => {
+      const names = tmuxClose.parseNames(b);
+      if (!names) return send(res, 400, { error: 'bad_names' });
+      d188Snapshot().then((snap) => tmuxClose.closeOrphans(names, snap, HOSTED_TMUX_SOCKET,
+        (socket, args) => (socket === HOSTED_TMUX_SOCKET ? hostedTmux._run(args) : Promise.resolve({ code: 1 })),
+        { underCmuxApp: require('./sessions/procs').underCmuxApp }))
+        .then((r) => send(res, 200, r), () => send(res, 502, { error: 'tmux_failed' }));
+    });
+  }
+  return send(res, 404, { error: 'not_found' });
+}
+
 // POST /cmux/close-tab { surface } — close a tab (surface).
 //
 // SCOPE IS MANDATORY (cmux >= 0.64.22): `close-surface` refuses a bare `--surface` with
@@ -1548,17 +1615,29 @@ function cmuxCloseTab(req, res) {
     (async () => {
       const tree = await loadTree();
       if (tree == null) return send(res, 502, { error: 'cmux_failed', detail: 'tree unavailable' });
-      const ws = tree.find((w) => (w.tabs || []).some((t) => t.id === surface || t.ref === surface));
+      let ws = tree.find((w) => (w.tabs || []).some((t) => t.id === surface || t.ref === surface));
       if (!ws) return send(res, 404, { error: 'no_such_surface' });
-      // And cmux will not close a workspace's LAST surface at all (`invalid_state: Cannot close the
-      // last surface`). Closing that tab used to take the workspace with it, so it still does.
-      const args = (ws.tabs || []).length <= 1
-        ? ['close-workspace', '--workspace', ws.id]
-        : ['close-surface', '--surface', surface, '--workspace', ws.id];
-      const out = await cmuxErr(args);
-      if (out) return send(res, 502, { error: 'cmux_failed', detail: out.slice(0, 400) });
+      // D188: what this close does to the tmux session the pane shows (planned BEFORE the attach client goes).
+      const tab = ws.tabs.find((t) => t.id === surface || t.ref === surface);
+      const d188 = await d188ClosePlan(tab && tab.id).catch(() => null);
+      const cos = d188 && d188.cos ? await d188CosStop(d188.cos) : null;
+      if (cos && cos.code === 0) {
+        // stop.sh closes the worker's cmux pane itself: never close it twice.
+        const t2 = await loadTree();
+        ws = t2 && t2.find((w) => (w.tabs || []).some((t) => t.id === surface || t.ref === surface));
+      }
+      if (ws) {
+        // And cmux will not close a workspace's LAST surface at all (`invalid_state: Cannot close the
+        // last surface`). Closing that tab used to take the workspace with it, so it still does.
+        const args = (ws.tabs || []).length <= 1
+          ? ['close-workspace', '--workspace', ws.id]
+          : ['close-surface', '--surface', surface, '--workspace', ws.id];
+        const out = await cmuxErr(args);
+        if (out) return send(res, 502, { error: 'cmux_failed', detail: out.slice(0, 400) });
+      }
+      const tmux = d188 && d188.plan ? await d188TmuxClose(d188.plan) : null;
       const workspaces = await treePayload();
-      send(res, 200, { ok: true, closed: surface, workspaces: workspaces || [] });
+      send(res, 200, { ok: true, closed: surface, ...(tmux ? { tmux } : {}), ...(cos ? { cos: { name: d188.cos, code: cos.code } } : {}), workspaces: workspaces || [] });
     })();
   });
 }
@@ -2939,6 +3018,7 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'GET' && p === '/cmux/start-dirs') return cmuxStartDirs(req, res, u);
   if (req.method === 'POST' && p === '/cmux/new-workspace') return cmuxNewWorkspace(req, res);
   if (req.method === 'POST' && p === '/cmux/close-tab') return cmuxCloseTab(req, res);
+  if (p === '/cmux/orphans' || p === '/cmux/orphans/close') return cmuxOrphans(req, res, p);
   if (req.method === 'POST' && p === '/cmux/rename-workspace') return cmuxRenameWorkspace(req, res);
   if (req.method === 'POST' && p === '/cmux/close-workspace') return cmuxCloseWorkspace(req, res);
   if (req.method === 'POST' && p === '/cmux/new-pane') return cmuxNewPane(req, res);
