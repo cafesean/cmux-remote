@@ -24,7 +24,7 @@ test('merge: fractions + percent normalised, rejected -> limited, invalid, unkno
   const by = Object.fromEntries(r.accounts.map((a) => [a.name, a]));
   assert.equal(r.accounts.length, 4);
   assert.deepEqual(by.mux2, { name: 'mux2', state: 'ok', resetsAt: null, lastUsedAt: null, limit: null,
-    util5h: 0.01, util7d: 0.42, reset5h: R5, reset7d: R7, checkedAt: '2026-11-07T03:00:00.000Z', source: 'cli-statusline' });
+    util5h: 0.01, util7d: 0.42, reset5h: R5, reset7d: R7, checkedAt: '2026-11-07T03:00:00.000Z', source: 'cli-statusline', room: true });
   assert.equal(by.rej.state, 'limited'); assert.equal(by.rej.resetsAt, new Date(R5 * 1000).toISOString()); assert.equal(by.rej.limit, 'session');
   assert.equal(by.bad.state, 'invalid');
   assert.equal(by.bad.checkedAt, '2026-11-07T03:59:00.000Z', 'falls back to updatedAt');
@@ -43,7 +43,7 @@ test('ignored: unset, relative, missing, bad JSON, wrong shape, over the size ca
   for (const f of [undefined, 'rel.json', path.join(dir, 'nope.json'), put('bad.json', '{nope'), put('shape.json', '{"accounts":1}'), big]) {
     const r = await mk(f).usage();
     assert.equal(r.accounts.length, 4);
-    for (const a of r.accounts) assert.deepEqual(Object.keys(a).sort(), ['lastUsedAt', 'limit', 'name', 'resetsAt', 'state']);
+    for (const a of r.accounts) assert.deepEqual(Object.keys(a).sort(), ['lastUsedAt', 'limit', 'name', 'resetsAt', 'room', 'state']);
   }
 });
 

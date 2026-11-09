@@ -67,12 +67,12 @@ test('usage: per account limited / ok-recently / dead / unknown from launched se
     transcriptOfPid: async () => { throw new Error('not needed'); } });
   const r = await u.usage();
   const by = Object.fromEntries(r.accounts.map((a) => [a.name, a]));
-  assert.deepEqual(by.garda, { name: 'garda', state: 'limited', resetsAt: iso(reset * 1000), lastUsedAt: iso(NOW - 3 * H), limit: 'weekly' });
-  assert.deepEqual(by.jet, { name: 'jet', state: 'ok', resetsAt: null, lastUsedAt: iso(NOW - H), limit: null });
+  assert.deepEqual(by.garda, { name: 'garda', state: 'limited', resetsAt: iso(reset * 1000), lastUsedAt: iso(NOW - 3 * H), limit: 'weekly', room: false });
+  assert.deepEqual(by.jet, { name: 'jet', state: 'ok', resetsAt: null, lastUsedAt: iso(NOW - H), limit: null, room: true });
   assert.equal(by.viky.state, 'invalid');
   assert.equal(by.rev.state, 'invalid');
   for (const n of ['none', 'old', 'stale']) assert.equal(by[n].state, 'unknown', n);
-  for (const a of r.accounts) assert.deepEqual(Object.keys(a).sort(), ['lastUsedAt', 'limit', 'name', 'resetsAt', 'state'], 'no extra fields');
+  for (const a of r.accounts) assert.deepEqual(Object.keys(a).sort(), ['lastUsedAt', 'limit', 'name', 'resetsAt', 'room', 'state'], 'no extra fields (D228: room)');
   assert.equal(r.keychain, 'ok');
 });
 

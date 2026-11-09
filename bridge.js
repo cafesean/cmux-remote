@@ -1416,7 +1416,10 @@ function cmuxNewSurface(req, res) {
     // p41 S2d: `account` — absent / "terminal" = today's terminal; "default" = the launcher on the
     // Mac's own login (`a`); <name> = validated + present in the Keychain. The command is built only
     // from validated values; the launcher reads the token itself, the bridge never does.
-    const account = b.account == null || b.account === 'terminal' ? null : b.account;
+    // D228: "auto" = a fresh pick (lib/accounts-pick.js) at launch, then the named path with that name;
+    // every account at its limit -> 409 all_limited {soonest}; never a silent fallback to `default`.
+    let account = b.account == null || b.account === 'terminal' ? null : b.account;
+    const auto = account === 'auto';
     const before = new Set();
     (async () => {
       // D176 follow-up: no cwd sent (a terminal-only pane: Claude exited, no status line) -> the clicked
@@ -1430,6 +1433,13 @@ function cmuxNewSurface(req, res) {
         // tmux's new-surface ignores --command: an account session there would be a bare shell
         if (tmuxCli) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
         if (!ACCOUNT_BIN_DIR_OK) return send(res, 503, { error: 'accounts_disabled' });
+        if (auto) {
+          if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
+          const u = await accountUsage.fresh();
+          if (!u || u.keychain !== 'ok' || !u.auto) return send(res, 409, { error: 'keychain_locked' });
+          if (!u.auto.pick) return send(res, 409, { error: 'all_limited', soonest: u.auto.soonest || null });
+          account = u.auto.pick;
+        }
         if (account !== 'default') {
           if (typeof account !== 'string' || !ACCOUNT_NAME_RE.test(account) || account === 'a') return send(res, 400, { error: 'bad_account' });
           if ((await accountsLib.keychainStatus()) !== 'ok') return send(res, 409, { error: 'keychain_locked' });
@@ -1448,7 +1458,7 @@ function cmuxNewSurface(req, res) {
         const workspaces = await treePayload();
         let created = null;
         if (workspaces) for (const w of workspaces) for (const t of w.tabs) if (!before.has(t.id)) created = t.id;
-        send(res, 200, { ok: true, id: created, account, workspaces: workspaces || [] });
+        send(res, 200, { ok: true, id: created, account, ...(auto ? { auto: true } : {}), workspaces: workspaces || [] });
       };
       // account: plain cli — cmux()'s retry would drop an "unknown" --command and open a bare shell
       if (account !== null) cli(args, { timeout: 12000 }, done);
@@ -2891,7 +2901,7 @@ function cmuxAccounts(req, res, u, p) {
     return cmuxReadBody(req, (b) => {
       if (!b) return send(res, 400, { error: 'bad_json' });
       const name = b.name;
-      if (typeof name !== 'string' || !ACCOUNT_NAME_RE.test(name) || name === 'a') return send(res, 400, { error: 'bad_name' });
+      if (typeof name !== 'string' || !ACCOUNT_NAME_RE.test(name) || name === 'a' || name === 'auto') return send(res, 400, { error: 'bad_name' });
       const alsoOn = b.alsoOn == null || b.alsoOn === '' ? null : b.alsoOn;
       if (alsoOn !== null && (typeof alsoOn !== 'string' || !ACCOUNT_LABEL_RE.test(alsoOn))) return send(res, 400, { error: 'bad_label' });
       const replace = b.replace === true;

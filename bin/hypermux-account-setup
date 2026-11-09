@@ -18,7 +18,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SECURITY="${HYPERMUX_SECURITY_BIN:-/usr/bin/security}"
 NODE="${HYPERMUX_NODE:-node}"
 
-if ! [[ "$NAME" =~ ^[a-z][a-z0-9]{0,5}$ ]] || [ "$NAME" = a ]; then
+if ! [[ "$NAME" =~ ^[a-z][a-z0-9]{0,5}$ ]] || [ "$NAME" = a ] || [ "$NAME" = auto ]; then   # D228: auto reserved
   echo "bad account name" >&2; exit 2
 fi
 if ! command -v "$NODE" >/dev/null 2>&1; then
