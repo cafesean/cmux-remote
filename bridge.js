@@ -2345,13 +2345,17 @@ const browserShotPath = (surface) => `${os.tmpdir()}/cmux-remote-shot-${surface.
 // (multi-second frames). Recompress every frame with macOS's built-in `sips` (still zero npm deps):
 // downscale to ≤1000px and JPEG it → a ~2.8MB PNG becomes ~100KB. Falls back to the raw PNG if sips
 // fails. browserShot returns { buf, raw } — raw = source PNG bytes (drives the big-pane cadence brake).
-const BROWSER_SHOT_MAX_DIM = 800;    // px, longest edge after downscale (phone-width retina-ish)
+// p41 D222: a client that sends its pane's device-pixel width (`px`) gets frames that wide (clamped
+// 600..2400, never upscaled); without px the old 800 px longest-edge cap stays. lib/browser-shot-params.js.
+const shotParams = require('./lib/browser-shot-params');
+const BROWSER_SHOT_MAX_DIM = shotParams.LEGACY_MAX_DIM;    // px, longest edge, clients without px
 // Two JPEG qualities (p31): while the user is acting (scroll/tap burst) frames go out at LOW — about
 // half the bytes of HIGH, still readable — and once the page settles the same picture is re-sent
 // once at HIGH. Measured on a 1016x1064 text page: q55 250KB, q35 ~160KB, q30 143KB. (WebP was
 // tried: sips can't write it and cwebp is not a zero-dep option; at equal legibility it saved ~7%.)
-const BROWSER_SHOT_JPEG_Q = '60';      // settled frame (sips formatOptions 0-100)
-const BROWSER_SHOT_JPEG_Q_MOVING = '35';
+// D222: raised from 60/35 — text on a Retina phone/iPad pane was hard to read.
+const BROWSER_SHOT_JPEG_Q = shotParams.JPEG_Q;      // settled frame (sips formatOptions 0-100)
+const BROWSER_SHOT_JPEG_Q_MOVING = shotParams.JPEG_Q_MOVING;
 // Actions don't carry frames (they ack instantly); instead every action stamps its surface here and
 // the SSE loop BURSTS (350ms ticks) for a short window after — visual feedback lands fast exactly
 // when the user just did something, without paying a screenshot inside the action round-trip.
@@ -2380,22 +2384,22 @@ const viewportDim = (v, lo, hi) => { const n = Math.round(Number(v)); return Num
 // viewers of one tab (phone + desktop) made each other's frames fail or read a half-written file —
 // after switching back to the tab no frame arrived at all and scrolling looked dead. Shots now queue.
 const browserShotQueue = new Map();   // surface -> tail Promise
-function browserShot(surface, shrink = true, q = BROWSER_SHOT_JPEG_Q) {
+function browserShot(surface, shrink = true, q = BROWSER_SHOT_JPEG_Q, px = null) {
   const prev = browserShotQueue.get(surface) || Promise.resolve();
-  const run = prev.then(() => browserShotNow(surface, shrink, q));
+  const run = prev.then(() => browserShotNow(surface, shrink, q, px));
   const tail = run.catch(() => null);
   browserShotQueue.set(surface, tail);
   tail.then(() => { if (browserShotQueue.get(surface) === tail) browserShotQueue.delete(surface); });
   return run;
 }
-function browserShotNow(surface, shrink, q) {   // -> Promise<{buf, raw, src}|null>
+function browserShotNow(surface, shrink, q, px) {   // -> Promise<{buf, raw, src}|null>
   const out = browserShotPath(surface);
   const jpg = out.replace(/\.png$/, '.jpg');
   return new Promise((resolve) => cmux(['browser', surface, 'screenshot', '--out', out], (err) => {
     if (err) return resolve(null);
     fs.readFile(out, (e, png) => {
       if (e) return resolve(null);
-      execFile('/usr/bin/sips', [...(shrink ? ['-Z', String(BROWSER_SHOT_MAX_DIM)] : []), '-s', 'format', 'jpeg',
+      execFile('/usr/bin/sips', [...shotParams.resizeArgs({ shrink, px, src: shotParams.pngSize(png) }), '-s', 'format', 'jpeg',
         '-s', 'formatOptions', q, out, '--out', jpg], { timeout: 8000, env: secretsIn.childEnv() }, (se) => {
         // src = hash of the SOURCE pixels, so the same picture at two qualities counts as unchanged
         const src = crypto.createHash('md5').update(png).digest('hex');
@@ -2456,10 +2460,12 @@ const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => 
   secret: SECRET, host: HOST, socket: SOCKET });
 // p41 D189: Remote Desktop setup (TCC grants the Mac screen needs) — probe cached, reminder flag.
 const rdSetup = require('./lib/rd-setup').createRdSetup({ childEnv: () => secretsIn.childEnv(), flags: () => macScreen.flags, observed: () => macScreen.observed() });
-function cmuxBrowserShot(res, surface) {
+function cmuxBrowserShot(res, surface, px = null) {
   const gate = browserShotLimiter.take(surface);
   if (!gate.ok) return send(res, 429, { error: 'rate_limited', retryMs: gate.retryMs });
-  browserShot(surface).then((shot) => {
+  // D222: a px-wide frame over the byte cap is re-shot at the legacy size rather than refused
+  const fit = (shot) => (px != null && shot && shot.buf && shot.buf.length > BROWSER_SHOT_MAX_BYTES ? browserShot(surface) : shot);
+  browserShot(surface, true, BROWSER_SHOT_JPEG_Q, px).then(fit).then((shot) => {
     if (!shot || !shot.buf || !shot.buf.length) return send(res, 502, { error: 'cmux_failed' });
     if (shot.buf.length > BROWSER_SHOT_MAX_BYTES) return send(res, 413, { error: 'too_large', limit: BROWSER_SHOT_MAX_BYTES });
     const png = shot.buf[0] === 0x89 && shot.buf[1] === 0x50;
@@ -2477,12 +2483,12 @@ const BROWSER_SCROLL_SHOT_MIN_MS = Math.max(0, Number(process.env.BROWSER_SCROLL
 const browserScrollShotLimiter = require('./lib/shot-limiter').createShotLimiter({ minMs: BROWSER_SCROLL_SHOT_MIN_MS });
 const BROWSER_TYPE_MAX_CHARS = 4096;   // one field's value per /cmux/browser/type (was the silent slice)
 const cmuxSocket = require('./lib/cmux-socket').createCmuxSocket({ auth: secretsIn.cmuxSocketAuth });
-function scrollFrame(surface) {   // -> Promise<{mime,image}|{}> (never rejects)
+function scrollFrame(surface, px = null) {   // -> Promise<{mime,image}|{}> (never rejects)
   const wait = browserScrollShotLimiter.reserve(surface);
   return new Promise((r) => setTimeout(r, wait)).then(() => {
     browserShotLimiter.mark(surface);
-    return browserShot(surface);
-  }).then((shot) => {
+    return browserShot(surface, true, BROWSER_SHOT_JPEG_Q, px);
+  }).then((shot) => (px != null && shot && shot.buf && shot.buf.length > BROWSER_SHOT_MAX_BYTES ? browserShot(surface) : shot)).then((shot) => {
     if (!shot || !shot.buf || !shot.buf.length || shot.buf.length > BROWSER_SHOT_MAX_BYTES) return {};
     return { mime: shot.buf[0] === 0xff && shot.buf[1] === 0xd8 ? 'image/jpeg' : 'image/png', image: shot.buf.toString('base64') };
   }, () => ({}));
@@ -2686,7 +2692,7 @@ function cmuxBrowserScroll(req, res) {
       noteAction(surface);
       const moved = String(out).replace(/"/g, '');
       if (!b.shot) return send(res, 200, { ok: true, moved });
-      scrollFrame(surface).then((f) => send(res, 200, { ok: true, moved, ...f }));
+      scrollFrame(surface, shotParams.parsePx(b.px)).then((f) => send(res, 200, { ok: true, moved, ...f }));
     });
   });
 }
@@ -3090,7 +3096,7 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'GET' && p === '/cmux/browser/shot') {
     const s = surfaceParam();
     if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
-    return cmuxBrowserShot(res, s);
+    return cmuxBrowserShot(res, s, shotParams.parsePx(u.searchParams.get('px')));
   }
   if (req.method === 'GET' && p === '/cmux/browser/hits') {
     const s = surfaceParam();

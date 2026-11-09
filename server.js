@@ -1080,6 +1080,8 @@ async function handleApi(req, res, u) {
     const m = findMachine(u.searchParams.get('machine'));
     if (!m) return sendJson(res, 404, { error: 'no_machine' });
     const qs = new URLSearchParams({ surface: u.searchParams.get('surface') || '' });
+    const px = u.searchParams.get('px');   // D222: pane device-pixel width (bridge parses + clamps)
+    if (px && /^\d{1,5}$/.test(px)) qs.set('px', px);
     return relay(res, bridge(m, `/cmux/browser/shot?${qs}`, { timeout: 20000 }));
   }
   // p41 D97: no SERVER_TOKEN -> authed() lets everyone in, so the whole-desktop view/control would be
