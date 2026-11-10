@@ -158,3 +158,52 @@ test('D163 tmuxSend: a long single line (or multi-line) is ONE bracketed paste; 
   await procs.tmuxSend({ socket: SOCK, pane: '%48' }, { text: '/clear' }, { tmuxRun });
   assert.deepStrictEqual(seen, [[long, true], ['a\nb', true], ['/clear', false]]);
 });
+
+test('D238 direct cmux pane: claude started straight in the pane (no tmux, tty null) -> kind claude + transcript via its CMUX_SURFACE_ID', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'p41-d238-'));
+  const write = (pid, sessionId, cwd) => {
+    fs.mkdirSync(path.join(home, '.claude', 'sessions'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'sessions', `${pid}.json`), JSON.stringify({ pid, sessionId, cwd }));
+    const dir = path.join(home, '.claude', 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), '{}\n');
+  };
+  const DIRECT = '627B9A7E-33D2-47BE-8D57-219D3B2268A4';
+  const STALE = 'AAAAAAAA-0000-0000-0000-000000000001';
+  const ps = [
+    '  500     1 /Applications/cmux.app/Contents/MacOS/cmux',
+    ' 1300   500 /usr/bin/login -flp seanliao /bin/zsh',
+    ' 1374  1300 -zsh',
+    ' 1375  1374 /Users/s/.local/bin/claude --settings chief.json -n m-chief',
+    ' 1376  1375 /Users/s/.local/bin/claude --print sub',          // a child agent: never its own pane
+    '  100     1 /opt/homebrew/bin/tmux -u -D',
+    ' 2001   100 zsh',
+    ' 2002  2001 /Users/s/.local/bin/claude -n worker',              // tmux-hosted: env surface is stale
+    ' 1400  1300 -zsh',                                              // a plain shell pane
+  ].join('\n');
+  const envCalls = [];
+  const psEnv = async (pids) => {
+    envCalls.push(pids.slice().sort());
+    return [
+      ` 1375 /Users/s/.local/bin/claude --settings chief.json -n m-chief PATH=/bin CMUX_SURFACE_ID=${DIRECT} SECRET_X=1`,
+      ` 2002 /Users/s/.local/bin/claude -n worker CMUX_SURFACE_ID=${STALE}`,
+    ].join('\n');
+  };
+  const snapObj = { table: procs.parsePs(ps), sessions: [] };
+  const deps = { home, procSnapshot: async () => snapObj, psEnv };
+  write(1375, 'sess-chief-now', '/Volumes/General/s/Main');
+
+  const a = await procs.agentFor({ id: DIRECT }, deps);
+  assert.strictEqual(a.kind, 'claude');
+  assert.strictEqual(a.pid, 1375);
+  assert.strictEqual(a.sessionId, 'sess-chief-now');
+  assert.deepStrictEqual(envCalls, [[1375]], 'only the top-level agent under the cmux app is read (not the child, not tmux)');
+
+  const fg = await foregroundCommand({ id: DIRECT, type: 'terminal', tty: null }, 'cmux',
+    { agentFor: (s) => procs.agentFor(s, deps), readEvents: async () => ({ events: [] }) });
+  assert.strictEqual(detectKind({ surfaceType: 'terminal', foregroundCmd: fg, transcriptPath: null }), 'claude');
+
+  assert.strictEqual(await procs.agentFor({ id: STALE }, deps), null, 'a tmux-hosted agent never claims a surface by its stale env');
+  assert.strictEqual(await procs.agentFor({ id: 'BBBBBBBB-0000-0000-0000-000000000002' }, deps), null, 'a plain shell pane stays a terminal');
+  assert.strictEqual(envCalls.length, 1, 'one env read per snapshot');
+});

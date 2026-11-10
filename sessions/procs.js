@@ -39,6 +39,7 @@ const LIMITS = {
   procStartCacheMs: 30 * 1000,   // `ps lstart` per pid is cached this long (one spawn per claude pid, not per request)
   pidFileSkewMs: 30 * 1000,  // a pid file may predate its process start by this much (clock/rounding) before it is called stale
   tmuxSubmitSettleMs: 150,   // pause between pasted text and Enter (same paste-burst rule as cmuxSend)
+  directAgentsMax: 64,       // D238: agents started straight in a cmux pane whose surface id is read per snapshot
 };
 
 // The cmux app's own process (args of the main executable, not its bundled CLI helpers).
@@ -213,11 +214,71 @@ async function agentFor(surface, deps) {
     pane = owner ? activePane(owner) : null;
   }
   const rootPid = pane ? pane.pid : surface.pid;
-  if (!rootPid) return null;
-  const agent = findAgent(snap.table, rootPid);
+  let agent = rootPid ? findAgent(snap.table, rootPid) : null;
+  // D238: no tmux session shows this cmux surface and the tree gave no pid: the agent may run straight
+  // in the pane (cmux reports tty null, so ps -t cannot see it).
+  if (!rootPid && !/^%\d+$/.test(id)) agent = (await directAgents(snap, d)).get(String(id).toUpperCase()) || null;
   if (!agent || agent.kind !== 'claude') return agent;
   const t = await claudeTranscriptOf(agent.pid, d);
   return t ? { ...agent, ...t } : agent;
+}
+
+// ---- agents started straight in a cmux pane (D238) -----------------------------------------------
+//
+// Sean 2026-11-10: a chief started directly in a cmux pane (no tmux) showed as a plain terminal. cmux
+// reports tty null for every surface and a session without the radar hooks fires no hook events, so
+// neither older signal sees it. The agent process itself carries the CMUX_SURFACE_ID cmux exported into
+// that pane. Only agents whose parent chain reaches the cmux app qualify: a tmux-hosted agent (parent =
+// tmux server) keeps the surface id of the pane that CREATED its session, stale after a reattach (BUG1).
+// The process env is read in memory; only that one variable is kept and nothing is logged.
+const SURFACE_ENV = /(?:^|\s)CMUX_SURFACE_ID=([0-9A-Fa-f-]{36})(?=\s|$)/;
+const defaultPsEnv = (pids) => run('/bin/ps', ['-E', '-ww', '-o', 'pid=,command=', '-p', pids.join(',')], LIMITS.psTimeoutMs);
+
+function agentAbove(table, ppid) {
+  let cur = table.byPid.get(ppid);
+  for (let i = 0; cur && i < LIMITS.clientAncestorDepth; i++) {
+    const k = kindOfCommand(cur.args);
+    if (k === 'claude' || k === 'codex') return true;
+    cur = table.byPid.get(cur.ppid);
+  }
+  return false;
+}
+
+// One scan per snapshot (routes share a snapshot for LIMITS.procSnapshotTtlMs): surface id -> agent.
+const directCache = new WeakMap();
+function directAgents(snap, deps) {
+  let p = directCache.get(snap);
+  if (!p) {
+    p = scanDirectAgents(snap, deps || {}).catch(() => new Map());
+    directCache.set(snap, p);
+  }
+  return p;
+}
+
+async function scanDirectAgents(snap, d) {
+  const out = new Map();
+  const table = snap && snap.table;
+  if (!table) return out;
+  const cands = new Map();
+  for (const [pid, p] of table.byPid) {
+    if (cands.size >= LIMITS.directAgentsMax) break;
+    const kind = kindOfCommand(p.args);
+    if (kind !== 'claude' && kind !== 'codex') continue;
+    if (agentAbove(table, p.ppid) || !underCmuxApp(table, pid)) continue;   // a child agent, or tmux-hosted
+    cands.set(pid, { kind, pid, args: p.args });
+  }
+  if (!cands.size) return out;
+  const text = await (d.psEnv || defaultPsEnv)([...cands.keys()]);
+  for (const line of String(text || '').split('\n')) {
+    const m = /^\s*(\d+)\s/.exec(line);
+    const c = m && cands.get(Number(m[1]));
+    const s = c && SURFACE_ENV.exec(line);
+    if (!s) continue;
+    const key = s[1].toUpperCase();
+    const prev = out.get(key);
+    if (!prev || c.pid > prev.pid) out.set(key, c);
+  }
+  return out;
 }
 
 // ~/.claude/sessions/<pid>.json -> {sessionId, transcriptPath}. The file names the pid it was written
@@ -390,4 +451,4 @@ async function tmuxGrid(target, deps) {
   return { seq, grid: redactGrid(grid) };
 }
 
-module.exports = { underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+module.exports = { directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
