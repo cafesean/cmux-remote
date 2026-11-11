@@ -207,3 +207,32 @@ test('D238 direct cmux pane: claude started straight in the pane (no tmux, tty n
   assert.strictEqual(await procs.agentFor({ id: 'BBBBBBBB-0000-0000-0000-000000000002' }, deps), null, 'a plain shell pane stays a terminal');
   assert.strictEqual(envCalls.length, 1, 'one env read per snapshot');
 });
+
+test('D241 after a reboot the tmux session env names a dead pane: the attached client\'s CMUX_SURFACE_ID maps the live pane to the session', async () => {
+  const LIVE = 'C0FFEE00-0000-0000-0000-000000000001';
+  const DEAD = 'DEAD0000-0000-0000-0000-000000000001';
+  const ps = [
+    '  500     1 /Applications/cmux.app/Contents/MacOS/cmux',
+    '  510   500 /usr/bin/login -flp s /bin/zsh',
+    '  511   510 -zsh',
+    '  512   511 /opt/homebrew/bin/tmux -S /s/default attach -t =w1',   // the client, inside the live pane
+    '  100     1 /opt/homebrew/bin/tmux -S /s/default new -d -s w1',    // the tmux server
+    '  101   100 zsh',
+    '  102   101 /Users/s/.local/bin/claude -n w1',
+  ].join('\n');
+  const snapObj = {
+    table: procs.parsePs(ps),
+    sessions: [{ socket: '/s/default', name: 'w1', attached: 1, epoch: 1, created: 1, surfaceId: DEAD, clientPids: [512],
+      panes: [{ id: '%1', pid: 101, active: true }] }],
+  };
+  const envCalls = [];
+  const psEnv = async (pids) => { envCalls.push(pids.slice()); return ` 512 /opt/homebrew/bin/tmux attach -t =w1 TERM=xterm CMUX_SURFACE_ID=${LIVE.toLowerCase()}`; };
+  const deps = { home: fs.mkdtempSync(path.join(os.tmpdir(), 'p41-d241-')), procSnapshot: async () => snapObj, psEnv };
+  const a = await procs.agentFor({ id: LIVE }, deps);
+  assert.strictEqual(a && a.kind, 'claude');
+  assert.strictEqual(a.pid, 102);
+  assert.deepStrictEqual(envCalls, [[512]], 'only the cmux-hosted client is read');
+  // The stale session-env id no longer has a live pane; it still resolves through the old path (unchanged behaviour).
+  const b = await procs.agentFor({ id: DEAD }, deps);
+  assert.strictEqual(b && b.pid, 102);
+});

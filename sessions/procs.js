@@ -210,7 +210,8 @@ async function agentFor(surface, deps) {
       if (pane) break;
     }
   } else {
-    const owner = ownerOf(snap.sessions, id);
+    // D241: the attached tmux client's own CMUX_SURFACE_ID names the live pane; the session env can be stale.
+    const owner = (await clientOwners(snap, d)).get(String(id).toUpperCase()) || ownerOf(snap.sessions, id);
     pane = owner ? activePane(owner) : null;
   }
   const rootPid = pane ? pane.pid : surface.pid;
@@ -221,6 +222,45 @@ async function agentFor(surface, deps) {
   if (!agent || agent.kind !== 'claude') return agent;
   const t = await claudeTranscriptOf(agent.pid, d);
   return t ? { ...agent, ...t } : agent;
+}
+
+// ---- tmux sessions shown by a cmux pane, named by their client (D241) ------------------------------
+//
+// Sean 2026-11-11: after a power loss the workers came back in tmux and cmux re-attached them from new
+// panes. The tmux SESSION env still held the CMUX_SURFACE_ID of a pane from before the reboot (0 of 20
+// matched a live pane), so every pane showed as a plain terminal. The `tmux attach` client runs inside the
+// live pane, so its own env carries that pane's id. Only clients under the cmux app are read; one env read
+// per shared snapshot; only that one variable is kept, nothing is logged.
+const clientCache = new WeakMap();
+function clientOwners(snap, deps) {
+  let p = clientCache.get(snap);
+  if (!p) {
+    p = scanClientOwners(snap, deps || {}).catch(() => new Map());
+    clientCache.set(snap, p);
+  }
+  return p;
+}
+
+async function scanClientOwners(snap, d) {
+  const out = new Map();
+  const table = snap && snap.table;
+  if (!table) return out;
+  const bySession = new Map();
+  for (const s of snap.sessions || []) {
+    for (const pid of s.clientPids || []) {
+      if (bySession.size >= LIMITS.directAgentsMax) break;
+      if (underCmuxApp(table, pid)) bySession.set(pid, s);
+    }
+  }
+  if (!bySession.size) return out;
+  const text = await (d.psEnv || defaultPsEnv)([...bySession.keys()]);
+  for (const line of String(text || '').split('\n')) {
+    const m = /^\s*(\d+)\s/.exec(line);
+    const s = m && bySession.get(Number(m[1]));
+    const e = s && SURFACE_ENV.exec(line);
+    if (e) out.set(e[1].toUpperCase(), s);
+  }
+  return out;
 }
 
 // ---- agents started straight in a cmux pane (D238) -----------------------------------------------
@@ -451,4 +491,4 @@ async function tmuxGrid(target, deps) {
   return { seq, grid: redactGrid(grid) };
 }
 
-module.exports = { directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+module.exports = { clientOwners, directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
