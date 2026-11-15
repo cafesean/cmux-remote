@@ -171,6 +171,19 @@ const cmuxP = (args, timeout) => new Promise((resolve) =>
 // wants the refusal verbatim — the CLI's own wording is what tells an operator which rule it hit.
 const cmuxErr = (args, timeout = 8000) => new Promise((resolve) =>
   cmux(args, (err, stdout, stderr) => resolve(err ? String(stderr || err.message || '') : null), timeout));
+// p41 D249: POLL reads (grid/layout/screen streams) share one gate — same-args reads coalesce, at most
+// 2 run at once, and a slow or timed-out read backs every stream off (lib/cmux-gate.js has the why:
+// each CLI call costs the cmux MAIN thread a connection auth + frame build). Interactive calls keep
+// calling cmux() directly. tmux backend: pass-through (no cmux main thread to protect).
+const { createCmuxGate, isTimeout } = require('./lib/cmux-gate');
+const cmuxGate = createCmuxGate({ log: (m) => console.log(m) });
+const CMUX_GRID_SLOW_ROWS = 300;   // read-screen fallback rows while the gate is backed off (was always 2000)
+function pollCmux(args, cb, timeout = 8000) {
+  if (tmuxCli) return cmux(args, cb, timeout);
+  cmuxGate.run(args.join('\u0000'), (done) => cmux(args, done, timeout), cb);
+}
+const pollCmuxP = (args, timeout) => new Promise((resolve) =>
+  pollCmux(args, (err, stdout) => resolve(err ? null : (stdout || '')), timeout));
 // p41 S2p: every JSON body passes the private-surface gate here. handleCmux records each request's
 // `res` (privateRes) so a body naming a private surface/pane/workspace answers 423 `private` before
 // any route sees it — no caller changes, and a route added later is covered by construction.
@@ -578,7 +591,7 @@ async function loadTree(gate) {
 // `*_id` accepts a short ref as well as a UUID, so always send `*_id`.
 const rpcTarget = (key, value) => ({ [key + '_id']: value });
 async function loadLayout(workspace) {
-  const out = await cmuxP(['rpc', 'pane.list', JSON.stringify(rpcTarget('workspace', workspace))], 8000);
+  const out = await pollCmuxP(['rpc', 'pane.list', JSON.stringify(rpcTarget('workspace', workspace))], 8000);
   if (out == null) return null;
   let raw; try { raw = JSON.parse(out); } catch (_) { return null; }
   return normalizeLayout(raw, { workspace });
@@ -736,7 +749,7 @@ function cmuxLayout(res, workspace, ifHash) {
 function cmuxLayoutStream(req, res, workspace, ifHash) {
   sseHead(res);
   let lastHash = ifHash || null, alive = true, timer = null, idle = 0;
-  const delay = () => (idle > 4 ? 2500 : 700);
+  const delay = () => (idle > 4 ? 2500 : 700) + cmuxGate.extraDelay();   // D249: slow cmux → slower polls
   const schedule = () => { if (alive) timer = setTimeout(tick, delay()); };
   const tick = () => {
     if (!alive) return;
@@ -780,7 +793,7 @@ function sseHead(res) {
 function gridPayload(surface, done) {
   // S2r: every grid that leaves here is token-masked, wrap-aware (a token can span rows and spans).
   const cb = (o) => done(o && o.grid ? { ...o, grid: redactGrid(o.grid) } : o);
-  cmux(['rpc', 'terminal.replay', JSON.stringify({ surface_id: surface })], (err, stdout) => {
+  pollCmux(['rpc', 'terminal.replay', JSON.stringify({ surface_id: surface })], (err, stdout) => {
     if (!err) {
       try {
         const d = JSON.parse(stdout);
@@ -798,7 +811,11 @@ function gridPayload(surface, done) {
         }
       } catch (_) { /* fall through to plain text */ }
     }
-    cmux(['read-screen', '--surface', surface, '--scrollback', '--lines', String(CMUX_GRID_MAX_ROWS)], (e2, txt) => {
+    // D249: a replay that TIMED OUT (or was refused as cmux_busy) means cmux is slow — piling a
+    // 2000-row read-screen on top made the stall worse. Skip the fallback; the stream retries later.
+    if (err && (isTimeout(err) || err.code === 'cmux_busy')) return cb(null);
+    const fallbackRows = cmuxGate.slow() ? CMUX_GRID_SLOW_ROWS : CMUX_GRID_MAX_ROWS;
+    pollCmux(['read-screen', '--surface', surface, '--scrollback', '--lines', String(fallbackRows)], (e2, txt) => {
       if (e2) return cb(null);
       const lines = (txt || '').split('\n');
       const spans = lines.map((t, r) => ({ row: r, column: 0, style_id: 0, text: t }));
@@ -818,7 +835,7 @@ function cmuxGrid(res, surface, ifHash) {
 function cmuxGridStream(req, res, surface, ifHash) {
   sseHead(res);
   let lastHash = ifHash || null, alive = true, timer = null, idle = 0;
-  const delay = () => (idle > 3 ? 900 : 250);
+  const delay = () => (idle > 3 ? 900 : 250) + cmuxGate.extraDelay();   // D249
   const schedule = () => { if (alive) timer = setTimeout(tick, delay()); };
   const tick = () => {
     if (!alive) return;
@@ -851,7 +868,7 @@ function cmuxPanesStream(req, res, surfaces, hashes) {
   let alive = true, timer = null, i = 0, quietRounds = 0;
   // per-surface round: a 3-pane workspace refreshes each pane every 3 ticks, so keep ticks short
   // while anything is changing — the per-PANE rate is what the eye sees, not the tick rate.
-  const delay = () => (quietRounds > surfaces.length * 3 ? 700 : 160);
+  const delay = () => (quietRounds > surfaces.length * 3 ? 700 : 160) + cmuxGate.extraDelay();   // D249
   const schedule = () => { if (alive) timer = setTimeout(tick, delay()); };
   const tick = () => {
     if (!alive) return;
@@ -1107,25 +1124,26 @@ function cmuxStream(req, res, surface) {
     'X-Accel-Buffering': 'no',
   });
   res.write(': connected\n\n');
-  let last = null, alive = true, busy = false;
+  // D249: a setTimeout chain (was setInterval 400 + busy flag) so the cadence can stretch with the
+  // shared poll gate's backoff while cmux is slow.
+  let last = null, alive = true, timer = null;
+  const schedule = () => { if (alive) timer = setTimeout(tick, 400 + cmuxGate.extraDelay()); };
   const tick = () => {
-    if (!alive || busy) return;
-    busy = true;
-    cmux(['read-screen', '--surface', surface], (err, stdout) => {
-      busy = false;
+    if (!alive) return;
+    pollCmux(['read-screen', '--surface', surface], (err, stdout) => {
       if (!alive) return;
-      if (err) { res.write('event: error\ndata: cmux_failed\n\n'); return; }
+      if (err) { res.write('event: error\ndata: cmux_failed\n\n'); return schedule(); }
       const screen = stdout || '';
       if (screen !== last) {
         last = screen;
         res.write('data: ' + Buffer.from(redactText(screen), 'utf8').toString('base64') + '\n\n');
       }
+      schedule();
     }, 5000);
   };
-  const iv = setInterval(tick, 400);
   const hb = setInterval(() => { if (alive) res.write(': hb\n\n'); }, 15000);
   tick();
-  const done = () => { if (!alive) return; alive = false; clearInterval(iv); clearInterval(hb); try { res.end(); } catch (_) {} };
+  const done = () => { if (!alive) return; alive = false; if (timer) clearTimeout(timer); clearInterval(hb); try { res.end(); } catch (_) {} };
   req.on('close', done); req.on('error', done);
 }
 
