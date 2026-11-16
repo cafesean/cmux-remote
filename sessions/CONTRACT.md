@@ -17,6 +17,9 @@ One terminal, agent or browser surface on one machine.
 - `surface`: string. The surface id inside the machine, for example `surface:12`.
 - `kind`: one of `claude`, `codex`, `terminal`, `browser`. How the app should show it: a chat thread
   for the first two, the terminal mirror for `terminal`, the screenshot mirror for `browser`.
+- `harness`: string, optional, `terminal` kind only (D262). The other agent CLI running in the pane: `pi`, `gemini`,
+  `hermes`, `opencode`, `aider`, `goose`, `qwen`, `crush`, `amp`, `droid`, `cursor`, `zylos`. The app names the session
+  with it; the terminal mirror stays its chat view. An app ignores a value it does not know.
 - `title`: string. The session title shown in the list and the thread header. Chosen by priority
   (sessions/titles.js): transcript custom-title, tmux session name, `<workspace title> <surface ref>`,
   the tab title only when it is not a process/wrapper/shell/prompt title (`cswap`, `zsh`, `user@host:~`).

@@ -20,7 +20,7 @@ const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
 
-const { kindOfCommand } = require('./detect');
+const { kindOfCommand, harnessOf } = require('./detect');
 const tmuxCli = require('../lib/tmux-cli');
 const tmuxIds = require('../lib/tmux-ids');
 const { ansiToGrid } = require('../lib/tmux-grid');
@@ -219,6 +219,7 @@ async function agentFor(surface, deps) {
   // D238: no tmux session shows this cmux surface and the tree gave no pid: the agent may run straight
   // in the pane (cmux reports tty null, so ps -t cannot see it).
   if (!rootPid && !/^%\d+$/.test(id)) agent = (await directAgents(snap, d)).get(String(id).toUpperCase()) || null;
+  if (!agent && rootPid) agent = findHarness(snap.table, rootPid);   // D262
   if (!agent || agent.kind !== 'claude') return agent;
   const t = await claudeTranscriptOf(agent.pid, d);
   return t ? { ...agent, ...t } : agent;
@@ -265,6 +266,26 @@ async function scanClientOwners(snap, d) {
 
 // ---- agents started straight in a cmux pane (D238) -----------------------------------------------
 //
+// p41 D262: no claude/codex under rootPid -> the shallowest other agent CLI (pi, gemini, hermes…), same walk.
+function findHarness(table, rootPid) {
+  const root = Number(rootPid);
+  if (!table || !Number.isFinite(root)) return null;
+  let level = [root];
+  let seen = 0;
+  for (let depth = 0; depth <= LIMITS.procTreeDepth && level.length; depth++) {
+    const next = [];
+    for (const pid of level) {
+      if (++seen > LIMITS.procTreeNodes) return null;
+      const p = table.byPid.get(pid);
+      const h = p && harnessOf(p.args);
+      if (h) return { kind: 'terminal', harness: h, pid, args: p.args };
+      for (const c of table.kids.get(pid) || []) next.push(c);
+    }
+    level = next;
+  }
+  return null;
+}
+
 // Sean 2026-11-10: a chief started directly in a cmux pane (no tmux) showed as a plain terminal. cmux
 // reports tty null for every surface and a session without the radar hooks fires no hook events, so
 // neither older signal sees it. The agent process itself carries the CMUX_SURFACE_ID cmux exported into
@@ -491,4 +512,4 @@ async function tmuxGrid(target, deps) {
   return { seq, grid: redactGrid(grid) };
 }
 
-module.exports = { clientOwners, directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+module.exports = { clientOwners, directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, findHarness, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
