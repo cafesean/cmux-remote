@@ -2475,7 +2475,14 @@ const BROWSER_SHOT_MAX_BYTES = Math.max(1, Number(process.env.BROWSER_SHOT_MAX_B
 const browserShotLimiter = require('./lib/shot-limiter').createShotLimiter({ minMs: BROWSER_SHOT_MIN_MS });
 // p41 D97: Mac screen — lib/mac-screen.js owns flags, TCC errors, limits; text rides osascript stdin.
 const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => secretsIn.childEnv(),
-  secret: SECRET, host: HOST, socket: SOCKET });
+  secret: SECRET, host: HOST, socket: SOCKET, captureGranted: () => screenRecordingTruth() });
+// p41 D253: Screen Recording per the rd-setup GROUND TRUTH only (window-name check, D189b) -> true | false | null.
+// The preflight alone lies, so a 'probe' answer is null (unknown): capture still runs then.
+function screenRecordingTruth() {
+  const s = rdSetup.cached();
+  const p = s && Array.isArray(s.perms) ? s.perms.find((x) => x.id === 'screen-recording') : null;
+  return p && p.source === 'truth' ? !!p.granted : null;
+}
 // p41 D189: Remote Desktop setup (TCC grants the Mac screen needs) — probe cached, reminder flag.
 const rdSetup = require('./lib/rd-setup').createRdSetup({ childEnv: () => secretsIn.childEnv(), flags: () => macScreen.flags, observed: () => macScreen.observed() });
 function cmuxBrowserShot(res, surface, px = null) {
