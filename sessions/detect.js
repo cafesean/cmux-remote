@@ -44,6 +44,31 @@ const EXITED = '(agent exited)';
 
 const base = (tok) => path.basename(String(tok).replace(/^-+(?=[a-z])/i, ''));
 
+// p41 D262 (Sean 2026-11-15 'detect any agent harness'): other agent CLIs. They stay kind 'terminal' (no
+// transcript reader: the terminal view IS their chat: live screen, composer, keys); the session only
+// carries `harness` so the app can name it. Program basename -> harness id; npm package -> id.
+const HARNESS_BINS = { pi: 'pi', gemini: 'gemini', hermes: 'hermes', opencode: 'opencode', aider: 'aider', goose: 'goose',
+  qwen: 'qwen', crush: 'crush', amp: 'amp', droid: 'droid', 'cursor-agent': 'cursor', zylos: 'zylos' };
+const HARNESS_PKGS = [[/@mariozechner[\\/]pi-coding-agent/, 'pi'], [/@google[\\/]gemini-cli/, 'gemini'], [/@sourcegraph[\\/]amp/, 'amp'],
+  [/opencode-ai/, 'opencode'], [/@qwen-code[\\/]/, 'qwen']];
+const binHarness = (tok) => {
+  const b = base(tok).replace(/(\.js|\.mjs|\.cjs)$/, '');
+  return Object.prototype.hasOwnProperty.call(HARNESS_BINS, b) ? HARNESS_BINS[b] : null;
+};
+// "node /…/bin/pi --model x" -> 'pi'. Same program rule as kindOfCommand: the first word, or for an
+// interpreter its first non-flag word; `vim pi.md` is no harness.
+function harnessOf(cmd) {
+  const s = String(cmd == null ? '' : cmd).trim();
+  if (!s) return null;
+  for (const [re, id] of HARNESS_PKGS) if (re.test(s)) return id;
+  const words = s.split(/\s+/);
+  const first = binHarness(words[0]);
+  if (first) return first;
+  if (!RUNTIMES.has(base(words[0]))) return null;
+  const script = words.slice(1).find((w) => !w.startsWith('-'));
+  return (script && binHarness(script)) || null;
+}
+
 function programKind(tok) {
   const b = base(tok);
   if (CLAUDE_RE.test(b)) return 'claude';
@@ -178,4 +203,4 @@ async function foregroundCommand(surface, backend, deps) {
   return eventsForeground(s, d);
 }
 
-module.exports = { detectKind, foregroundCommand, kindOfCommand, latestSurfaceEvent, EXITED };
+module.exports = { detectKind, foregroundCommand, kindOfCommand, harnessOf, latestSurfaceEvent, EXITED };
