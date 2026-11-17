@@ -40,6 +40,10 @@ const LIMITS = {
   pidFileSkewMs: 30 * 1000,  // a pid file may predate its process start by this much (clock/rounding) before it is called stale
   tmuxSubmitSettleMs: 150,   // pause between pasted text and Enter (same paste-burst rule as cmuxSend)
   directAgentsMax: 64,       // D238: agents started straight in a cmux pane whose surface id is read per snapshot
+  screenMatchCandidates: 16, // D264: env-less tmux clients compared by screen per unmatched cmux surface
+  screenMatchMinLines: 3,    // D264: distinctive lines a surface must share with exactly one session
+  screenMatchRetryMs: 30 * 1000,   // D264: an unmatched surface is re-read only this often while the candidate set is unchanged
+  screenCacheMax: 256,       // D264: remembered surface -> session matches
 };
 
 // The cmux app's own process (args of the main executable, not its bundled CLI helpers).
@@ -214,11 +218,18 @@ async function agentFor(surface, deps) {
     const owner = (await clientOwners(snap, d)).get(String(id).toUpperCase()) || ownerOf(snap.sessions, id);
     pane = owner ? activePane(owner) : null;
   }
-  const rootPid = pane ? pane.pid : surface.pid;
+  let rootPid = pane ? pane.pid : surface.pid;
   let agent = rootPid ? findAgent(snap.table, rootPid) : null;
   // D238: no tmux session shows this cmux surface and the tree gave no pid: the agent may run straight
   // in the pane (cmux reports tty null, so ps -t cannot see it).
   if (!rootPid && !/^%\d+$/.test(id)) agent = (await directAgents(snap, d)).get(String(id).toUpperCase()) || null;
+  // D264: still nothing: a tmux client with no CMUX_SURFACE_ID at all (cmux restart) may show this surface.
+  if (!rootPid && !agent && !/^%\d+$/.test(id)) {
+    const owner = await screenOwner(snap, id, d);
+    pane = owner ? activePane(owner) : null;
+    rootPid = pane ? pane.pid : null;
+    agent = rootPid ? findAgent(snap.table, rootPid) : null;
+  }
   if (!agent && rootPid) agent = findHarness(snap.table, rootPid);   // D262
   if (!agent || agent.kind !== 'claude') return agent;
   const t = await claudeTranscriptOf(agent.pid, d);
@@ -255,14 +266,121 @@ async function scanClientOwners(snap, d) {
   }
   if (!bySession.size) return out;
   const text = await (d.psEnv || defaultPsEnv)([...bySession.keys()]);
+  // D264: a client under the cmux app whose env carries NO surface id (cmux restarted and its re-attach
+  // shell lost CMUX_SURFACE_ID / CMUX_PANEL_ID) names no pane; screenOwner matches it by screen instead.
+  const anon = [];
   for (const line of String(text || '').split('\n')) {
     const m = /^\s*(\d+)\s/.exec(line);
     const s = m && bySession.get(Number(m[1]));
-    const e = s && SURFACE_ENV.exec(line);
+    if (!s) continue;
+    const e = SURFACE_ENV.exec(line);
     if (e) out.set(e[1].toUpperCase(), s);
+    else anon.push({ clientPid: Number(m[1]), session: s });
   }
+  out.anon = anon;
   return out;
 }
+
+// ---- tmux sessions shown by a cmux pane, matched by screen (D264) ---------------------------------
+//
+// Sean 2026-11-17: m-chief SIGTERMed a hung cmux.app and re-attached every tmux worker from new panes.
+// Those clients carried CMUX_TAB_ID / CMUX_WORKSPACE_ID but no CMUX_SURFACE_ID, so neither the session
+// env (update-environment unset it) nor the client env (D241) named a pane, cmux's own process
+// attribution is env-based too, and every worker pane fell back to the narrow Terminal view.
+// What still ties a cmux surface to its tmux session is what it SHOWS: the attach client paints that
+// session's active pane. So, only for a cmux surface nothing else claims and only against clients with
+// no surface id, compare the surface's screen with each candidate's `capture-pane` (visible rows,
+// read-only). A line counts only when it is distinctive (has a letter or digit, >= 4 chars) and appears
+// in exactly ONE candidate's capture; the match needs LIMITS.screenMatchMinLines such lines and no
+// rival with a third as many. The match is remembered for as long as that client pid stays attached
+// (one screen read per surface), and a miss is retried only when the candidate set changes or after
+// LIMITS.screenMatchRetryMs. No match -> null: the surface stays a terminal, as before.
+const screenCache = new Map();   // SURFACE (upper) -> {socket, name, clientPid}
+const screenMiss = new Map();    // SURFACE (upper) -> {sig, until}
+const distinctive = (line) => {
+  const t = String(line || '').trim();
+  return t.length >= 4 && /[A-Za-z0-9]/.test(t) ? t : null;
+};
+function lineSet(lines) {
+  const out = new Set();
+  for (const l of lines || []) { const t = distinctive(l); if (t) out.add(t); }
+  return out;
+}
+// surface lines vs candidate captures (arrays of lines) -> index of the single matching capture, or -1.
+function matchScreen(surfaceLines, captures, minLines) {
+  const min = minLines || LIMITS.screenMatchMinLines;
+  const sets = captures.map(lineSet);
+  const score = sets.map(() => 0);
+  for (const t of lineSet(surfaceLines)) {
+    let hit = -1; let n = 0;
+    for (let i = 0; i < sets.length; i++) if (sets[i].has(t)) { hit = i; n++; }
+    if (n === 1) score[hit]++;
+  }
+  let best = -1; let second = 0;
+  for (let i = 0; i < score.length; i++) {
+    if (best < 0 || score[i] > score[best]) { if (best >= 0) second = Math.max(second, score[best]); best = i; }
+    else second = Math.max(second, score[i]);
+  }
+  if (best < 0 || score[best] < min || score[best] < 3 * second) return -1;
+  return best;
+}
+// A render_grid (cmux row_spans or the bridge's spans) -> one string per row, spans placed at their column.
+function gridLines(grid) {
+  const spans = (grid && (grid.row_spans || grid.spans)) || [];
+  const rows = new Map();
+  for (const sp of spans) {
+    const text = String((sp && sp.text) || '');
+    let cells = rows.get(sp.row);
+    if (!cells) { cells = []; rows.set(sp.row, cells); }
+    const col = Number(sp.column) || 0;
+    for (let i = 0; i < text.length; i++) cells[col + i] = text[i];
+  }
+  return [...rows.keys()].sort((a, b) => a - b).map((r) => Array.from(rows.get(r), (c) => (c === undefined ? ' ' : c)).join(''));
+}
+async function paneText(tmux, s) {
+  const p = activePane(s);
+  if (!p) return [];
+  try { return String(await tmux(s.socket, ['capture-pane', '-p', '-t', p.id]) || '').split('\n'); } catch (_) { return []; }
+}
+// The cached match for a surface when its client is still attached to that session (sync: snapshot only).
+function cachedScreenOwner(snap, id) {
+  const hit = screenCache.get(String(id).toUpperCase());
+  if (!hit || !snap) return null;
+  return (snap.sessions || []).find((s) => s.socket === hit.socket && s.name === hit.name && (s.clientPids || []).includes(hit.clientPid)) || null;
+}
+async function screenOwner(snap, id, d) {
+  if (!d || !d.surfaceLines || !snap || !snap.table) return null;
+  const key = String(id).toUpperCase();
+  const anon = (await clientOwners(snap, d)).anon || [];
+  const hit = screenCache.get(key);
+  if (hit) {
+    const a = anon.find((x) => x.clientPid === hit.clientPid && x.session.name === hit.name && x.session.socket === hit.socket);
+    if (a) return a.session;
+    screenCache.delete(key);
+  }
+  if (!anon.length) return null;
+  const claimed = new Set();
+  for (const [k, v] of screenCache) if (k !== key) claimed.add(v.clientPid);
+  const cands = anon.filter((a) => !claimed.has(a.clientPid)).slice(0, LIMITS.screenMatchCandidates);
+  if (!cands.length) return null;
+  const sig = cands.map((a) => a.clientPid).sort((x, y) => x - y).join(',');
+  const now = Date.now();
+  const miss = screenMiss.get(key);
+  if (miss && miss.sig === sig && miss.until > now) return null;
+  let lines = null;
+  try { lines = await d.surfaceLines(id); } catch (_) { lines = null; }
+  const tmux = d.tmuxAt || defaultTmux;
+  const caps = lines && lines.length ? await Promise.all(cands.map((a) => paneText(tmux, a.session))) : [];
+  const i = caps.length ? matchScreen(lines, caps) : -1;
+  if (screenMiss.size > LIMITS.screenCacheMax) screenMiss.clear();
+  if (i < 0) { screenMiss.set(key, { sig, until: now + LIMITS.screenMatchRetryMs }); return null; }
+  screenMiss.delete(key);
+  if (screenCache.size >= LIMITS.screenCacheMax) screenCache.clear();
+  const a = cands[i];
+  screenCache.set(key, { socket: a.session.socket, name: a.session.name, clientPid: a.clientPid });
+  return a.session;
+}
+const resetScreenCache = () => { screenCache.clear(); screenMiss.clear(); };
 
 // ---- agents started straight in a cmux pane (D238) -----------------------------------------------
 //
@@ -396,7 +514,7 @@ function tmuxNameFor(snap, surface) {
     }
     return null;
   }
-  const o = ownerOf(snap.sessions, id);
+  const o = ownerOf(snap.sessions, id) || cachedScreenOwner(snap, id);   // D264
   return o ? o.name : null;
 }
 
@@ -442,7 +560,7 @@ async function tmuxKeyTargetFor(surfaceId, deps) {
   if (minted) return minted;
   if (!surfaceId || /^%\d+$/.test(surfaceId)) return null;
   const snap = await (deps && deps.procSnapshot ? deps.procSnapshot() : snapshot(deps));
-  const o = ownerOf((snap && snap.sessions) || [], surfaceId);
+  const o = ownerOf((snap && snap.sessions) || [], surfaceId) || cachedScreenOwner(snap, surfaceId);   // D264
   if (!o || !(o.attached > 0)) return null;
   const pane = activePane(o);
   return pane ? { socket: o.socket, pane: pane.id, session: o.name } : null;
@@ -512,4 +630,4 @@ async function tmuxGrid(target, deps) {
   return { seq, grid: redactGrid(grid) };
 }
 
-module.exports = { clientOwners, directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, findHarness, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+module.exports = { screenOwner, matchScreen, gridLines, resetScreenCache, clientOwners, directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, findHarness, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
