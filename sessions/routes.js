@@ -128,9 +128,14 @@ function createSessionRoutes(deps) {
     return snapCache.p;
   };
   let streams = 0;
+  // D264: a cmux surface's screen as text rows, for matching it to a tmux client that lost its
+  // CMUX_SURFACE_ID (procs.screenOwner). Only read for a surface nothing else claims.
+  const surfaceLines = backend === 'cmux' && readGridCmux
+    ? async (id) => { const g = await readGridCmux(id); return g && g.grid ? procs.gridLines(g.grid) : null; }
+    : null;
   const withAgent = (base) => {
     base.procSnapshot = sharedSnapshot;
-    base.agentFor = (s) => procs.agentFor(s, { home, procSnapshot: sharedSnapshot });
+    base.agentFor = (s) => procs.agentFor(s, { home, procSnapshot: sharedSnapshot, surfaceLines });
     return base;
   };
 
