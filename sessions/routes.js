@@ -55,6 +55,7 @@ const LIMITS = {
   listIdleStopMs: 30000,             // D272/D278: no client asked for this long = idle; the loop slows to listIdleRefreshMs
   listIdleRefreshMs: 15000,          // D278: while idle the list is still rebuilt this often, so a new client gets it at once
   listWarmStartMs: 3000,             // D278: the first build runs this long after the bridge starts (not on the first GET)
+  kindStickyMs: 120000,              // D279: an inconclusive probe keeps a pane's last agent kind (and transcript) this long
   attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n
   ...statusline.LIMITS,               // A12 status-line limits (sessions/statusline.js)
   ...choice.LIMITS,                   // A14 answer-choice limits (sessions/choice.js)
@@ -249,6 +250,9 @@ function createSessionRoutes(deps) {
     try { return JSON.parse(await fsp.readFile(path.join(home, '.claude', 'needs-you', sessionId), 'utf8')); } catch (_) { return null; }
   }
 
+  // D279: surface id -> { kind, join, at } of the last conclusive agent answer (see describe).
+  const kindMemo = new Map();
+  const kindNow = deps.now || Date.now;
   // The full Session (CONTRACT.md) for one tab, plus its join for the caller.
   async function describe(entry, d, unread) {
     const { ws, tab } = entry;
@@ -271,6 +275,15 @@ function createSessionRoutes(deps) {
     let fg = null;
     try { fg = await foregroundCommand(js, be, d); } catch (_) { fg = null; }
     s.kind = detectKind({ surfaceType: tab.type, foregroundCmd: fg, transcriptPath: join && join.path });
+    // D279 (Sean 2026-11-21: "panes are flipping between terminal format and agent format"): on a slow cmux the
+    // agent probe can come back empty (no process match, no recent hook event, no transcript join). That is
+    // "unknown", not "terminal", so the pane keeps the agent kind it had within kindStickyMs. A real answer
+    // (another command in front, or SessionEnd) still turns it into a terminal at once.
+    const memo = kindMemo.get(tab.id);
+    if (s.kind === 'terminal' && fg == null && !join && memo && kindNow() - memo.at < LIMITS.kindStickyMs) {
+      s.kind = memo.kind; join = memo.join;
+    } else if (s.kind !== 'terminal') kindMemo.set(tab.id, { kind: s.kind, join, at: kindNow() });
+    else kindMemo.delete(tab.id);
     // A Codex transcript is never parsed with the Claude reader (no Codex normaliser yet): kind only.
     if (s.kind !== 'terminal' && join && join.kind === 'codex') s.kind = 'codex';
     if (s.kind === 'terminal') { const h = harnessOf(fg); if (h) s.harness = h; }   // D262: pi, gemini, hermes… (terminal view)
