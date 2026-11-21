@@ -51,8 +51,10 @@ const LIMITS = {
   markerIdMax: 128,
   procSnapshotTtlMs: 2000,           // one ps+tmux snapshot is shared for this long (list, describe, streams)
   listSnapshotMs: 2000,              // D272: the sessions list is rebuilt locally at most this often, however many clients poll
-  listSnapshotMaxAgeMs: 60000,       // D272: an older snapshot is never served; the request waits for a fresh build
-  listIdleStopMs: 30000,             // D272: the local rebuild loop stops when no client asked for this long
+  listSnapshotMaxAgeMs: 300000,      // D272/D278: an older snapshot is never served; the request waits for a fresh build
+  listIdleStopMs: 30000,             // D272/D278: no client asked for this long = idle; the loop slows to listIdleRefreshMs
+  listIdleRefreshMs: 15000,          // D278: while idle the list is still rebuilt this often, so a new client gets it at once
+  listWarmStartMs: 3000,             // D278: the first build runs this long after the bridge starts (not on the first GET)
   attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n
   ...statusline.LIMITS,               // A12 status-line limits (sessions/statusline.js)
   ...choice.LIMITS,                   // A14 answer-choice limits (sessions/choice.js)
@@ -329,9 +331,12 @@ function createSessionRoutes(deps) {
 
   // p41 D272: the sessions list is a local heartbeat. The bridge builds it on its own loop (one build per
   // listSnapshotMs, however many devices poll) and every GET answers the newest snapshot at once, in one
-  // response, with snapshotAt = when it was built. A slow build (30-50 panes) never makes a client wait or
-  // time out while a snapshot younger than listSnapshotMaxAgeMs exists. The loop runs only while a client
-  // asked within listIdleStopMs. deps.listSnapshotMs = 0 turns it off (every GET builds, as before D272).
+  // response, with snapshotAt = when it was built. deps.listSnapshotMs = 0 turns it off (every GET builds).
+  // D278 (Sean 2026-11-21: "It took about 30 seconds to load all the sessions"): on a slow cmux a build can
+  // take 10-30 s, so a client must never be the one that waits for it. The loop never stops: idle (no GET for
+  // listIdleStopMs) it rebuilds every listIdleRefreshMs instead of every listSnapshotMs, the first build runs
+  // listWarmStartMs after start (deps.listWarm), a snapshot up to listSnapshotMaxAgeMs old answers at once
+  // while one rebuild runs, and a write marks the snapshot stale (rebuild now) instead of dropping it.
   const listSnapshotMs = deps.listSnapshotMs ?? LIMITS.listSnapshotMs;
   const listNow = deps.now || Date.now;
   let listSnap = null;   // { at, code, body }
@@ -346,23 +351,34 @@ function createSessionRoutes(deps) {
     }
     return listBuild;
   }
-  // D272: a write that changes what the list shows (rename, new/closed surface) drops the snapshot,
-  // so the next GET builds fresh instead of answering the old one.
-  function invalidateList() { listSnap = null; }
+  // D272/D278: a write that changes what the list shows (rename, new/closed surface) starts a rebuild now;
+  // the old snapshot still answers until it lands, so no client waits a full build after a write.
+  function invalidateList() {
+    if (!listSnapshotMs) { listSnap = null; return; }
+    if (listSnap) listSnap.stale = true;   // still answers; a rebuild is due at once
+    rebuildList().catch(() => {});
+  }
+  function listAge() { return listSnap ? listNow() - listSnap.at : Infinity; }
+  const listDue = (every) => !listSnap || listSnap.stale || listAge() >= every;
   function armListLoop() {
     if (listTimer || !listSnapshotMs) return;
     listTimer = setInterval(() => {
-      if (listNow() - listAskedAt > LIMITS.listIdleStopMs) { clearInterval(listTimer); listTimer = null; return; }
-      rebuildList().catch(() => {});
+      const idle = listNow() - listAskedAt > LIMITS.listIdleStopMs;
+      if (listDue(idle ? LIMITS.listIdleRefreshMs : listSnapshotMs)) rebuildList().catch(() => {});
     }, listSnapshotMs);
     if (listTimer.unref) listTimer.unref();
+  }
+  if (deps.listWarm && listSnapshotMs) {
+    const t = setTimeout(() => { rebuildList().catch(() => {}); armListLoop(); }, deps.listWarmStartMs ?? LIMITS.listWarmStartMs);
+    if (t.unref) t.unref();
   }
   async function list(res) {
     listAskedAt = listNow();
     let snap = listSnap;
-    const age = snap ? listNow() - snap.at : Infinity;
-    if (!listSnapshotMs || !snap || snap.code !== 200 || age > LIMITS.listSnapshotMaxAgeMs) snap = await rebuildList();
-    else if (age >= listSnapshotMs) rebuildList().catch(() => {});
+    const age = listAge();
+    const usable = snap && snap.code === 200 && age <= LIMITS.listSnapshotMaxAgeMs;
+    if (!listSnapshotMs || !usable) snap = await rebuildList();
+    else if (listDue(listSnapshotMs)) rebuildList().catch(() => {});
     armListLoop();
     send(res, snap.code, snap.code === 200 ? { ...snap.body, snapshotAt: snap.at } : snap.body);
   }

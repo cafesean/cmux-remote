@@ -22,6 +22,7 @@ function routes(opts = {}) {
     },
     procSnapshot: async () => ({ table: [], sessions: [] }),
     ...(opts.listSnapshotMs !== undefined ? { listSnapshotMs: opts.listSnapshotMs } : {}),
+    ...(opts.listWarm ? { listWarm: true, listWarmStartMs: 5 } : {}),
   });
   const get = () => new Promise((resolve) => {
     let code = 0;
@@ -52,21 +53,49 @@ test('D272: an aged snapshot answers at once; one rebuild runs behind it', async
   assert.equal((await get()).body.snapshotAt, 6000);
 });
 
-test('D272: a snapshot older than listSnapshotMaxAgeMs is never served', async () => {
+test('D272/D278: a snapshot older than listSnapshotMaxAgeMs (5 min) is never served', async () => {
   const { get, clock, builds } = routes();
   await get();
-  clock.t += 61000;
+  clock.t += 301000;
   const a = await get();
   assert.equal(builds.n, 2);
-  assert.equal(a.body.snapshotAt, 62000);
+  assert.equal(a.body.snapshotAt, 302000);
 });
 
-test('D272: invalidateList drops the snapshot; the next GET builds fresh', async () => {
-  const { r, get, builds } = routes();
+test('D278: invalidateList starts a rebuild now; the old snapshot still answers meanwhile', async () => {
+  const { r, get, clock, builds } = routes({ slow: true });
   await get();
+  clock.t += 500;
   r.invalidateList();
+  const started = Date.now();
+  const a = await get();
+  assert.ok(Date.now() - started < 25, 'did not wait for the slow rebuild');
+  assert.equal(a.body.snapshotAt, 1000);
+  await new Promise((res) => setTimeout(res, 60));
+  assert.equal(builds.n, 2, 'one rebuild, shared by the write and the GET');
+  assert.equal((await get()).body.snapshotAt, 1500);
+});
+
+test('D278: listWarm builds the list at start, before any GET', async () => {
+  const { get, builds } = routes({ listWarm: true });
+  await new Promise((res) => setTimeout(res, 30));
+  assert.equal(builds.n, 1);
+  const a = await get();
+  assert.equal(a.body.snapshotAt, 1000);
+  assert.equal(builds.n, 1, 'the first GET did not build');
+});
+
+test('D278: idle, the loop keeps the list warm every listIdleRefreshMs (never stops)', async () => {
+  const { get, clock, builds } = routes({ listSnapshotMs: 5 });
   await get();
-  assert.equal(builds.n, 2);
+  clock.t += 31000;   // idle (> listIdleStopMs) and older than listIdleRefreshMs
+  await new Promise((res) => setTimeout(res, 30));
+  assert.equal(builds.n, 2, 'idle loop rebuilt once');
+  await new Promise((res) => setTimeout(res, 30));
+  assert.equal(builds.n, 2, 'not again until listIdleRefreshMs has passed');
+  clock.t += 16000;
+  await new Promise((res) => setTimeout(res, 30));
+  assert.equal(builds.n, 3);
 });
 
 test('D272: listSnapshotMs 0 builds on every GET (pre-D272 behaviour)', async () => {

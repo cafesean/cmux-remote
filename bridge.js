@@ -298,6 +298,7 @@ const sessionRoutes = require('./sessions/routes').createSessionRoutes({
   privateCheck: (refs) => privacy.verdict(refs),
   backend: BACKEND,
   loadTree: () => loadTree(),
+  listWarm: true,   // p41 D278: build the sessions list at start and keep it warm, so no client waits for a build
   unreadBySurface: () => (tmuxCli ? Promise.resolve(null) : unreadBySurface()),
   sseHead: (res) => sseHead(res),
   uploadRoot: () => UPLOAD_DIR,   // D57: inline images typed as upload paths (read lazily: defined below)
