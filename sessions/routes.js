@@ -50,6 +50,9 @@ const LIMITS = {
   eventMaxPages: 20,                  // event-log pages followed per read (= detect.js MAX_EVENT_PAGES)
   markerIdMax: 128,
   procSnapshotTtlMs: 2000,           // one ps+tmux snapshot is shared for this long (list, describe, streams)
+  listSnapshotMs: 2000,              // D272: the sessions list is rebuilt locally at most this often, however many clients poll
+  listSnapshotMaxAgeMs: 60000,       // D272: an older snapshot is never served; the request waits for a fresh build
+  listIdleStopMs: 30000,             // D272: the local rebuild loop stops when no client asked for this long
   attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n
   ...statusline.LIMITS,               // A12 status-line limits (sessions/statusline.js)
   ...choice.LIMITS,                   // A14 answer-choice limits (sessions/choice.js)
@@ -324,10 +327,50 @@ function createSessionRoutes(deps) {
     return by.has(String(tab.id).toUpperCase());
   }
 
+  // p41 D272: the sessions list is a local heartbeat. The bridge builds it on its own loop (one build per
+  // listSnapshotMs, however many devices poll) and every GET answers the newest snapshot at once, in one
+  // response, with snapshotAt = when it was built. A slow build (30-50 panes) never makes a client wait or
+  // time out while a snapshot younger than listSnapshotMaxAgeMs exists. The loop runs only while a client
+  // asked within listIdleStopMs. deps.listSnapshotMs = 0 turns it off (every GET builds, as before D272).
+  const listSnapshotMs = deps.listSnapshotMs ?? LIMITS.listSnapshotMs;
+  const listNow = deps.now || Date.now;
+  let listSnap = null;   // { at, code, body }
+  let listBuild = null;  // the one build in flight (concurrent asks share it)
+  let listAskedAt = 0;
+  let listTimer = null;
+  function rebuildList() {
+    if (!listBuild) {
+      listBuild = buildList()
+        .then((r) => { listSnap = { at: listNow(), ...r }; return listSnap; })
+        .finally(() => { listBuild = null; });
+    }
+    return listBuild;
+  }
+  // D272: a write that changes what the list shows (rename, new/closed surface) drops the snapshot,
+  // so the next GET builds fresh instead of answering the old one.
+  function invalidateList() { listSnap = null; }
+  function armListLoop() {
+    if (listTimer || !listSnapshotMs) return;
+    listTimer = setInterval(() => {
+      if (listNow() - listAskedAt > LIMITS.listIdleStopMs) { clearInterval(listTimer); listTimer = null; return; }
+      rebuildList().catch(() => {});
+    }, listSnapshotMs);
+    if (listTimer.unref) listTimer.unref();
+  }
   async function list(res) {
+    listAskedAt = listNow();
+    let snap = listSnap;
+    const age = snap ? listNow() - snap.at : Infinity;
+    if (!listSnapshotMs || !snap || snap.code !== 200 || age > LIMITS.listSnapshotMaxAgeMs) snap = await rebuildList();
+    else if (age >= listSnapshotMs) rebuildList().catch(() => {});
+    armListLoop();
+    send(res, snap.code, snap.code === 200 ? { ...snap.body, snapshotAt: snap.at } : snap.body);
+  }
+
+  async function buildList() {
     const d = requestDeps();
     const all = await treeTabs(d.procSnapshot);
-    if (!all) return send(res, 502, { error: 'cmux_failed' });
+    if (!all) return { code: 502, body: { error: 'cmux_failed' } };
     const isPriv = await privateCheck(all.map((e) => e.tab.id));
     const tabs = all.filter((e) => !isPriv(e.tab.id));
     let by = null;
@@ -359,7 +402,7 @@ function createSessionRoutes(deps) {
     // p41 D189 (additive): Remote Desktop TCC setup status, so the app can say "needs setup on this Mac".
     let screen = null;
     if (deps.screenStatus) { try { screen = await deps.screenStatus(); } catch (_) { screen = null; } }
-    send(res, 200, { machineId, sessions, ...(screen ? { screen } : {}) });
+    return { code: 200, body: { machineId, sessions, ...(screen ? { screen } : {}) } };
   }
 
   async function thread(res, entry, u) {
@@ -685,11 +728,12 @@ function createSessionRoutes(deps) {
     if (entry.tab.type !== 'browser') { try { join = await transcriptFor(joinSurface(entry.tab), d); } catch (_) { join = null; } }
     const r = nameStore.set(nameKey(join, entry.tab), v.name);
     if (!r.ok) return { code: r.error === 'names_full' ? 409 : 400, body: { error: r.error } };
+    invalidateList();   // D272: the next list shows the new name, not the snapshot from before it
     const { session } = await describe(entry, d, await unreadFor(entry.tab));
     return { code: 200, body: { ok: true, sessionId: b.sessionId, name: r.name || null, title: session.title } };
   }
 
-  return { handle, tmuxTarget, tmuxKeyTarget, choose, rename };
+  return { handle, tmuxTarget, tmuxKeyTarget, choose, rename, invalidateList };
 }
 
 module.exports = { createSessionRoutes, LIMITS, accountErrorOf };

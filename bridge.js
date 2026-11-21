@@ -3080,6 +3080,11 @@ function dispatchCmux(req, res, u) {
     if (!SURFACE_RE.test(s)) return send(res, 400, { error: 'bad_surface' });
     return cmuxStream(req, res, s);
   }
+  // p41 D272: a write that adds or removes a tab drops the sessions list snapshot once it has answered,
+  // so the next GET /cmux/sessions shows it instead of the snapshot from before.
+  if (req.method === 'POST' && /^\/cmux\/(new-(surface|workspace|pane)|close-(tab|workspace|pane)|orphans\/close)$/.test(p)) {
+    res.once('finish', () => sessionRoutes.invalidateList());
+  }
   if (req.method === 'POST' && p === '/cmux/send') return cmuxSend(req, res);
   if (req.method === 'POST' && p === '/cmux/choose') return cmuxChoose(req, res);
   if (req.method === 'POST' && p === '/cmux/session-name') return cmuxSessionName(req, res);
