@@ -160,7 +160,11 @@ async function latestSurfaceEvent(surface, deps, accept) {
   try { events = await readAllEvents(deps.readEvents || eventlog.readEvents, now - EVENT_LIVE_MS); } catch (_) { return null; }
   let last = null;
   for (const ev of events) {
-    if (ev.surfaceId !== id || now - ev.ts > EVENT_LIVE_MS || (accept && !accept(ev))) continue;
+    // p41 D280: an event with no surface id matches the pane whose tmux session holds its tmux pane
+    // (surface.tmuxPanes = Set of "<socket>|%N", filled by sessions/routes.js describe).
+    const mine = ev.surfaceId ? ev.surfaceId === id
+      : !!(surface.tmuxPanes && ev.tmuxPane && surface.tmuxPanes.has(`${ev.tmuxSocket}|${ev.tmuxPane}`));
+    if (!mine || now - ev.ts > EVENT_LIVE_MS || (accept && !accept(ev))) continue;
     if (!last || ev.ts >= last.ts) last = ev;
   }
   return last;

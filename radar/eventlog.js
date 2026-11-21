@@ -73,6 +73,10 @@ function normalizeEvent(raw, fallbackTs) {
   if (surfaceId) out.surfaceId = surfaceId;
   if (tabId) out.tabId = tabId;
   if (workspaceId) out.workspaceId = workspaceId;
+  // p41 D280: no surface id, but the tmux pane (+ socket) it runs in; the bridge maps it to a cmux pane.
+  const tmuxPane = str(raw.tmuxPane);
+  const tmuxSocket = str(raw.tmuxSocket);
+  if (!surfaceId && /^%\d+$/.test(tmuxPane || '') && tmuxSocket && tmuxSocket.length <= 512) { out.tmuxPane = tmuxPane; out.tmuxSocket = tmuxSocket; }
   return out;
 }
 

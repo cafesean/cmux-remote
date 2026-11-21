@@ -73,6 +73,15 @@ function cmuxIdentity(env) {
   };
 }
 
+// p41 D280: no cmux surface id (a tmux-hosted claude after a cmux.app restart keeps its launch env):
+// the tmux pane and socket it runs in, straight from the env (no spawn). The bridge maps the pane to its
+// tmux session and that session to the cmux pane showing it (sessions/detect.js latestSurfaceEvent).
+function tmuxPaneOf(e) {
+  const pane = typeof e.TMUX_PANE === 'string' ? e.TMUX_PANE.trim() : '';
+  const socket = String(e.TMUX || '').split(',')[0].trim();
+  return /^%\d+$/.test(pane) && socket ? { tmuxPane: pane, tmuxSocket: socket } : {};
+}
+
 function handle(text) {
   let payload;
   try { payload = JSON.parse(text || '{}'); } catch (e) { return debug(`bad stdin json: ${e.message}`); }
@@ -82,6 +91,8 @@ function handle(text) {
   for (const k of ['surfaceId', 'tabId', 'workspaceId']) {
     if (ident[k] && !payload[k] && !payload[k === 'surfaceId' ? 'surface_id' : k === 'tabId' ? 'tab_id' : 'workspace_id']) payload[k] = ident[k];
   }
+  const tp = ident.surfaceId ? {} : tmuxPaneOf(process.env);   // D280
+  if (tp.tmuxPane && !payload.surfaceId && !payload.surface_id && !payload.tmuxPane) { payload.tmuxPane = tp.tmuxPane; payload.tmuxSocket = tp.tmuxSocket; }
   const now = Date.now();
   const radarDir = defaultRadarDir();
   try {
@@ -114,4 +125,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { handle, maybePrune, cmuxIdentity, STDIN_CAP };
+module.exports = { handle, maybePrune, cmuxIdentity, tmuxPaneOf, STDIN_CAP };

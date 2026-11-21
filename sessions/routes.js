@@ -266,6 +266,14 @@ function createSessionRoutes(deps) {
     // A11: title never comes from a process/wrapper name (cswap, zsh...); see sessions/titles.js.
     let tmuxName = tab.tmuxPane ? tab.title : null;
     if (!tmuxName && d.procSnapshot) { try { tmuxName = procs.tmuxNameFor(await d.procSnapshot(), js); } catch (_) { tmuxName = null; } }
+    // D280: the tmux panes of the session this tab shows, so hook events with no surface id find it.
+    if (tmuxName && d.procSnapshot) {
+      try {
+        const snap = await d.procSnapshot();
+        const sess = ((snap && snap.sessions) || []).filter((x) => x.name === tmuxName && (!tab.tmuxSocket || x.socket === tab.tmuxSocket));
+        if (sess.length === 1) js.tmuxPanes = new Set(sess[0].panes.map((p) => `${sess[0].socket}|${p.id}`));
+      } catch (_) { /* no snapshot: events with a surface id still match */ }
+    }
     let userName = '';
     const titleOf = (customTitle, preferTab) => pickTitle({ customTitle, tmuxName, preferTab, userName,
       workspaceTitle: ws.title || ws.ref, surfaceRef: tab.ref || tab.id, tabTitle: tab.title });
