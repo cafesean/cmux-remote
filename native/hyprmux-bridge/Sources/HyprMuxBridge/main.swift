@@ -93,6 +93,12 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     item.menu = menu
     prepareState()
     poll()
+    // Upgrade gap: a replaced bundle leaves the old core running; restart the agents once when versions differ.
+    DispatchQueue.global().async { [weak self] in
+      let d = UpgradeRestart.runAtMenuLaunch(probe: LocalServerProbe(port: serverPort()), coordinator: coordinator,
+                                             bundleVersion: bundleVersion)
+      if case .restart = d { DispatchQueue.main.async { self?.poll() } }
+    }
     timer = Timer.scheduledTimer(withTimeInterval: LegacyGuard.pollInterval, repeats: true) { [weak self] _ in self?.poll() }
   }
 
@@ -209,7 +215,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     coreNoticeURL = core?.url
     return MenuInput(status: statusText, hostname: state.phoneAccessOn ? state.readLastTunnel()?.hostname : nil,
                      signInVisible: s?.config.signInVisible ?? false, signedIn: signedIn, email: s?.accountEmail, plan: s?.plan,
-                     canManagePlan: s?.manageURL != nil, problems: problems, notice: core?.text, noticeOpens: core?.url != nil,
+                     canManagePlan: s?.canManagePlan ?? false, problems: problems, notice: core?.text, noticeOpens: core?.url != nil,
                      remoteAccessOn: state.phoneAccessOn, version: bundleVersion,
                      optionHeld: NSEvent.modifierFlags.contains(.option))
   }
@@ -233,7 +239,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     case .signOut: signOut()
     case .quit: quit()
     case .openNotice: openCoreNotice()
-    case .managePlan: if let u = session?.manageURL { NSWorkspace.shared.open(u) }
+    case .managePlan: managePlan()
     case .stopBridge: stopBridge()
     case .checkUpdate: checkUpdate()
     }
@@ -286,6 +292,13 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
   }
 
   @objc func signOut() { DispatchQueue.global().async { [weak self] in try? self?.session?.signOut() } }
+
+  /// Manage Plan: manageUrl "portal" needs a hub round trip, so off the main thread.
+  @objc func managePlan() {
+    DispatchQueue.global().async { [weak self] in
+      if let url = self?.session?.managePlanURL() { DispatchQueue.main.async { NSWorkspace.shared.open(url) } }
+    }
+  }
 
   @objc func upgrade() {
     DispatchQueue.global().async { [weak self] in

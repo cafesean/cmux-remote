@@ -180,6 +180,19 @@ public final class CheckoutPoller {
     return url
   }
 
+  public static let portalPath = "/api/v1/apps/hyprmux/billing/portal"
+
+  /// POST billing/portal (Connect bearer) → {url}: the Stripe customer portal, https only.
+  public static func startPortal(transport: HubTransport, bearer: String) -> URL? {
+    let r = transport.send(HubRequest(method: "POST", path: portalPath, query: nil,
+                                      headers: ["authorization": "Bearer \(bearer)", "content-type": "application/json"],
+                                      body: "{}"), timeout: 10)
+    guard case .response(let s, let d) = r, (200..<300).contains(s),
+          let u = (HubEnvelope.data(d)?["url"] as? String) ?? (HubEnvelope.json(d)?["url"] as? String),
+          let url = URL(string: u), url.scheme == "https" else { return nil }
+    return url
+  }
+
   public func begin(ownerSub: String) {
     self.ownerSub = ownerSub
     startedAt = clock.now()

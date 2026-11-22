@@ -21,8 +21,11 @@ public final class BridgeSession {
   var lastPlanCheck: TimeInterval = -.infinity
   public private(set) var tunnelState: TunnelState?
   public private(set) var plan: String?
-  /// Plan management page from the entitlement (https only); nil hides Manage Plan…
+  /// Plan management page from the entitlement (https only); nil hides Manage Plan… unless managePortal.
   public private(set) var manageURL: URL?
+  /// Entitlement manageUrl == "portal": Manage Plan asks the hub for a Stripe portal session (POST billing/portal).
+  public private(set) var managePortal = false
+  public var canManagePlan: Bool { manageURL != nil || managePortal }
   /// The tunnel token a 'Tunnel not found' re-ensure already ran for (once per token, never a loop).
   var notFoundHandledFor: String?
   var tunnelLogOffset: UInt64 = 0
@@ -269,7 +272,9 @@ public final class BridgeSession {
     // A paid plan, or enforcement off, lifts a Free limit the last ensure hit.
     let snap = EntitlementSnapshot(enforced: enforced, tunnelAllowed: !atLimit || !enforced || plan != "free")
     self.plan = plan
-    manageURL = (e["manageUrl"] as? String).flatMap(URL.init(string:)).flatMap { $0.scheme == "https" ? $0 : nil }
+    let manage = e["manageUrl"] as? String
+    managePortal = manage == "portal"
+    manageURL = manage.flatMap(URL.init(string:)).flatMap { $0.scheme == "https" ? $0 : nil }
     return (plan, snap)
   }
 
@@ -359,6 +364,13 @@ public final class BridgeSession {
     guard let b = bearer, let sub = ownerSub, let url = CheckoutPoller.startCheckout(transport: hub, bearer: b) else { return nil }
     poller.begin(ownerSub: sub)
     return url
+  }
+
+  /// Manage Plan: the https manageUrl as is, or for "portal" a fresh hub portal session URL (https only).
+  public func managePlanURL() -> URL? {
+    if let u = manageURL { return u }
+    guard managePortal, let b = bearer else { return nil }
+    return CheckoutPoller.startPortal(transport: hub, bearer: b)
   }
 
   /// hyprmux-bridge://billing/done
