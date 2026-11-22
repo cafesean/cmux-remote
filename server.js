@@ -40,7 +40,13 @@ function main() {
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const PKG_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version || '0.0.0'; } catch (_) { return '0.0.0'; } })();
+const PKG_VERSION = (() => {
+  // Bun-compiled runtime: __dirname is the virtual bunfs root, so also read the bundle's Resources/server/package.json
+  // (HyprMux Bridge.app/Contents/MacOS/hyprmux-runtime -> ../Resources/server). 0.2.1 reported 0.0.0 and failed its launch check.
+  const tries = [path.join(__dirname, 'package.json'), path.join(path.dirname(process.execPath), '..', 'Resources', 'server', 'package.json')];
+  for (const p of tries) { try { const v = JSON.parse(fs.readFileSync(p, 'utf8')).version; if (v) return v; } catch (_) {} }
+  return '0.0.0';
+})();
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
