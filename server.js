@@ -75,7 +75,9 @@ const planPolicy = process.env.HMX_PLAN_STATE_DIR
   : null;
 const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '', policy: planPolicy,
   confirm: String(process.env.PAIR_LOCAL || '').toLowerCase() === 'off' ? confirmDialog.disabledConfirm : confirmDialog.createConfirm(),
-  localMachine: () => { const m = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl)); return m ? m.id : null; } });
+  localMachine: () => { const m = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl)); return m ? m.id : null; },
+  // D296: an opaque id of this Mac for /api/pair/hello (sha256 of the hostname; the hostname itself is not sent).
+  localMac: () => require('crypto').createHash('sha256').update('hyprmux-mac:' + require('os').hostname()).digest('hex').slice(0, 16) });
 const { parseUnixBaseUrl, unixFetch, streamRequest: nodeStreamTo } = require('./lib/unix-fetch');
 // Under Bun the node:http client reads a body ahead without bound, so the download relay dials a raw
 // socket there (lib/raw-get.js) to keep the client's backpressure; under Node it keeps http.request.
