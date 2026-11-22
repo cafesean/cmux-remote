@@ -48,6 +48,8 @@ install -m 755 "$CF" "$C/MacOS/cloudflared"
 # 4. LaunchAgents + Info.plist
 cp $HERE/LaunchAgents/*.plist "$C/Library/LaunchAgents/"
 for p in "$C"/Library/LaunchAgents/*.plist; do plutil -lint -s "$p"; done
-sed "s/__VERSION__/$VERSION/g" $HERE/Info.plist > "$C/Info.plist"
+# Public PKCE client (no secret); HYPRMUX_HUB_CLIENT_ID='' builds with sign-in hidden.
+HUB_CLIENT_ID=${HYPRMUX_HUB_CLIENT_ID-apmcnx_appmatic-hub.zDT0bZHA-Xs3xskZ7iiqyw}
+sed -e "s/__VERSION__/$VERSION/g" -e "s/__HUB_CLIENT_ID__/$HUB_CLIENT_ID/g" $HERE/Info.plist > "$C/Info.plist"
 plutil -lint -s "$C/Info.plist"
 echo "packaged: $APP ($VERSION, cloudflared $(ref version))"

@@ -1,4 +1,6 @@
 import AppKit
+import AuthenticationServices
+import CoreImage
 import BridgeCore
 
 // HyprMux Bridge: menu bar UI (default) or the headless `--core` LaunchAgent.
@@ -13,6 +15,19 @@ let coordinator = AgentCoordinator(agents: agents, legacy: legacy, state: state)
 let bundleVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
 
 func serverPort() -> Int { Int(state.readEnv()["PORT"] ?? "") ?? 0 }
+
+/// Build setting HYPRMUX_HUB_CLIENT_ID (Info.plist key); empty hides sign-in.
+let hubClientId = Bundle.main.object(forInfoDictionaryKey: "HyprMuxHubClientID") as? String ?? ""
+let clock = SystemClock()
+
+func makeSession() -> BridgeSession? {
+  guard let key = try? InstallKeyStore(store: LoginKeychain()).loadOrCreate() else { return nil }
+  let cfg = ConnectConfig(clientId: hubClientId)
+  return BridgeSession(config: cfg, hub: HTTPHubTransport(base: URL(string: "https://hub.appmatic.io")!),
+                       auth: HTTPHubTransport(base: URL(string: cfg.issuer)!), state: state,
+                       owner: OwnerFiles(paths: paths, keychain: LoginKeychain()), coordinator: coordinator, agents: agents,
+                       clock: clock, key: key)
+}
 
 func prepareState() {
   try? state.ensure()
@@ -29,10 +44,26 @@ if CommandLine.arguments.contains("--core") {
   let manifest = outcome == .updateDidNotStart ? UpdateCheck.fetch() : nil
   try? CoreStatus.from(outcome, version: bundleVersion, manifest: manifest, at: Date().timeIntervalSince1970)
     .write(to: paths.coreStatusPath)
+  // Core loop: delete queue, token refresh 60 s before expiry, plan re-check (300 s), checkout poll (10 s).
+  if let session = makeSession() {
+    let tokenEndpoint = session.discover()?.token
+    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "core"))
+    timer.schedule(deadline: .now(), repeating: CheckoutPoller.interval)
+    timer.setEventHandler { session.coreTick(port: serverPort(), tokenEndpoint: tokenEndpoint) }
+    timer.resume()
+    withExtendedLifetime(timer) { dispatchMain() }
+  }
   dispatchMain()
 }
 
-final class MenuController: NSObject, NSMenuDelegate {
+final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresentationContextProviding {
+  let session = makeSession()
+  var authSession: ASWebAuthenticationSession?
+  var qrWindow: NSWindow?
+  var accountText: String?
+
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor { NSApp.windows.first ?? NSWindow() }
+
   let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
   let menu = NSMenu()
   var statusText = "Starting"
@@ -96,6 +127,26 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
     add("Version \(bundleVersion)", nil, enabled: false)
     menu.addItem(.separator())
+    if let s = session, s.config.signInVisible {
+      if let sub = s.ownerSub {
+        add("Account: \(sub)\(s.plan.map { " (\($0))" } ?? "")", nil, enabled: false)
+        add("Devices…", #selector(showDevices))
+        if s.plan != "pro" { add("Upgrade", #selector(upgrade)) }
+        add("Sign Out", #selector(signOut))
+      } else {
+        add(accountText ?? "Sign In…", #selector(signIn))
+      }
+      if let t = s.tunnelState {
+        switch t {
+        case .fairUse: add(TunnelState.fairUseText, nil, enabled: false)
+        case .unreachable: add(TunnelState.unreachableText, nil, enabled: false)
+        case .limit: add("Free plan: 1 machine", nil, enabled: false)
+        default: break
+        }
+      }
+      if s.queue.hasPending { add(TunnelDeleteQueue.pendingText, nil, enabled: false) }
+    }
+    add("Pair a Phone…", #selector(showQR))
     let phone = NSMenuItem(title: "Phone access", action: #selector(togglePhone), keyEquivalent: "")
     phone.target = self
     phone.state = state.phoneAccessOn ? .on : .off
@@ -109,8 +160,101 @@ final class MenuController: NSObject, NSMenuDelegate {
   }
 
   @objc func togglePhone() {
-    try? state.setPhoneAccess(!state.phoneAccessOn)
-    poll()
+    let on = !state.phoneAccessOn
+    let port = serverPort()
+    DispatchQueue.global().async { [weak self] in
+      if let s = self?.session { s.setPhoneAccess(on, port: port) } else { try? state.setPhoneAccess(on) }
+      DispatchQueue.main.async { self?.poll() }
+    }
+  }
+
+  @objc func signIn() {
+    guard let s = session else { return }
+    DispatchQueue.global().async { [weak self] in
+      let pending = s.beginSignIn()
+      DispatchQueue.main.async {
+        guard let self else { return }
+        guard let pending else { self.accountText = SignInState.unavailableText; return }
+        let a = ASWebAuthenticationSession(url: pending.url, callbackURLScheme: "hyprmux-bridge") { url, _ in
+          DispatchQueue.global().async {
+            if case .signedOut(let m) = s.completeSignIn(pending, callback: url) {
+              DispatchQueue.main.async { self.accountText = m }
+            } else { _ = s.readEntitlement() }
+          }
+        }
+        a.presentationContextProvider = self
+        a.prefersEphemeralWebBrowserSession = false
+        self.authSession = a
+        if !a.start() { self.accountText = SignInState.unavailableText }
+      }
+    }
+  }
+
+  @objc func signOut() { DispatchQueue.global().async { [weak self] in try? self?.session?.signOut() } }
+
+  @objc func upgrade() {
+    DispatchQueue.global().async { [weak self] in
+      if let url = self?.session?.upgrade() { DispatchQueue.main.async { NSWorkspace.shared.open(url) } }
+    }
+  }
+
+  func loopback() -> LoopbackServer? {
+    let env = state.readEnv()
+    guard let port = Int(env["PORT"] ?? ""), let token = env["SERVER_TOKEN"] else { return nil }
+    return LoopbackServer(port: port, token: token)
+  }
+
+  @objc func showDevices() {
+    guard let s = session else { return }
+    DispatchQueue.global().async { [weak self] in
+      let rows = s.devices()
+      DispatchQueue.main.async {
+        let alert = NSAlert()
+        alert.messageText = "Devices on your plan"
+        alert.informativeText = rows.isEmpty ? "No devices." : rows.map(\.deviceId).joined(separator: "\n")
+        alert.addButton(withTitle: "Close")
+        if let first = rows.first { alert.addButton(withTitle: "Remove \(first.deviceId) from plan") }
+        if alert.runModal() == .alertSecondButtonReturn, let first = rows.first, let srv = self?.loopback() {
+          DispatchQueue.global().async { _ = s.removeFromPlan(hubDeviceId: first.deviceId, localId: first.deviceId, server: srv) }
+        }
+      }
+    }
+  }
+
+  @objc func showQR() {
+    DispatchQueue.global().async { [weak self] in
+      let link = self?.loopback()?.pairingLink()
+      DispatchQueue.main.async { self?.presentQR(link) }
+    }
+  }
+
+  func presentQR(_ link: String?) {
+    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 340), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    w.title = "Pair a Phone"
+    w.isReleasedWhenClosed = false
+    let view = NSImageView(frame: NSRect(x: 20, y: 40, width: 280, height: 280))
+    if let link, let f = CIFilter(name: "CIQRCodeGenerator") {
+      f.setValue(Data(link.utf8), forKey: "inputMessage")
+      if let img = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)) {
+        let rep = NSCIImageRep(ciImage: img)
+        let ns = NSImage(size: rep.size)
+        ns.addRepresentation(rep)
+        view.image = ns
+      }
+    }
+    let label = NSTextField(labelWithString: link == nil ? "Turn on Phone access first." : "Scan with the HyprMux app")
+    label.frame = NSRect(x: 20, y: 10, width: 280, height: 20)
+    w.contentView?.addSubview(view)
+    w.contentView?.addSubview(label)
+    w.center()
+    NSApp.activate(ignoringOtherApps: true)
+    w.makeKeyAndOrderFront(nil)
+    qrWindow = w
+  }
+
+  @objc func handleURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+    guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, let url = URL(string: s) else { return }
+    DispatchQueue.global().async { [weak self] in self?.session?.handleURL(url) }
   }
 
   @objc func checkUpdate() {
@@ -131,4 +275,6 @@ final class MenuController: NSObject, NSMenuDelegate {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let controller = MenuController()
+NSAppleEventManager.shared().setEventHandler(controller, andSelector: #selector(MenuController.handleURLEvent(_:withReplyEvent:)),
+                                             forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
 app.run()

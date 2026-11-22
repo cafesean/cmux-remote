@@ -11,6 +11,7 @@
   <key>CFBundleVersion</key><string>__VERSION__</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
+  <key>HyprMuxHubClientID</key><string>__HUB_CLIENT_ID__</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleURLTypes</key>
   <array>

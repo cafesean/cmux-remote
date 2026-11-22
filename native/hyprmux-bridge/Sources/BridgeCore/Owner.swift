@@ -85,14 +85,6 @@ public struct PendingTunnelDelete: Codable, Equatable, Sendable {
   public var at: TimeInterval
   public var nextAttempt: TimeInterval
   public var inFlight: Bool
-  public var timedOut: Bool
-  public var notified: Bool
-}
-
-/// This Mac's own live tunnel, read with the install key (pre-S3b fail-soft). nil = no read available.
-public protocol OwnTunnelReader: AnyObject {
-  /// .some(hostname) / .some(nil) = no live tunnel; nil = the read is not available.
-  func liveHostname() -> String??
 }
 
 public final class TunnelDeleteQueue {
@@ -105,15 +97,13 @@ public final class TunnelDeleteQueue {
   let transport: HubTransport
   let clock: BridgeClock
   let key: Curve25519.Signing.PrivateKey
-  let reader: OwnTunnelReader?
   public private(set) var notices: [String] = []
 
-  public init(path: String, transport: HubTransport, clock: BridgeClock, key: Curve25519.Signing.PrivateKey, reader: OwnTunnelReader?) {
+  public init(path: String, transport: HubTransport, clock: BridgeClock, key: Curve25519.Signing.PrivateKey) {
     self.path = path
     self.transport = transport
     self.clock = clock
     self.key = key
-    self.reader = reader
   }
 
   public func load() -> [PendingTunnelDelete] {
@@ -130,11 +120,9 @@ public final class TunnelDeleteQueue {
     try save(q)
   }
 
-  /// A newer epoch's ensure waits while any entry still blocks (in flight, unresolved, or 24 h without a tunnelId).
-  public func allowsEnsure() -> Bool {
-    let now = clock.now()
-    return load().allSatisfy { $0.tunnelId != nil && !$0.inFlight && now - $0.at >= Self.giveUpSeconds }
-  }
+  /// Entries still waiting (menu shows pendingText while any is left). They never block a newer ensure:
+  /// every DELETE carries ?id=, so a late one cannot remove a newer row (409 TUNNEL_CHANGED).
+  public var hasPending: Bool { !load().isEmpty }
 
   /// Restart: a send that never finished (core killed) is replayed.
   public func recoverAfterRestart() throws {
@@ -143,38 +131,32 @@ public final class TunnelDeleteQueue {
     try save(q)
   }
 
-  /// Send every due entry once. Entry marked in flight on disk before the DELETE goes out.
+  /// Send every due entry once (marked in flight on disk before the DELETE goes out). A timeout or error is
+  /// retried with the same ?id every 300 s; 2xx / 404 / 409 TUNNEL_CHANGED resolve; after 24 h the entry is dropped
+  /// with the give-up notice.
   public func process() throws {
     var q = load()
     var i = 0
     while i < q.count {
       let now = clock.now()
-      if now - q[i].at >= Self.giveUpSeconds && !q[i].notified {
-        q[i].notified = true
+      if now - q[i].at >= Self.giveUpSeconds {
         notices.append(Self.giveUpText)
+        q.remove(at: i)
+        try save(q)
+        continue
       }
       guard q[i].nextAttempt <= now else { i += 1; continue }
-      if q[i].tunnelId == nil && q[i].timedOut {
-        // Pre-S3b: never re-send blind. Read this Mac's live tunnel first.
-        guard let r = reader, let live = r.liveHostname() else { q[i].nextAttempt = now + Self.retrySeconds; i += 1; continue }
-        if live != q[i].hostname { q.remove(at: i); try save(q); continue }
-      }
       q[i].inFlight = true
       try save(q)
       let reply = sendDelete(q[i])
       q[i].inFlight = false
-      switch reply {
-      case .response(let status, let body)
-        where (200..<300).contains(status) || status == 404 || (status == 409 && HubEnvelope.errorCode(status, body) == "TUNNEL_CHANGED"):
+      if case .response(let status, let body) = reply,
+         (200..<300).contains(status) || status == 404 || (status == 409 && HubEnvelope.errorCode(status, body) == "TUNNEL_CHANGED") {
         q.remove(at: i)
         try save(q)
         continue
-      case .timeout:
-        q[i].timedOut = true
-        q[i].nextAttempt = now + Self.retrySeconds
-      default:
-        q[i].nextAttempt = now + Self.retrySeconds
       }
+      q[i].nextAttempt = now + Self.retrySeconds
       try save(q)
       i += 1
     }
@@ -221,7 +203,7 @@ public final class OwnerChange {
     if let sub = old.ownerSub, let last = state.readLastTunnel() {
       let now = clock.now()
       try queue.append(PendingTunnelDelete(ownerSub: sub, epoch: old.ownerEpoch, tunnelId: last.id, hostname: last.hostname,
-                                           at: now, nextAttempt: now, inFlight: false, timedOut: false, notified: false))
+                                           at: now, nextAttempt: now, inFlight: false))
     }
     owner.deleteCredentials()
     try queue.process()

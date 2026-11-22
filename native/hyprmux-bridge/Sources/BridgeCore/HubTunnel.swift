@@ -168,8 +168,7 @@ public final class PhoneAccess {
   }
 
   @discardableResult
-  public func turnOn(client: HubTunnelClient, port: Int, bearer: String, queue: TunnelDeleteQueue) throws -> TunnelState {
-    guard queue.allowsEnsure() else { return .failed("pending_delete") }
+  public func turnOn(client: HubTunnelClient, port: Int, bearer: String) throws -> TunnelState {
     try state.setPhoneAccess(true)
     let (s, t) = client.ensure(port: port, bearer: bearer)
     guard let t else { return s }

@@ -25,12 +25,6 @@ final class StubHub: HubTransport {
   }
 }
 
-final class Reader: OwnTunnelReader {
-  var value: String??
-  init(_ v: String??) { value = v }
-  func liveHostname() -> String?? { value }
-}
-
 final class FakeServer: LocalServer {
   var revoked: [String] = []
   func revokeDevice(localId: String) -> Bool { revoked.append(localId); return true }
@@ -65,8 +59,8 @@ final class HubTests: XCTestCase {
   override func tearDownWithError() throws { try? FileManager.default.removeItem(atPath: home) }
 
   func client() -> HubTunnelClient { HubTunnelClient(transport: hub, clock: clock, key: key) }
-  func queue(_ reader: OwnTunnelReader? = nil) -> TunnelDeleteQueue {
-    TunnelDeleteQueue(path: paths.pendingTunnelDeletePath, transport: hub, clock: clock, key: key, reader: reader)
+  func queue() -> TunnelDeleteQueue {
+    TunnelDeleteQueue(path: paths.pendingTunnelDeletePath, transport: hub, clock: clock, key: key)
   }
   func mode(_ p: String) throws -> Int { ((try FileManager.default.attributesOfItem(atPath: p)[.posixPermissions]) as! NSNumber).intValue }
   let good: [String: Any] = ["id": "t1", "hostname": "abc123.hyprmux.com", "tunnelToken": "tok-1"]
@@ -74,7 +68,7 @@ final class HubTests: XCTestCase {
   // AC0
   func testEnsureWritesTokenAndSigns() throws {
     hub.replies = [StubHub.ok(good)]
-    let s = try PhoneAccess(state: state, coordinator: coord).turnOn(client: client(), port: 4123, bearer: "AT", queue: queue())
+    let s = try PhoneAccess(state: state, coordinator: coord).turnOn(client: client(), port: 4123, bearer: "AT")
     XCTAssertEqual(s, .ready(id: "t1", hostname: "abc123.hyprmux.com"))
     XCTAssertEqual(try String(contentsOfFile: paths.tunnelTokenPath, encoding: .utf8), "tok-1")
     XCTAssertEqual(try mode(paths.tunnelTokenPath), 0o600)
@@ -179,7 +173,7 @@ final class HubTests: XCTestCase {
     hub.replies = [StubHub.ok(good)]
     let o = try signedIn("A", epoch: 1)
     let q = queue()
-    try PhoneAccess(state: state, coordinator: coord).turnOn(client: client(), port: 1, bearer: "AT-A", queue: q)
+    try PhoneAccess(state: state, coordinator: coord).turnOn(client: client(), port: 1, bearer: "AT-A")
     FileManager.default.createFile(atPath: paths.planCachePath, contents: Data("{}".utf8))
     FileManager.default.createFile(atPath: paths.installPolicyPath, contents: Data("{}".utf8))
     hub.sent = []
@@ -203,7 +197,7 @@ final class HubTests: XCTestCase {
     XCTAssertTrue(q.load().isEmpty)
   }
 
-  // AC14
+  // AC14 (hub S3b): queued per old owner, persisted before send, every DELETE carries ?id=, newer ensure not blocked
   func testQueueHubDown() throws {
     let q = queue()
     try state.writeLastTunnel(LastTunnel(id: "tA", hostname: "aaa.hyprmux.com"))
@@ -213,42 +207,47 @@ final class HubTests: XCTestCase {
     o = try signedIn("B", epoch: 2)
     try OwnerChange(state: state, coordinator: coord, agents: agents, owner: o, queue: q, clock: clock).run(newOwner: "C")
     XCTAssertEqual(q.load().map(\.ownerSub), ["A", "B"])
-    XCTAssertFalse(q.allowsEnsure())
+    XCTAssertTrue(q.hasPending)
+    // C's ensure is not blocked by the queue
     hub.sent = []
-    XCTAssertEqual(try PhoneAccess(state: state, coordinator: coord).turnOn(client: client(), port: 1, bearer: "AT-C", queue: q), .failed("pending_delete"))
-    XCTAssertTrue(hub.sent.isEmpty)
+    hub.replies = [StubHub.ok(["id": "tC", "hostname": "ccc.hyprmux.com", "tunnelToken": "tok-C"])]
+    XCTAssertEqual(try PhoneAccess(state: state, coordinator: coord).turnOn(client: client(), port: 1, bearer: "AT-C"),
+                   .ready(id: "tC", hostname: "ccc.hyprmux.com"))
     // killed mid-send: entry persisted in flight -> replayed on restart
     var e = q.load(); e[0].inFlight = true
     try BridgeState.writePrivate(paths.pendingTunnelDeletePath, String(decoding: try JSONEncoder().encode(e), as: UTF8.self))
     try q.recoverAfterRestart()
     clock.t += 300
+    hub.sent = []
     hub.replies = [.response(status: 404, body: Data()), StubHub.err(409, "TUNNEL_CHANGED")]
     try q.process()
     XCTAssertEqual(hub.sent.map(\.query), ["id=tA", "id=tB"])
-    XCTAssertTrue(q.load().isEmpty)
-    XCTAssertTrue(q.allowsEnsure())
+    XCTAssertTrue(hub.sent.allSatisfy { $0.headers["authorization"] == nil && $0.headers["x-hmx-sig"] != nil })
+    XCTAssertFalse(q.hasPending)
   }
 
-  func testQueue24h() throws {
+  // timed-out delete is retried with the same ?id every 300 s; 24 h -> give-up notice, entry dropped
+  func testTimedOutDeleteRetriedSameId() throws {
     let q = queue()
     try q.append(PendingTunnelDelete(ownerSub: "A", epoch: 1, tunnelId: "tA", hostname: "aaa.hyprmux.com", at: clock.t,
-                                     nextAttempt: clock.t, inFlight: false, timedOut: false, notified: false))
-    try q.append(PendingTunnelDelete(ownerSub: "B", epoch: 2, tunnelId: nil, hostname: "bbb.hyprmux.com", at: clock.t,
-                                     nextAttempt: clock.t, inFlight: false, timedOut: false, notified: false))
+                                     nextAttempt: clock.t, inFlight: false))
+    try q.process() // times out
+    try q.process() // not due yet
+    XCTAssertEqual(hub.sent.count, 1)
+    clock.t += 300
+    try q.process()
+    XCTAssertEqual(hub.sent.map(\.query), ["id=tA", "id=tA"])
     clock.t += 24 * 3600
-    try q.process() // both time out (stub silent)
-    XCTAssertEqual(q.notices, [TunnelDeleteQueue.giveUpText, TunnelDeleteQueue.giveUpText])
-    XCTAssertFalse(q.allowsEnsure()) // B has no tunnelId -> still blocks
-    var e = q.load(); e.removeAll { $0.ownerSub == "B" }
-    try BridgeState.writePrivate(paths.pendingTunnelDeletePath, String(decoding: try JSONEncoder().encode(e), as: UTF8.self))
-    XCTAssertTrue(q.allowsEnsure()) // A has a tunnelId: 24 h -> ensure may run
+    try q.process()
+    XCTAssertEqual(q.notices, [TunnelDeleteQueue.giveUpText])
+    XCTAssertFalse(q.hasPending)
   }
 
   // AC18: late #1 completes with TUNNEL_CHANGED after B1 is live
   func testLateDeleteCounterexample() throws {
     let q = queue()
     try q.append(PendingTunnelDelete(ownerSub: "A", epoch: 1, tunnelId: "A1", hostname: "aaa.hyprmux.com", at: clock.t,
-                                     nextAttempt: clock.t, inFlight: false, timedOut: false, notified: false))
+                                     nextAttempt: clock.t, inFlight: false))
     try q.process() // #1 times out
     XCTAssertEqual(q.load().count, 1)
     clock.t += 300
@@ -256,33 +255,13 @@ final class HubTests: XCTestCase {
     try q.process() // #2
     XCTAssertTrue(q.load().isEmpty)
     hub.replies = [StubHub.ok(["id": "B1", "hostname": "bbb.hyprmux.com", "tunnelToken": "tok-B"])]
-    XCTAssertEqual(try PhoneAccess(state: state, coordinator: coord).turnOn(client: client(), port: 1, bearer: "AT-B", queue: q),
+    XCTAssertEqual(try PhoneAccess(state: state, coordinator: coord).turnOn(client: client(), port: 1, bearer: "AT-B"),
                    .ready(id: "B1", hostname: "bbb.hyprmux.com"))
     // the held #1 now answers 409 TUNNEL_CHANGED: hub keeps B1 (conditional delete), nothing local changes
     XCTAssertEqual(HubEnvelope.errorCode(409, { if case .response(_, let b) = StubHub.err(409, "TUNNEL_CHANGED") { return b }; return Data() }()), "TUNNEL_CHANGED")
     XCTAssertTrue(q.load().isEmpty)
     XCTAssertEqual(state.readLastTunnel(), LastTunnel(id: "B1", hostname: "bbb.hyprmux.com"))
     XCTAssertTrue(agents.registered.contains(.tunnel))
-  }
-
-  // AC19: pre-S3b (no id) never re-sends blind
-  func testPreS3bFailSoft() throws {
-    for (live, expectSend, expectResolved) in [("aaa.hyprmux.com" as String??, true, true), (.some("zzz.hyprmux.com"), false, true),
-                                               (.some(nil), false, true), (nil, false, false)] {
-      try? FileManager.default.removeItem(atPath: paths.pendingTunnelDeletePath)
-      let q = queue(live == nil ? nil : Reader(live))
-      try q.append(PendingTunnelDelete(ownerSub: "A", epoch: 1, tunnelId: nil, hostname: "aaa.hyprmux.com", at: clock.t,
-                                       nextAttempt: clock.t, inFlight: false, timedOut: false, notified: false))
-      try q.process() // timed out
-      hub.sent = []
-      clock.t += 300
-      hub.replies = [.response(status: 204, body: Data())]
-      try q.process()
-      XCTAssertEqual(!hub.sent.isEmpty, expectSend, "\(String(describing: live))")
-      XCTAssertEqual(q.load().isEmpty, expectResolved, "\(String(describing: live))")
-      if !expectResolved { XCTAssertFalse(q.allowsEnsure()) }
-      hub.replies = []
-    }
   }
 
   // AC6 + AC10 + AC16
