@@ -47,7 +47,7 @@ public struct BridgeState: Sendable {
     try Self.mkdirPrivate(paths.runDir)
     if fm.fileExists(atPath: paths.envPath) {
       guard chmod(paths.envPath, 0o600) == 0 else { throw BridgeError.io("chmod .env") }
-      try appendPlanKeys()
+      try appendMissingKeys()
       return
     }
     let bridgeSecret = try Self.randomHex(24)
@@ -62,20 +62,35 @@ public struct BridgeState: Sendable {
       "CMUX_MACHINE_URL=unix:\(sock)",
       "CMUX_MACHINE_SECRET=\(bridgeSecret)",
       "CMUX_MACHINE_LABEL=\(shortHostName())",
-      "DEVICES_FILE=\(paths.devicesPath)",
-    ] + planKeyLines()
+      Self.envLine("DEVICES_FILE", paths.devicesPath),
+    ] + defaultKeyLines()
     try Self.writePrivate(paths.envPath, lines.joined(separator: "\n") + "\n")
   }
 
   /// p42: plan enforcement in server.js is on only when it knows the Bridge state dir and the hub.
   public static let hubBase = "https://hub.appmatic.io"
-  func planKeyLines() -> [String] { ["HMX_PLAN_STATE_DIR=\(paths.stateDir)", "HMX_HUB_URL=\(Self.hubBase)"] }
+  func planKeyLines() -> [String] { [Self.envLine("HMX_PLAN_STATE_DIR", paths.stateDir), "HMX_HUB_URL=\(Self.hubBase)"] }
 
-  /// An existing env file keeps every line as written; only missing plan keys are appended, never rewritten.
-  func appendPlanKeys() throws {
+  /// 0.2.7: Remote Desktop on. lib/mac-screen.js serves the Mac screen only with these set; the Free plan's
+  /// view-only limit is enforced by server.js plan policy (402 PLAN_LIMIT remoteDesktop on input), not here.
+  public static let screenKeyLines = ["SCREEN_VIEW=1", "SCREEN_CONTROL=1"]
+
+  /// Keys every Bridge .env must carry; appended to an existing file only when the key is missing.
+  func defaultKeyLines() -> [String] { planKeyLines() + Self.screenKeyLines }
+
+  /// KEY=value, double-quoted when the value has a space ("Application Support"), so a shell `source` of the
+  /// file works too. loadenv.js and readEnv() strip the quotes.
+  static func envLine(_ key: String, _ value: String) -> String {
+    value.contains(" ") ? "\(key)=\"\(value)\"" : "\(key)=\(value)"
+  }
+
+  /// An existing env file keeps every line as written; only missing default keys are appended, never rewritten
+  /// (a user's SCREEN_CONTROL=0 stays). Runs before the upgrade restart (menu launch and core launch both call
+  /// ensure() first), so restarted agents read the appended keys.
+  func appendMissingKeys() throws {
     let text = (try? String(contentsOfFile: paths.envPath, encoding: .utf8)) ?? ""
     let have = Set(text.split(separator: "\n").compactMap { $0.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } })
-    let add = planKeyLines().filter { !have.contains(String($0.split(separator: "=", maxSplits: 1)[0])) }
+    let add = defaultKeyLines().filter { !have.contains(String($0.split(separator: "=", maxSplits: 1)[0])) }
     if add.isEmpty { return }
     let sep = text.isEmpty || text.hasSuffix("\n") ? "" : "\n"
     try Self.writePrivate(paths.envPath, text + sep + add.joined(separator: "\n") + "\n")
@@ -150,7 +165,9 @@ public struct BridgeState: Sendable {
       let line = raw.trimmingCharacters(in: .whitespaces)
       if line.isEmpty || line.hasPrefix("#") { continue }
       guard let eq = line.firstIndex(of: "=") else { continue }
-      out[String(line[..<eq])] = String(line[line.index(after: eq)...])
+      var v = String(line[line.index(after: eq)...])
+      if v.count >= 2, let q = v.first, q == "\"" || q == "'", v.last == q { v = String(v.dropFirst().dropLast()) }
+      out[String(line[..<eq])] = v
     }
     return out
   }
