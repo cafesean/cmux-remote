@@ -1,7 +1,7 @@
 'use strict';
 // p41 pane <-> transcript join: which transcript file a pane is showing. Two exports:
 //
-//   transcriptFor(surfaceId, deps) -> Promise<{kind:'claude'|'codex', path, sessionId}|null>
+//   transcriptFor(surfaceId, deps) -> Promise<{kind:'claude'|'codex', path, sessionId, via}|null>
 //   watchJoin(surfaceId, onChange, deps) -> stop()
 //
 // Primary signal is the radar hook-event log: the newest event for the surface that carries a
@@ -13,6 +13,10 @@
 //   Codex   ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl, newest first; line 1 is a `session_meta`
 //           record whose payload carries {id, cwd}. Only that first line is read, per candidate.
 // When both agents have a candidate the newer file wins.
+//
+// D299: every join says how it was found (via: 'process' | 'event' | 'cwd'). The cwd fallback is a guess:
+// with two claude panes in one cwd the newest file is whichever pane is busiest, so a caller that knows
+// which sessions other panes really hold passes deps.excludeSessionIds (a Set) and the fallback skips them.
 //
 // The event log, the clock, the file system and the pane cwd/start time are injected (deps), so tests
 // never touch a real disk. cwdFor/startedAt are the bridge's to supply on cmux (its workspace cwd);
@@ -123,6 +127,8 @@ const defaultStartedAt = async (id) => {
 async function list(fs, dir) { try { return await fs.readdir(dir); } catch (_) { return []; } }
 async function mtimeOf(fs, p) { try { return (await fs.stat(p)).mtimeMs; } catch (_) { return 0; } }
 
+const excluded = (deps, sessionId) => !!(deps.excludeSessionIds && deps.excludeSessionIds.has(sessionId));
+
 async function claudeByCwd(cwd, since, deps) {
   const fs = deps.fs || defaultFs;
   const home = deps.home || os.homedir();
@@ -133,10 +139,12 @@ async function claudeByCwd(cwd, since, deps) {
   for (const dir of dirs) {
     for (const name of await list(fs, dir)) {
       if (!name.endsWith('.jsonl') || name.startsWith('agent-')) continue;   // agent-*: sub-agent side threads
+      const sessionId = name.slice(0, -'.jsonl'.length);
+      if (excluded(deps, sessionId)) continue;   // D299: another pane holds it
       const p = path.join(dir, name);
       const mtime = await mtimeOf(fs, p);
       if (mtime < since || (best && mtime <= best.mtime)) continue;
-      best = { kind: 'claude', path: p, sessionId: name.slice(0, -'.jsonl'.length), mtime };
+      best = { kind: 'claude', path: p, sessionId, mtime };
     }
   }
   return best;
@@ -161,7 +169,7 @@ async function codexByCwd(cwd, since, deps) {
           let meta = null;
           try { meta = JSON.parse(await fs.firstLine(p)); } catch (_) { continue; }
           const pl = meta && meta.payload;
-          if (pl && pl.cwd === cwd && pl.id) return { kind: 'codex', path: p, sessionId: String(pl.id), mtime };
+          if (pl && pl.cwd === cwd && pl.id && !excluded(deps, String(pl.id))) return { kind: 'codex', path: p, sessionId: String(pl.id), mtime };
         }
       }
     }
@@ -189,14 +197,14 @@ async function transcriptFor(surface, deps) {
     let a = null;
     try { a = await d.agentFor(s); } catch (_) { a = null; }
     const real = a && a.transcriptPath && await allowedRealPath(a.transcriptPath, d);
-    if (real) cands.push({ kind: 'claude', path: real, sessionId: a.sessionId });
+    if (real) cands.push({ kind: 'claude', path: real, sessionId: a.sessionId, via: 'process' });
   }
   // The lexical screen runs inside the event lookup, so a bad newest event falls back to the next
   // good one; the realpath check then decides on the winner, and a failure falls to the cwd path.
   const ev = await latestSurfaceEvent(s, d, (e) => lexicallyAllowed(e.transcriptPath, home));
   if (ev) {
     const real = await allowedRealPath(ev.transcriptPath, d);
-    if (real) cands.push({ kind: isCodexPath(real) ? 'codex' : 'claude', path: real, sessionId: ev.sessionId });
+    if (real) cands.push({ kind: isCodexPath(real) ? 'codex' : 'claude', path: real, sessionId: ev.sessionId, via: 'event' });
   }
   if (cands.length) {
     let best = null;
@@ -214,7 +222,7 @@ async function transcriptFor(surface, deps) {
   const [c, x] = await Promise.all([claudeByCwd(cwd, since, d), codexByCwd(cwd, since, d)]);
   const best = c && x ? (x.mtime > c.mtime ? x : c) : (c || x);
   const real = best && await allowedRealPath(best.path, d);   // a symlinked file in a root can point out
-  return real ? { kind: best.kind, path: real, sessionId: best.sessionId } : null;
+  return real ? { kind: best.kind, path: real, sessionId: best.sessionId, via: 'cwd' } : null;
 }
 
 // Re-resolve the join every WATCH_POLL_MS and call onChange(join) when the transcript path differs

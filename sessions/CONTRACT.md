@@ -29,6 +29,7 @@ One terminal, agent or browser surface on one machine.
   sessionId is one row: a tmux session also shown by a cmux surface is listed once, as the cmux surface.
 - `aliases`: optional string[]. Ids of rows this one replaced (same transcript session, e.g. a tmux-only row
   and the cmux surface attached to it). The app moves pins and unread state from an alias id to this id.
+  Two live cmux surfaces are never folded into one row, even when they resolve to the same session (D299).
 - `status`: one of `needs-you` (waiting on a person), `working`, `finished`, `idle`, `your-turn` (the
   agent replied and the next move is yours).
 - `preview`: string. One short line of the latest activity.

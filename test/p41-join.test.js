@@ -42,7 +42,7 @@ test('newest hook event for the surface wins', async () => {
     ev({ ts: NOW - 5_000, sessionId: 'other', surfaceId: 'OTHER', transcriptPath: '/x/other.jsonl' }),
   ]), fs: fakeFs({}) });
   assert.deepStrictEqual(await transcriptFor(SURFACE, deps),
-    { kind: 'claude', path: `${HOME}/.claude/projects/-w/new.jsonl`, sessionId: 'new' });
+    { kind: 'claude', path: `${HOME}/.claude/projects/-w/new.jsonl`, sessionId: 'new', via: 'event' });
 });
 
 test('after /clear the new sessionId replaces the old path', async () => {
@@ -63,7 +63,7 @@ test('no events -> cwd + start-time fallback', async () => {
     startedAt: async () => NOW - 3_600_000,
     fs: fakeFs({ [`${dir}/live.jsonl`]: { mtime: NOW - 1_000 } }),
   });
-  assert.deepStrictEqual(await transcriptFor(SURFACE, deps), { kind: 'claude', path: `${dir}/live.jsonl`, sessionId: 'live' });
+  assert.deepStrictEqual(await transcriptFor(SURFACE, deps), { kind: 'claude', path: `${dir}/live.jsonl`, sessionId: 'live', via: 'cwd' });
 });
 
 test('claude slug turns / and . into -', async () => {
@@ -100,7 +100,7 @@ test('codex fallback matches cwd from first line', async () => {
   };
   const deps = base({ readEvents: events([]), cwdFor: async () => '/w', startedAt: async () => NOW - 3_600_000, fs: fakeFs(files) });
   assert.deepStrictEqual(await transcriptFor(SURFACE, deps),
-    { kind: 'codex', path: `${root}/rollout-2026-11-04T10-00-00-bbb.jsonl`, sessionId: 'bbb' });
+    { kind: 'codex', path: `${root}/rollout-2026-11-04T10-00-00-bbb.jsonl`, sessionId: 'bbb', via: 'cwd' });
 });
 
 test('unknown surface and no cwd -> null', async () => {
@@ -141,7 +141,7 @@ const withPath = (transcriptPath, fs) => base({ readEvents: events([ev({ transcr
 test('allowed path accepted', async () => {
   for (const [p, kind] of [[`${HOME}/.claude/projects/-w/s1.jsonl`, 'claude'], [`${HOME}/.codex/sessions/2026/11/04/rollout-x-s1.jsonl`, 'codex']]) {
     const j = await transcriptFor(SURFACE, withPath(p));
-    assert.deepStrictEqual(j, { kind, path: p, sessionId: 's1' });
+    assert.deepStrictEqual(j, { kind, path: p, sessionId: 's1', via: 'event' });
     assert.strictEqual(await isAllowedTranscriptPath(p, base({ fs: fakeFs({}) })), true);
   }
 });

@@ -290,7 +290,9 @@ function createSessionRoutes(deps) {
     // (another command in front, or SessionEnd) still turns it into a terminal at once.
     const memo = kindMemo.get(tab.id);
     if (s.kind === 'terminal' && fg == null && !join && memo && kindNow() - memo.at < LIMITS.kindStickyMs) {
-      s.kind = memo.kind; join = memo.join;
+      // D299: a remembered join another pane holds is not this pane's: keep the kind, drop the join.
+      s.kind = memo.kind;
+      join = memo.join && d.excludeSessionIds && d.excludeSessionIds.has(memo.join.sessionId) ? null : memo.join;
     } else if (s.kind !== 'terminal') kindMemo.set(tab.id, { kind: s.kind, join, at: kindNow() });
     else kindMemo.delete(tab.id);
     // A Codex transcript is never parsed with the Claude reader (no Codex normaliser yet): kind only.
@@ -429,30 +431,60 @@ function createSessionRoutes(deps) {
     const tabs = all.filter((e) => !isPriv(e.tab.id));
     let by = null;
     try { by = await unreadBySurface(); } catch (_) { by = null; }
+    const memoBefore = new Map(kindMemo);   // D299: what each pane remembered before this build
+    const unreadOf = (e) => (by ? by.has(String(e.tab.id).toUpperCase()) : null);
     const results = [];
     for (let i = 0; i < tabs.length; i += LIMITS.listConcurrency) {
-      const part = await Promise.all(tabs.slice(i, i + LIMITS.listConcurrency).map((e) =>
-        describe(e, d, by ? by.has(String(e.tab.id).toUpperCase()) : null)));
+      const part = await Promise.all(tabs.slice(i, i + LIMITS.listConcurrency).map((e) => describe(e, d, unreadOf(e))));
       results.push(...part);
     }
+    // D299 (Bridge 0.3.4, mini: a worker row vanished for 4-40 s, folded into the CHIEF pane in the same
+    // cwd): a cwd-fallback join is the newest transcript in the cwd's project dir, which with two claude
+    // panes there can be the OTHER pane's session. A session a pane holds by its own process or hook event
+    // is that pane's; any other pane whose cwd guess landed on it is described again with every such
+    // session excluded (it then finds its own transcript, or keeps its kind without a join).
+    const claimed = new Map();   // sessionId -> the row that holds it by process/event
+    results.forEach((r, i) => { if (r.join && r.join.via !== 'cwd' && !claimed.has(r.join.sessionId)) claimed.set(r.join.sessionId, i); });
+    const redo = [];
+    results.forEach((r, i) => {
+      if (r.join && r.join.via === 'cwd' && claimed.has(r.join.sessionId) && claimed.get(r.join.sessionId) !== i) redo.push(i);
+    });
+    if (redo.length) {
+      const dx = { ...d, excludeSessionIds: new Set(claimed.keys()) };
+      for (let i = 0; i < redo.length; i += LIMITS.listConcurrency) {
+        await Promise.all(redo.slice(i, i + LIMITS.listConcurrency).map(async (ri) => {
+          const e = tabs[ri];
+          const prev = memoBefore.get(e.tab.id);   // this build's first pass remembered the stolen join
+          if (prev) kindMemo.set(e.tab.id, prev); else kindMemo.delete(e.tab.id);
+          results[ri] = await describe(e, dx, unreadOf(e));
+        }));
+      }
+    }
     // A11: one claude transcript session is one list row. A tmux session shown by a cmux surface
-    // (attach client) can also surface as a tmux-only orphan; keep the cmux surface entry (it takes
-    // input best), else the first. Keyed by the transcript sessionId, never by surface/title.
-    const keep = new Map();
+    // (attach client) can also surface as a tmux-only orphan; it folds into the cmux surface entry (it
+    // takes input best), else into the first. Keyed by the transcript sessionId, never by surface/title.
+    // D299: two live cmux panes are two rows even when they resolve to one sessionId; only rows that are
+    // not cmux surfaces fold.
+    const groups = new Map();
     const keyOf = (r) => r.session.kind === 'claude' && r.join && r.join.sessionId;
     for (const r of results) {
       const k = keyOf(r);
       if (!k) continue;
-      const cur = keep.get(k);
-      if (!cur || (cur.session.reach !== 'cmux' && r.session.reach === 'cmux')) keep.set(k, r);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(r);
     }
     // The survivor lists the ids it replaced (aliases), so the app can move pins and unread to it.
-    for (const r of results) {
-      const k = keyOf(r);
-      const w = k && keep.get(k);
-      if (w && w !== r) (w.session.aliases = w.session.aliases || []).push(r.session.id);
+    const folded = new Set();
+    for (const g of groups.values()) {
+      if (g.length < 2) continue;
+      const w = g.find((r) => r.session.reach === 'cmux') || g[0];
+      for (const r of g) {
+        if (r === w || r.session.reach === 'cmux') continue;
+        (w.session.aliases = w.session.aliases || []).push(r.session.id);
+        folded.add(r);
+      }
     }
-    const sessions = results.filter((r) => { const k = keyOf(r); return !k || keep.get(k) === r; }).map((r) => r.session);
+    const sessions = results.filter((r) => !folded.has(r)).map((r) => r.session);
     // p41 D189 (additive): Remote Desktop TCC setup status, so the app can say "needs setup on this Mac".
     let screen = null;
     if (deps.screenStatus) { try { screen = await deps.screenStatus(); } catch (_) { screen = null; } }

@@ -60,7 +60,7 @@ test('tmux-wrapped claude: cmux surface -> tmux session env -> pane -> claude, k
   const fg = await foregroundCommand({ id: SURF }, 'cmux', d);
   const j = await transcriptFor({ id: SURF }, d);
   assert.strictEqual(detectKind({ surfaceType: 'terminal', foregroundCmd: fg, transcriptPath: j && j.path }), 'claude');
-  assert.deepStrictEqual(j, { kind: 'claude', path: p, sessionId: 'sess-native-2' });
+  assert.deepStrictEqual(j, { kind: 'claude', path: p, sessionId: 'sess-native-2', via: 'process' });
 });
 
 test('cswap-wrapped claude: claude is a child of the wrapper, found by the descendant search', async () => {
@@ -122,7 +122,7 @@ test('/clear: a fresher hook-event transcript beats the live sessions file (newe
   fs.utimesSync(newP, t, t);
   d.readEvents = async () => ({ events: [{ ts: Date.now(), sessionId: 'sess-after-clear', event: 'SessionStart', surfaceId: SURF, transcriptPath: newP }] });
   d.now = () => Date.now();
-  assert.deepStrictEqual(await transcriptFor({ id: SURF }, d), { kind: 'claude', path: fs.realpathSync(newP), sessionId: 'sess-after-clear' });
+  assert.deepStrictEqual(await transcriptFor({ id: SURF }, d), { kind: 'claude', path: fs.realpathSync(newP), sessionId: 'sess-after-clear', via: 'event' });
   // and the other way: the sessions file is fresher than a stale event (tmux reattach case)
   fs.utimesSync(newP, t - 120, t - 120);
   assert.strictEqual((await transcriptFor({ id: SURF }, d)).path, oldP);
