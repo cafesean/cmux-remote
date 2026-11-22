@@ -157,3 +157,18 @@ test('helper posted meta clears possiblyHeld; helper stops after the last viewer
   assert.deepStrictEqual(ss.state().helpers, [4]);
   await until(() => ss.state().helpers.length === 0);
 });
+
+test("bridge reports the helper start: 'started' meta for this gen after attach (not inside it), and to a viewer joining a running helper", async (t) => {
+  const ss = mk('ok');
+  t.after(() => ss.stopAll());
+  const a = sink();
+  assert.ok(ss.attach(9, 4, a).ok);
+  assert.strictEqual(a.got.length, 0, 'nothing written synchronously: the route writes its head first');
+  await until(() => metas(a).some((m) => m.kind === 'started'));
+  assert.deepStrictEqual(metas(a).find((m) => m.kind === 'started'), { kind: 'started', displayId: 9, gen: 4 });
+  const b = sink();
+  assert.ok(ss.attach(9, 5, b).ok);
+  assert.strictEqual(b.got.length, 0);
+  await until(() => metas(b).some((m) => m.kind === 'started'));
+  assert.strictEqual(metas(b).find((m) => m.kind === 'started').gen, 5);
+});

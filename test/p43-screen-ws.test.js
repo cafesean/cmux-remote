@@ -27,8 +27,8 @@ function fakeWs() {
 function stubBridge(over = {}) {
   const b = { ops: [], inputs: [], opens: [], closes: 0, info: { w: 1280, h: 800, displayW: 2560, displayH: 1600, fps: 30, axTrusted: true, control: true, focusSecure: false } };
   b.api = {
-    open: (m, q, onChunk) => { b.opens.push(q); b.push = onChunk; return { close: () => { b.closes++; } }; },
-    op: async (m, op) => { b.ops.push(op); },
+    open: (m, q, onChunk) => { b.opens.push(q); b.push = onChunk; if (!over.noStart) setImmediate(() => onChunk(pkt({ type: 5, gen: q.gen }, JSON.stringify({ kind: 'started', gen: q.gen })))); return { close: () => { b.closes++; } }; },
+    op: async (m, op) => { b.ops.push(op); return over.op ? over.op(op) : undefined; },
     input: async (m, body) => { b.inputs.push(body); return over.inputStatus ? { status: over.inputStatus, body: {} } : { status: 200, body: { ok: true } }; },
     info: async () => ({ ...b.info }),
   };
@@ -311,4 +311,57 @@ test('Welcome plan code comes from the policy decision; PLAN_LIMIT details carry
     assert.deepStrictEqual(ws.texts('welcome')[0].plan, want);
     if (refuse) { ws.msg({ t: 'tap', seq: 1, fx: 0.5, fy: 0.5 }); await wait(20); assert.strictEqual(ws.texts('error')[0].details.plan, 'free'); }
   }
+});
+
+test('grants held until the bridge reports the helper started for this gen; 409 no_stream re-queues, re-sent on the next start', async () => {
+  let answer = null;
+  const { b, sw } = setup({ noStart: true, op: (op) => (op.op === 'grant' && answer ? answer(op) : undefined) });
+  const { ws, s } = await open(sw);
+  ws.msg({ t: 'ready', gen: 1 }); await tick();
+  assert.strictEqual(b.ops.filter((o) => o.op === 'grant').length, 0, 'no grant op before the helper start');
+  assert.strictEqual(s.state().outstanding, 2); assert.strictEqual(s.state().held, 2);
+  b.push(meta({ kind: 'started', gen: 0 })); await tick();                 // other gen: ignored
+  assert.strictEqual(b.ops.filter((o) => o.op === 'grant').length, 0);
+  answer = () => ({ status: 409, body: { error: 'no_stream' } });           // helper gone between start and grant
+  b.push(pkt({ type: 5, gen: 1 }, JSON.stringify({ kind: 'started', gen: 1 }))); await tick(); await tick();
+  assert.deepStrictEqual(b.ops.filter((o) => o.op === 'grant').map((o) => o.grantId), [1, 2]);
+  assert.strictEqual(s.state().held, 2, 'answered 409 no_stream: back in the held queue, not dropped');
+  assert.strictEqual(s.state().helperUp, false);
+  answer = null;
+  b.push(pkt({ type: 5, gen: 1 }, JSON.stringify({ kind: 'started', gen: 1 }))); await tick(); await tick();
+  assert.deepStrictEqual(b.ops.filter((o) => o.op === 'grant').map((o) => o.grantId), [1, 2, 1, 2], 're-sent on the next start');
+  assert.strictEqual(s.state().held, 0); assert.strictEqual(s.state().outstanding, 2);
+  b.push(video(1, 1, 1)); b.push(video(1, 2, 2));
+  assert.strictEqual(ws.sent.filter((x) => x.bin).length, 2);
+  assert.strictEqual(ws.closed, null);
+});
+
+test('a grant held past GRANT_WARN_MS logs a warning; past GRANT_FAIL_MS -> error helper_start_timeout + close 1011', async () => {
+  const logs = [];
+  const b = stubBridge({ noStart: true });
+  const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: () => ({ id: 'm1' }), accept: () => null, refuse: () => {},
+    policy: null, bridge: b.api, kbps: () => 100000, log: (m) => logs.push(m), limits: { GRANT_WARN_MS: 20, GRANT_FAIL_MS: 60 } });
+  const { ws } = await open(sw);
+  ws.msg({ t: 'ready', gen: 1 });
+  await wait(35);
+  assert.strictEqual(logs.length, 1); assert.match(logs[0], /2 grant\(s\) held/);
+  assert.strictEqual(ws.closed, null);
+  await wait(50);
+  assert.strictEqual(ws.texts('error').at(-1).code, 'helper_start_timeout');
+  assert.strictEqual(ws.closed, 1011);
+  assert.strictEqual(b.ops.filter((o) => o.op === 'grant').length, 0);
+  assert.strictEqual(sw.session('m1'), null);
+});
+
+test('helper start in time clears the held-grant timers (no warning, no close)', async () => {
+  const logs = [];
+  const b = stubBridge({ noStart: true });
+  const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: () => ({ id: 'm1' }), accept: () => null, refuse: () => {},
+    policy: null, bridge: b.api, kbps: () => 100000, log: (m) => logs.push(m), limits: { GRANT_WARN_MS: 20, GRANT_FAIL_MS: 40 } });
+  const { ws } = await open(sw);
+  ws.msg({ t: 'ready', gen: 1 }); await tick();
+  b.push(pkt({ type: 5, gen: 1 }, JSON.stringify({ kind: 'ready' }))); await tick();
+  await wait(60);
+  assert.deepStrictEqual(logs, []); assert.strictEqual(ws.closed, null);
+  assert.strictEqual(b.ops.filter((o) => o.op === 'grant').length, 2);
 });

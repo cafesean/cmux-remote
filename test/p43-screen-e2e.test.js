@@ -78,13 +78,14 @@ test('e2e: hello -> welcome/reset, ready{gen} -> helper grant ops -> binary type
     assert.equal(welcome.gen, 1); assert.equal(welcome.display, 1);
     assert.equal(welcome.w, 3024); assert.equal(welcome.h, 1964);            // 1512x982 pt at scale 2
     await waitFor(() => texts.find((m) => m.t === 'reset' && m.gen === 1), 5000, 'reset{gen:1}');
-    // The helper exists once the bridge spawned it for this display; only then can a grant reach it.
-    const start = await waitFor(() => helperOps().find((o) => o.op === 'start'), 8000, 'helper start');
-    assert.equal(start.displayId, 69733378);
-
+    // Regression: ready{gen} goes out right after reset, NOT after the bridge started the helper. The server
+    // must hold grants until the bridge reports the helper started for this gen (a grant sent earlier would
+    // be answered 409 no_stream and, before the fix, dropped silently: the stream froze).
     ws.send(JSON.stringify({ t: 'ready', gen: 1 }));
     const grants = await waitFor(() => { const g = helperOps().filter((o) => o.op === 'grant'); return g.length >= 2 && g; }, 5000, 'two grant ops');
     assert.deepEqual(grants.map((g) => g.grantId), [1, 2]);                  // window of 2
+    const start = helperOps().find((o) => o.op === 'start');
+    assert.ok(start, 'helper started'); assert.equal(start.displayId, 69733378);
     for (const g of grants) assert.equal(g.gen, 1);
 
     await waitFor(() => bins.length >= 2, 5000, 'two binary frames');

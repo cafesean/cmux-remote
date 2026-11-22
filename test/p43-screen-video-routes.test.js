@@ -95,8 +95,8 @@ test('GET video: bad displayId -> 400; stream -> framed helper packets, start op
   const s = await openStream(on, 'displayId=69733378&gen=3&epoch=1');
   assert.equal(s.status, 200);
   try {   // the stream must close even on a failure, or video keeps control and the next test sees 409
-  assert.equal(s.first[4], 5);   // type 5 meta
-  const start = helperOps().find((m) => m.op === 'start');
+  assert.equal(s.first[4], 5);   // type 5 meta (the bridge's 'started' or the helper's own)
+  const start = await waitFor(() => helperOps().find((m) => m.op === 'start'));
   assert.equal(start.displayId, 69733378); assert.equal(start.gen, 3);
   assert.match(await waitFor(() => rd('caff.log')), /"-u"/);   // D103: display held awake while the stream runs
   // control opens after jpegIdle + one JXA release of both buttons + modifiers before video input opens
