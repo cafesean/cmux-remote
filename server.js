@@ -59,7 +59,15 @@ const unixListen = require('./lib/unix-listen');
 // request because MACHINES is built below.
 // D40 W1: local pairing asks the person at this Mac with an Allow/Deny dialog (lib/confirm-dialog.js).
 const confirmDialog = require('./lib/confirm-dialog');
-const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '',
+// p42: plan enforcement, on only for a Mac run by HyprMux Bridge (HMX_PLAN_STATE_DIR = the Bridge state dir).
+// Unset = no plan checks (self-hosted behaviour unchanged).
+const planPolicyLib = require('./lib/plan-policy');
+const planPolicy = process.env.HMX_PLAN_STATE_DIR
+  ? planPolicyLib.createPolicy({ stateDir: process.env.HMX_PLAN_STATE_DIR,
+    hub: planPolicyLib.createHubClient({ base: process.env.HMX_HUB_URL || 'https://hub.appmatic.io' }) })
+  : null;
+if (planPolicy) planPolicy.startPoll();
+const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '', policy: planPolicy,
   confirm: String(process.env.PAIR_LOCAL || '').toLowerCase() === 'off' ? confirmDialog.disabledConfirm : confirmDialog.createConfirm(),
   localMachine: () => { const m = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl)); return m ? m.id : null; } });
 const { parseUnixBaseUrl, unixFetch } = require('./lib/unix-fetch');
@@ -367,11 +375,36 @@ const DL_TICKET_TTL = 120000;
 const DL_TICKET_MAX = 64;
 const dlTickets = new Map();
 
-function mintDlTicket(machineId, filePath) {
+// p42 R1: a ticket remembers the credential that minted it ({keyId, credHash}); redemption re-checks that the
+// credential still exists unchanged (a revoked key, or a replacement key for the same hub device, kills it).
+const credHashOf = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+function ticketCred(cred) {
+  if (cred && cred.kind === 'server') return { keyId: 'server', credHash: credHashOf(SERVER_TOKEN) };
+  if (cred && cred.kind === 'device') return { keyId: cred.dev.id, credHash: cred.dev.keyHash };
+  return { keyId: null, credHash: null };
+}
+function ticketCredOk(tk) {
+  if (!tk.keyId) return true;
+  if (tk.keyId === 'server') return !!SERVER_TOKEN && tk.credHash === credHashOf(SERVER_TOKEN);
+  const d = pairing.byId(tk.keyId);
+  return !!d && d.keyHash === tk.credHash;
+}
+// p42 R9: machine ids in policy order (the local machine first, then config order).
+function machineOrder() {
+  const lm = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl));
+  return lm ? [lm.id, ...MACHINES.filter((m) => m !== lm).map((m) => m.id)] : MACHINES.map((m) => m.id);
+}
+function visibleMachines() {
+  if (!planPolicy) return MACHINES;
+  const ok = planPolicy.allowedMachines(machineOrder());
+  return MACHINES.filter((m) => ok.includes(m.id));
+}
+
+function mintDlTicket(machineId, filePath, cred) {
   const now = Date.now();
   for (const [k, v] of dlTickets) if (now - v.at > DL_TICKET_TTL) dlTickets.delete(k);
   const ticket = crypto.randomBytes(24).toString('base64url');
-  dlTickets.set(ticket, { machine: machineId, path: filePath, at: now });
+  dlTickets.set(ticket, { machine: machineId, path: filePath, at: now, ...ticketCred(cred) });
   while (dlTickets.size > DL_TICKET_MAX) dlTickets.delete(dlTickets.keys().next().value);
   return ticket;
 }
@@ -391,8 +424,16 @@ function readDlTicket(ticket) {
 //     while ignoring its return value — as the SSE relays do, safely, for tiny frames — would
 //     buffer the whole file in this process's memory.
 async function relayDownload(req, res, u) {
-  const tk = readDlTicket(u.searchParams.get('ticket'));
+  const tkId = u.searchParams.get('ticket');
+  const tk = readDlTicket(tkId);
   if (!tk) return sendJson(res, 403, { error: 'bad_ticket' });
+  if (!ticketCredOk(tk)) { dlTickets.delete(tkId); return sendJson(res, 401, { error: 'unauthorized' }); }
+  if (planPolicy) {
+    const dev = tk.keyId && tk.keyId !== 'server' ? pairing.byId(tk.keyId) : null;
+    const refusal = await planPolicy.authorize(req, u, { op: 'download', cred: tk.keyId === 'server' ? { kind: 'server' } : dev ? { kind: 'device', dev } : {},
+      local: pairing.localOnly(req), machineId: tk.machine, machineIds: machineOrder(), keys: pairing.list() });
+    if (refusal) { dlTickets.delete(tkId); return planPolicyLib.respond(res, refusal); }
+  }
   const m = findMachine(tk.machine);
   if (!m) return sendJson(res, 404, { error: 'no_machine' });
   const ctrl = new AbortController();
@@ -413,6 +454,15 @@ async function relayDownload(req, res, u) {
   if (!up.body) return res.end();
   try { await pipeline(Readable.fromWeb(up.body), res); } catch (_) { /* client left, or upstream cut */ }
   try { res.end(); } catch (_) {}
+}
+
+// p42: which credential authenticated (sync), for the plan policy. Mirrors authed().
+function planCred(req, u) {
+  const h = req.headers['authorization'] || '';
+  const slots = [h.startsWith('Bearer ') ? h.slice(7) : '', req.headers['x-app-token'] || '', u.searchParams.get('token') || ''];
+  if (SERVER_TOKEN && slots.some((c) => c && safeEqual(c, SERVER_TOKEN))) return { kind: 'server' };
+  for (const c of slots) { const dev = c && pairing.verifyKey(c); if (dev) return { kind: 'device', dev }; }
+  return { kind: SERVER_TOKEN ? 'none' : 'open' };
 }
 
 // Client -> server auth. If SERVER_TOKEN is empty, the UI is open (only safe on a trusted LAN).
@@ -517,6 +567,14 @@ async function handleApi(req, res, u) {
     const qm = u.searchParams.get('machine');
     if (qm) await ensureMachine(qm).catch(() => {});
   }
+  // p42 R1(a): plan policy after the sync credential check; ?machine= is checked on its canonical (registry) id.
+  if (planPolicy) {
+    const qm = u.searchParams.get('machine');
+    const cm = qm ? findMachine(qm) : null;
+    const refusal = await planPolicy.authorize(req, u, { op: 'api', cred: planCred(req, u), local: pairing.localOnly(req), method: req.method, path: p,
+      machineId: cm ? cm.id : null, machineIds: machineOrder(), keys: pairing.list() });
+    if (refusal) return planPolicyLib.respond(res, refusal);
+  }
 
   // ----- radar (p5) — mounted only when RADAR_ENABLED is set; `radar &&` is the whole switch -----
   // Wrapped here even though radar-server.js has its own error boundary, because handleApi is
@@ -553,7 +611,7 @@ async function handleApi(req, res, u) {
 
   // ----- p27 Chrome "Allow remote debugging?" -----
   if (req.method === 'GET' && p === '/api/cmux/chrome-prompt') {
-    return sendJson(res, 200, { machines: MACHINES.map((m) => ({ id: m.id, label: m.label, ...(chromePrompts.get(m.id) || { present: false }) })) });
+    return sendJson(res, 200, { machines: visibleMachines().map((m) => ({ id: m.id, label: m.label, ...(chromePrompts.get(m.id) || { present: false }) })) });
   }
   if (req.method === 'POST' && p === '/api/cmux/chrome-prompt') {
     return readBody(req, async (b) => {
@@ -608,7 +666,7 @@ async function handleApi(req, res, u) {
   }
 
   if (req.method === 'GET' && p === '/api/cmux/machines') {
-    return sendJson(res, 200, { machines: MACHINES.map((m) => ({ id: m.id, label: m.label })) });
+    return sendJson(res, 200, { machines: visibleMachines().map((m) => ({ id: m.id, label: m.label })) });
   }
   // One-round-trip boot: machines + the (default) machine's tree together. Cold load over a tunnel is
   // RTT-bound — the old machines→tree serial chain cost two full round trips before the UI could pick a tab.
@@ -655,7 +713,7 @@ async function handleApi(req, res, u) {
     if (!m) return sendJson(res, 404, { error: 'no_machine' });
     const fp = u.searchParams.get('path') || '';
     if (!fp) return sendJson(res, 400, { error: 'bad_path' });
-    return sendJson(res, 200, { ticket: mintDlTicket(m.id, fp), ttl: DL_TICKET_TTL });
+    return sendJson(res, 200, { ticket: mintDlTicket(m.id, fp, planCred(req, u)), ttl: DL_TICKET_TTL });
   }
   // ----- filesystem browse (p4): relay to the bridge, allow-listed params only -----
   if (req.method === 'GET' && p.startsWith('/api/cmux/fs/')) {
@@ -1174,7 +1232,8 @@ async function handleApi(req, res, u) {
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/healthz') return graceful.health(res);
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { res.writeHead(400); return res.end(); }
-  if (u.pathname.startsWith('/api/')) return handleApi(req, res, u);
+  // p42 R3: one boundary for every async refusal/throw from handleApi; one response, the process stays up.
+  if (u.pathname.startsWith('/api/')) return handleApi(req, res, u).catch((e) => { console.error(`api: ${(e && e.stack) || e}`); planPolicyLib.respond(res, e); });
   if (u.pathname === '/' || u.pathname === '/index.html') return serveStatic(req, res, 'index.html');
   if (u.pathname === '/app.js') return serveStatic(req, res, 'app.js');
   // radar.js is served whether or not RADAR_ENABLED is set: the flag governs the API and the
