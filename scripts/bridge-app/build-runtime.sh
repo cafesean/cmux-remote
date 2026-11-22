@@ -20,5 +20,6 @@ rm -rf $OUT; mkdir -p $OUT/server/radar
 cp -R $SRC/public $SRC/bin $SRC/lib $OUT/server/
 cp -R $HERE/server-extras/node-compat $HERE/server-extras/hyprmux-bin $OUT/server/
 cp $SRC/radar/verdict.schema.json $OUT/server/radar/
+cp $SRC/package.json $OUT/server/package.json   # GET /api/version reads the Bridge version from it
 echo "$REF" > $OUT/server/SERVER_REF
 echo "runtime ok: $REF"

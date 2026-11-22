@@ -40,6 +40,7 @@ function main() {
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const PKG_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version || '0.0.0'; } catch (_) { return '0.0.0'; } })();
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
@@ -1256,6 +1257,8 @@ async function handleApi(req, res, u) {
 if (planPolicy) planPolicy.startPoll({ machineIds: () => machineOrder() });
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/healthz') return graceful.health(res);
+  // p42 HMXB-003: unauthenticated Bridge version for the app's update check; no other fields.
+  if (req.method === 'GET' && req.url === '/api/version') return sendJson(res, 200, { bridge: PKG_VERSION, protocol: 1, minClient: null });
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { res.writeHead(400); return res.end(); }
   // p42 R3: one boundary for every async refusal/throw from handleApi; one response, the process stays up.
   if (u.pathname.startsWith('/api/')) return handleApi(req, res, u).catch((e) => { console.error(`api: ${(e && e.stack) || e}`); planPolicyLib.respond(res, e); });
