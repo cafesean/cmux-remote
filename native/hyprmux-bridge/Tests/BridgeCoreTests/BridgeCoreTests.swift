@@ -18,8 +18,18 @@ final class FakeAgents: AgentService {
 final class StubRunner: CommandRunner, @unchecked Sendable {
   var loaded = Set<String>()
   var running: [String: String] = [:] // label -> program path
+  /// SMAppService BundleProgram jobs: label -> (pid, executable path), printed the way launchd really does.
+  var bundleProgram: [String: (pid: Int, exe: String)] = [:]
   func run(_ path: String, _ args: [String]) -> (status: Int32, output: String) {
+    if path == "/bin/ps" {
+      let pid = Int(args.last!) ?? -1
+      if let hit = bundleProgram.values.first(where: { $0.pid == pid }) { return (0, hit.exe + "\n") }
+      return (1, "")
+    }
     let label = String(args.last!.split(separator: "/").last!)
+    if let bp = bundleProgram[label] {
+      return (0, "\tstate = running\n\tprogram identifier = Contents/MacOS/x (mode: 2)\n\truns = 1\n\tpid = \(bp.pid)\n")
+    }
     if let prog = running[label] { return (0, "\tstate = running\n\tprogram = \(prog)\n") }
     return loaded.contains(label) ? (0, "\tstate = waiting\n") : (113, "")
   }
@@ -202,6 +212,34 @@ final class BridgeCoreTests: XCTestCase {
 
   func runAll() {
     for a in [BridgeAgent.daemon, .server, .core] { runner.running[a.label] = bundle + "/Contents/MacOS/x" }
+  }
+
+  // 0.2.0 field bug: launchd prints BundleProgram jobs as 'program identifier' + pid, never 'program ='.
+  func testIsRunningReadsBundleProgramJobsByPid() {
+    let lc = Launchctl(runner: runner, uid: 501)
+    runner.bundleProgram["com.hyprmux.bridge.server"] = (pid: 4242, exe: bundle + "/Contents/MacOS/hyprmux-runtime")
+    runner.bundleProgram["com.hyprmux.bridge.daemon"] = (pid: 4343, exe: "/Applications/Other.app/Contents/MacOS/hyprmux-runtime")
+    XCTAssertTrue(lc.isRunning("com.hyprmux.bridge.server", inside: bundle))
+    XCTAssertFalse(lc.isRunning("com.hyprmux.bridge.daemon", inside: bundle))
+    XCTAssertFalse(lc.isRunning("com.hyprmux.bridge.core", inside: bundle))
+  }
+
+  // 0.2.0 field bug: core re-registered itself before writing the marker -> killed -> KeepAlive -> loop.
+  func testCoreNeverRestartsItselfAndReachesHealthy() throws {
+    try state.ensure()
+    let probe = FakeProbe(); probe.version = "0.2.1"
+    for (i, a) in [BridgeAgent.daemon, .server, .core].enumerated() {
+      runner.bundleProgram[a.label] = (pid: 5000 + i, exe: bundle + "/Contents/MacOS/x")
+    }
+    let g = VersionGuard(coordinator: coord, state: state, launchctl: Launchctl(runner: runner, uid: 501), probe: probe,
+                         clock: FakeClock(), bundleVersion: "0.2.1", bundlePath: bundle, selfAgent: .core)
+    XCTAssertEqual(g.runAtLaunch(), .reregistered)
+    XCTAssertFalse(agents.log.contains("-core"))
+    XCTAssertFalse(agents.log.contains("+core"))
+    XCTAssertEqual(state.readLastRunVersion(), "0.2.1")
+    agents.log.removeAll()
+    XCTAssertEqual(g.runAtLaunch(), .healthy)   // next launch: marker equal + agents seen running -> no restart
+    XCTAssertTrue(agents.log.isEmpty)
   }
 
   // AC8 + AC9: version change -> one re-register each, marker written after health

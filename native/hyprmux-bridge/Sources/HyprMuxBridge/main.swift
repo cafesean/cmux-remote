@@ -39,7 +39,7 @@ if CommandLine.arguments.contains("--core") {
   prepareState()
   let guardian = VersionGuard(coordinator: coordinator, state: state, launchctl: launchctl,
                               probe: LocalServerProbe(port: serverPort()), clock: SystemClock(),
-                              bundleVersion: bundleVersion, bundlePath: Bundle.main.bundlePath)
+                              bundleVersion: bundleVersion, bundlePath: Bundle.main.bundlePath, selfAgent: .core)
   let outcome = guardian.runAtLaunch()
   let manifest = outcome == .updateDidNotStart ? UpdateCheck.fetch() : nil
   try? CoreStatus.from(outcome, version: bundleVersion, manifest: manifest, at: Date().timeIntervalSince1970)
