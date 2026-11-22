@@ -16,11 +16,11 @@ final class InputCoreTests: XCTestCase {
     XCTAssertEqual(try plan(item("mouse") { $0.type = "move"; $0.fx = 0.5; $0.fy = 0.5 }).get(),
                    [.mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil)])
     XCTAssertEqual(try plan(item("mouse") { $0.type = "move"; $0.fx = 0.5; $0.fy = 0.5 }, held: true).get(),
-                   [.mouse(.leftDragged, x: p.x, y: p.y, button: .left, clickState: nil)])
+                   [.mouse(.leftDragged, x: p.x, y: p.y, button: .left, clickState: 1)])
     XCTAssertEqual(try plan(item("mouse") { $0.type = "down"; $0.fx = 0.5; $0.fy = 0.5 }).get(),
                    [.mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil), .mouse(.leftDown, x: p.x, y: p.y, button: .left, clickState: 1)])
     XCTAssertEqual(try plan(item("mouse") { $0.type = "drag"; $0.fx = 0.5; $0.fy = 0.5 }, held: true).get(),
-                   [.mouse(.leftDragged, x: p.x, y: p.y, button: .left, clickState: nil)])
+                   [.mouse(.leftDragged, x: p.x, y: p.y, button: .left, clickState: 1)])
     XCTAssertEqual(plan(item("mouse") { $0.type = "drag"; $0.fx = 0.5; $0.fy = 0.5 }), .failure(.notDown))
     XCTAssertEqual(try plan(item("mouse") { $0.type = "up"; $0.fx = 0; $0.fy = 1 }).get(),
                    [.mouse(.leftUp, x: 100, y: 550, button: .left, clickState: 1)])
@@ -170,9 +170,27 @@ final class InputCoreTests: XCTestCase {
   func testPostedCarriesSurvivingSeqForCoalescedMoves() {
     let f = Fake(); var eng = InputEngine()
     let r = eng.run([item("mouse", seq: 7) { $0.type = "move"; $0.fx = 0; $0.fy = 0 }, item("mouse", seq: 8) { $0.type = "move"; $0.fx = 1; $0.fy = 1 }], env(f))
-    XCTAssertEqual(r, [.posted(epoch: 0, seq: 8)])
+    XCTAssertEqual(r, [.coalesced(epoch: 0, seq: 7), .posted(epoch: 0, seq: 8)])
     XCTAssertEqual(f.posted, [.mouse(.moved, x: 1100, y: 550, button: .left, clickState: nil)])
     XCTAssertEqual(eng.lastPostedSeq, 8)
+  }
+
+  // Drag: down, drags, up. Superseded drags are acked as posted (coalesced) in seq order; the posted drag carries
+  // clickState 1 and the delta from the last posted point.
+  func testDragAcksSupersededInOrderAndFillsDelta() {
+    let f = Fake(); var eng = InputEngine()
+    let drag = { (seq: UInt32, fx: Double) in self.item("mouse", seq: seq) { $0.type = "drag"; $0.fx = fx; $0.fy = 0.5 } }
+    let r = eng.run([down(1), drag(2, 0.6), drag(3, 0.7), item("mouse", seq: 4) { $0.type = "up"; $0.fx = 0.7; $0.fy = 0.5 }], env(f))
+    XCTAssertEqual(r, [.posted(epoch: 0, seq: 1), .coalesced(epoch: 0, seq: 2), .posted(epoch: 0, seq: 3), .posted(epoch: 0, seq: 4)])
+    XCTAssertEqual(f.posted, [
+      .mouse(.moved, x: 600, y: 300, button: .left, clickState: nil),
+      .mouse(.leftDown, x: 600, y: 300, button: .left, clickState: 1),
+      .mouse(.leftDragged, x: 800, y: 300, button: .left, clickState: 1, delta: MouseDelta(dx: 200, dy: 0)),
+      .mouse(.leftUp, x: 800, y: 300, button: .left, clickState: 1),
+    ])
+    XCTAssertEqual(eng.lastPostedSeq, 4)
+    let j = InputRecord.coalesced(epoch: 0, seq: 2).json
+    XCTAssertEqual(j["kind"] as? String, "posted"); XCTAssertEqual(j["seq"] as? UInt32, 2); XCTAssertEqual(j["coalesced"] as? Bool, true)
   }
 
   func testItemFromJSONFallsBackToBatchGenEpoch() {

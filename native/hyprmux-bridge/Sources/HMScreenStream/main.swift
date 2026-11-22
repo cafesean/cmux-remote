@@ -341,10 +341,14 @@ func postStep(_ s: EventStep, dry: Bool) -> Bool {
   let src: CGEventSource? = nil
   var e: CGEvent?
   switch s {
-  case let .mouse(kind, x, y, button, click):
+  case let .mouse(kind, x, y, button, click, delta):
     e = CGEvent(mouseEventSource: src, mouseType: CGEventType(rawValue: kind.rawValue)!, mouseCursorPosition: CGPoint(x: x, y: y),
                 mouseButton: CGMouseButton(rawValue: button.rawValue)!)
     if let click { e?.setIntegerValueField(.mouseEventClickState, value: Int64(click)) }
+    if let delta {
+      e?.setIntegerValueField(.mouseEventDeltaX, value: Int64(delta.dx.rounded()))
+      e?.setIntegerValueField(.mouseEventDeltaY, value: Int64(delta.dy.rounded()))
+    }
   case let .scroll(w1, w2):
     e = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 2, wheel1: w1, wheel2: w2, wheel3: 0)
   case let .key(code, down, flags):
