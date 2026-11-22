@@ -66,7 +66,6 @@ const planPolicy = process.env.HMX_PLAN_STATE_DIR
   ? planPolicyLib.createPolicy({ stateDir: process.env.HMX_PLAN_STATE_DIR,
     hub: planPolicyLib.createHubClient({ base: process.env.HMX_HUB_URL || 'https://hub.appmatic.io' }) })
   : null;
-if (planPolicy) planPolicy.startPoll();
 const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '', policy: planPolicy,
   confirm: String(process.env.PAIR_LOCAL || '').toLowerCase() === 'off' ? confirmDialog.disabledConfirm : confirmDialog.createConfirm(),
   localMachine: () => { const m = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl)); return m ? m.id : null; } });
@@ -400,6 +399,18 @@ function visibleMachines() {
   return MACHINES.filter((m) => ok.includes(m.id));
 }
 
+const DL_TRANSFER_MAX_MS = 30 * 60 * 1000;
+// p42 R5: every admitted request (SSE, screen stream, download included) is an open session until it closes;
+// the policy closes it when its key is revoked/replaced or its device/machine stops passing.
+function trackPlanSession(req, res, u, cred, machineId, credOk) {
+  const keyHash = cred && cred.kind === 'device' ? cred.dev.keyHash : null;
+  const untrack = planPolicy.track({ cred, machineId, local: pairing.localOnly(req), keys: () => pairing.list(),
+    currentDev: () => (cred && cred.kind === 'device' ? pairing.byId(cred.dev.id) : null),
+    credOk: credOk || (() => (cred && cred.kind === 'device' ? !!pairing.byId(cred.dev.id) && pairing.byId(cred.dev.id).keyHash === keyHash : true)),
+    close: () => { try { res.destroy(); } catch (_) {} } });
+  res.on('close', untrack);
+}
+
 function mintDlTicket(machineId, filePath, cred) {
   const now = Date.now();
   for (const [k, v] of dlTickets) if (now - v.at > DL_TICKET_TTL) dlTickets.delete(k);
@@ -433,6 +444,10 @@ async function relayDownload(req, res, u) {
     const refusal = await planPolicy.authorize(req, u, { op: 'download', cred: tk.keyId === 'server' ? { kind: 'server' } : dev ? { kind: 'device', dev } : {},
       local: pairing.localOnly(req), machineId: tk.machine, machineIds: machineOrder(), keys: pairing.list() });
     if (refusal) { dlTickets.delete(tkId); return planPolicyLib.respond(res, refusal); }
+    trackPlanSession(req, res, u, tk.keyId === 'server' ? { kind: 'server' } : dev ? { kind: 'device', dev } : {}, tk.machine, () => ticketCredOk(tk));
+    const wall = setTimeout(() => { try { res.destroy(); } catch (_) {} }, DL_TRANSFER_MAX_MS);   // R1: transfer <= 30 min
+    if (wall.unref) wall.unref();
+    res.on('close', () => clearTimeout(wall));
   }
   const m = findMachine(tk.machine);
   if (!m) return sendJson(res, 404, { error: 'no_machine' });
@@ -574,6 +589,7 @@ async function handleApi(req, res, u) {
     const refusal = await planPolicy.authorize(req, u, { op: 'api', cred: planCred(req, u), local: pairing.localOnly(req), method: req.method, path: p,
       machineId: cm ? cm.id : null, machineIds: machineOrder(), keys: pairing.list() });
     if (refusal) return planPolicyLib.respond(res, refusal);
+    trackPlanSession(req, res, u, planCred(req, u), cm ? cm.id : null);
   }
 
   // ----- radar (p5) — mounted only when RADAR_ENABLED is set; `radar &&` is the whole switch -----
@@ -1229,6 +1245,7 @@ async function handleApi(req, res, u) {
   return sendJson(res, 404, { error: 'not_found' });
 }
 
+if (planPolicy) planPolicy.startPoll({ machineIds: () => machineOrder() });
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/healthz') return graceful.health(res);
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { res.writeHead(400); return res.end(); }

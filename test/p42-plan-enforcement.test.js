@@ -328,3 +328,114 @@ test('server.js without HMX_PLAN_STATE_DIR: no plan checks (self-hosted behaviou
     assert.strictEqual(r.status, 200); assert.strictEqual((await r.json()).machines.length, 2);
   } finally { await s.stop(); br.close(); }
 });
+
+// ---- R5 sessions + R7 poll driver / owner barrier (fake timers + fake clock; only the hub stub and clock move) ----
+function fakeTimers() {
+  const q = []; return { q, setT: (fn, ms) => { const t = { fn, ms }; q.push(t); return t; }, clearT: (t) => { const i = q.indexOf(t); if (i >= 0) q.splice(i, 1); },
+    async run(pred) { const i = q.findIndex(pred); const [t] = q.splice(i, 1); await t.fn(); await new Promise((r) => setImmediate(r)); } };
+}
+test('R5/R7: paused mid-session -> closed by fetchedAt + 305 s via the server poll, 3 cycles and E -> D -> E; re-checks share the refresh', async () => {
+  const d = dir(); signIn(d); const c = clock(); const ft = fakeTimers();
+  const hub = stubHub({ devices: [{ id: 'h1', status: 'active' }] });
+  const p = createPolicy({ hub: hub.client, stateDir: d, now: c.now, log: quiet });
+  const dev = { id: 'k1', hubDeviceId: 'h1', ownerSub: 'A', ownerEpoch: 1 };
+  await p.ensureFresh();
+  const t0 = c.t;
+  p.startPoll({ setT: ft.setT, clearT: ft.clearT, barrierMs: 5000 });
+  for (let cycle = 0; cycle < 3; cycle++) {
+    let closed = false; p.track({ cred: { kind: 'device', dev }, close: () => { closed = true; } });
+    const poll = ft.q.find((t) => t.ms > 5000 || t.ms === 0);
+    assert.ok(poll.ms <= 300000);
+    c.t += poll.ms; await ft.run((t) => t === poll);
+    assert.strictEqual(closed, false, 'active stays open, re-armed');
+    hub.devices = [{ id: 'h1', status: 'paused' }];
+    const next = ft.q.find((t) => t.fn.name === 'tick');
+    c.t += next.ms; await ft.run((t) => t === next);
+    assert.strictEqual(closed, true, 'paused closed at the next deadline');
+    assert.ok(next.ms <= 305000);
+    hub.devices = [{ id: 'h1', status: 'active' }];
+  }
+  // E -> D: no checks; D -> E: checks again
+  hub.entitlement = { enforced: false }; let t = ft.q.find((x) => x.fn.name === 'tick'); c.t += t.ms; await ft.run((x) => x === t);
+  assert.strictEqual(p.decide().mode, 'D');
+  hub.entitlement = { enforced: true, plan: 'free', limits: { maxMachines: 1, maxDevices: 1, remoteDesktop: 'view' } }; hub.devices = [{ id: 'h1', status: 'paused' }];
+  let closed = false; p.track({ cred: { kind: 'device', dev }, close: () => { closed = true; } });
+  t = ft.q.find((x) => x.fn.name === 'tick'); c.t += t.ms; await ft.run((x) => x === t);
+  assert.strictEqual(p.decide().mode, 'E'); assert.strictEqual(closed, true);
+  assert.ok(c.t > t0);
+});
+
+test('R7 poll in D and F: idle sessions closed when the hub flips to enforced (driven only by hub stub + clock)', async () => {
+  const d = dir(); const c = clock(); const ft = fakeTimers();
+  const hub = stubHub({ plans: { enforced: false } });
+  const p = createPolicy({ hub: hub.client, stateDir: d, now: c.now, log: quiet });
+  await p.ensureFresh(); assert.strictEqual(p.decide().mode, 'D');
+  const keys = [{ id: 'old', createdAt: 1, local: false }, { id: 'new', createdAt: 2, local: false }];
+  let closedNew = false, closedOld = false;
+  p.track({ cred: { kind: 'device', dev: keys[1] }, keys: () => keys, close: () => { closedNew = true; } });
+  p.track({ cred: { kind: 'device', dev: keys[0] }, keys: () => keys, close: () => { closedOld = true; } });
+  p.startPoll({ setT: ft.setT, clearT: ft.clearT });
+  hub.plans = { enforced: true, defaultPlan: 'free', plans: [] };
+  const t = ft.q.find((x) => x.fn.name === 'tick'); assert.ok(t.ms <= 300000); c.t += t.ms; await ft.run((x) => x === t);
+  assert.strictEqual(p.decide().mode, 'F'); assert.strictEqual(closedNew, true); assert.strictEqual(closedOld, false);
+});
+
+test('R7/R8 owner switch A -> B: barrier tick closes old-epoch sessions, no hub call with A token, A refresh resolving late is discarded', async () => {
+  const d = dir(); signIn(d, 'A', 1); const c = clock(); const ft = fakeTimers();
+  const hub = stubHub({ devices: [{ id: 'h1', status: 'active' }] });
+  const tokens = []; const ent = hub.client.entitlement; hub.client.entitlement = (tok) => { tokens.push(tok); return ent(tok); };
+  const p = createPolicy({ hub: hub.client, stateDir: d, now: c.now, log: quiet });
+  await p.ensureFresh();
+  const dev = { id: 'k1', hubDeviceId: 'h1', ownerSub: 'A', ownerEpoch: 1 };
+  let closed = false; p.track({ cred: { kind: 'device', dev }, close: () => { closed = true; } });
+  p.startPoll({ setT: ft.setT, clearT: ft.clearT });
+  // core writes owner.json for B but B's token file is not there yet (killed between the writes)
+  fs.writeFileSync(path.join(d, 'owner.json'), JSON.stringify({ ownerSub: 'B', ownerEpoch: 2 }));
+  const n = tokens.length;
+  await ft.run((x) => x.fn.name === 'barrier');
+  assert.strictEqual(closed, true, 'old-epoch session closed within one 5 s barrier tick');
+  assert.strictEqual(tokens.length, n, 'no hub call with A token');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(d, 'plan-cache.json'))).ownerSub, 'A', 'nothing published for B from A');
+  const x = await p.authorize(req(fwd), U, { cred: { kind: 'device', dev } });
+  assert.strictEqual(x.body.details.reason, 'unbound');
+  // B's token appears -> next refresh uses it
+  fs.writeFileSync(path.join(d, 'hub-access-token'), JSON.stringify({ ownerSub: 'B', ownerEpoch: 2, accessToken: 'tok-B', exp: 4e9 }));
+  c.t += 61000; await p.refresh();
+  assert.strictEqual(tokens[tokens.length - 1], 'tok-B');
+  // a late A refresh is discarded
+  signIn(d, 'A', 3); const hang = stubHub(); let release;
+  const p2 = createPolicy({ hub: { ...hang.client, entitlement: () => new Promise((r) => { release = r; }) }, stateDir: d, now: c.now, log: quiet });
+  const pending = p2.refresh();
+  fs.writeFileSync(path.join(d, 'owner.json'), JSON.stringify({ ownerSub: 'C', ownerEpoch: 4 }));
+  release({ enforced: false }); assert.strictEqual(await pending, false);
+});
+
+test('R6 restart: enforced Free -> sign-out (plan-cache deleted) -> /plans outage -> restart: built-in Free from install-policy.json; device snapshot > 24 h ignored', async () => {
+  const d = dir(); signIn(d); const c = clock();
+  const hub = stubHub({ devices: [{ id: 'h1', status: 'active' }] });
+  const p = createPolicy({ hub: hub.client, stateDir: d, now: c.now, log: quiet });
+  await p.ensureFresh();
+  // device snapshot <= 24 h old drives status after a restart
+  hub.fail = true;
+  const pr = createPolicy({ hub: hub.client, stateDir: d, now: c.now, log: quiet });
+  assert.strictEqual(pr.decide().devices.h1.status, 'active');
+  c.t += 24 * 3600 * 1000 + 1000;
+  const pr2 = createPolicy({ hub: hub.client, stateDir: d, now: c.now, log: quiet });
+  assert.strictEqual(Object.keys(pr2.decide().devices).length, 0, 'older snapshot ignored');
+  fs.unlinkSync(path.join(d, 'plan-cache.json')); fs.unlinkSync(path.join(d, 'hub-access-token'));
+  fs.writeFileSync(path.join(d, 'owner.json'), JSON.stringify({ ownerSub: null, ownerEpoch: 2 }));
+  const p3 = createPolicy({ hub: hub.client, stateDir: d, now: c.now, log: quiet });
+  await p3.ensureFresh();
+  const dd = p3.decide(); assert.strictEqual(dd.mode, 'F'); assert.strictEqual(dd.limits.remoteDesktop, 'view');
+});
+
+test('credential change closes sessions at once: revoke and same-hubDeviceId replacement (R1/R5)', async () => {
+  const p = createPolicy({ hub: stubHub({ fail: true }).client, stateDir: dir(), now: clock().now, log: quiet });
+  const pr = mkPairing(p);
+  const a = pr.claim(pr.start('t' + Math.random()).code, 'a');
+  const dev = pr.byId(a.id); const keyHash = dev.keyHash;
+  let closed = false;
+  p.track({ cred: { kind: 'device', dev }, credOk: () => !!pr.byId(a.id) && pr.byId(a.id).keyHash === keyHash, close: () => { closed = true; } });
+  assert.strictEqual(pr.revoke(a.id), true);
+  assert.strictEqual(closed, true);
+});
