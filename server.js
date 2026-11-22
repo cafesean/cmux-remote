@@ -76,7 +76,10 @@ const planPolicy = process.env.HMX_PLAN_STATE_DIR
 const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '', policy: planPolicy,
   confirm: String(process.env.PAIR_LOCAL || '').toLowerCase() === 'off' ? confirmDialog.disabledConfirm : confirmDialog.createConfirm(),
   localMachine: () => { const m = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl)); return m ? m.id : null; } });
-const { parseUnixBaseUrl, unixFetch } = require('./lib/unix-fetch');
+const { parseUnixBaseUrl, unixFetch, streamRequest: nodeStreamTo } = require('./lib/unix-fetch');
+// Under Bun the node:http client reads a body ahead without bound, so the download relay dials a raw
+// socket there (lib/raw-get.js) to keep the client's backpressure; under Node it keeps http.request.
+const streamTo = typeof Bun !== 'undefined' ? require('./lib/raw-get').rawGet : nodeStreamTo;
 let SERVER_SOCKET = '';
 try { SERVER_SOCKET = unixListen.socketSetting('SERVER_SOCKET', process.env, emptyShadowed); }
 catch (e) { console.error(`refusing to start: ${e.code}: ${e.detail}`); process.exit(1); }
@@ -197,6 +200,10 @@ const accessHeaders = (m) => cfAccess.accessHeadersFor(m, process.env);
 // unix:<path>: lib/unix-fetch over the socket — Node's fetch cannot dial a UNIX socket.
 function upstream(m, pathAndQuery, init) {
   return m.socketPath ? unixFetch(m.socketPath, pathAndQuery, init) : fetch(`${m.baseUrl}${pathAndQuery}`, init);
+}
+// The same bridge, answered as a node IncomingMessage (for bodies piped with backpressure).
+function streamRequest(m, pathAndQuery, init) {
+  return streamTo(m.socketPath ? { socketPath: m.socketPath } : { url: `${m.baseUrl}${pathAndQuery}` }, pathAndQuery, init);
 }
 
 // p41 B1: /api/sessions* pass-through (mounted in handleApi next to the completions relay).
@@ -472,19 +479,19 @@ async function relayDownload(req, res, u) {
   req.on('close', () => ctrl.abort());
   const headers = { 'x-bridge-secret': m.secret, ...accessHeaders(m) };
   if (req.headers['range']) headers.range = req.headers['range'];
+  // Not fetch: the body is piped with the client's backpressure. (Bun's fetch and its node:http client
+  // both read a body ahead without bound, so under Bun this is a raw socket: lib/raw-get.js.)
   let up;
   try {
-    up = await upstream(m, `/cmux/fs/download?path=${encodeURIComponent(tk.path)}`,
-      { headers, signal: ctrl.signal });
+    up = await streamRequest(m, `/cmux/fs/download?path=${encodeURIComponent(tk.path)}`, { headers, signal: ctrl.signal });
   } catch (_) { return sendJson(res, 502, { error: 'bridge_unreachable' }); }
   const out = { 'cache-control': 'no-store' };
   for (const h of ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range']) {
-    const v = up.headers.get(h);
-    if (v) out[h] = v;
+    const v = up.headers[h];
+    if (v) out[h] = Array.isArray(v) ? v.join(', ') : v;
   }
-  res.writeHead(up.status, out);
-  if (!up.body) return res.end();
-  try { await pipeline(Readable.fromWeb(up.body), res); } catch (_) { /* client left, or upstream cut */ }
+  res.writeHead(up.statusCode, out);
+  try { await pipeline(up, res); } catch (_) { /* client left, or upstream cut */ }
   try { res.end(); } catch (_) {}
 }
 
@@ -1360,16 +1367,27 @@ const screenWs = require('./lib/screen-ws').createScreenWs({
 });
 httpServer.on('upgrade', (req, socket, head) => screenWs.handleUpgrade(req, socket, head));
 const graceful = require('./lib/graceful').createGraceful(httpServer);
+// p43: under Bun (the compiled runtime) Bun.serve owns the public listener and node:http sits behind it
+// on a private Unix socket (lib/front-door.js). Under Node the plain listen below is unchanged.
+const frontDoor = require('./lib/front-door');
+const FRONT = frontDoor.isBun();
+let front = null;
+const startFront = (o) => frontDoor.start({ nodeServer: httpServer, ...o }).then((f) => { front = f; return f; });
 if (SERVER_SOCKET) {
   // lib/unix-listen.js checks the directory (real path, 0700, ours, safe ancestors), refuses a live
   // socket at the path, removes a stale one, listens, then chmods the socket 0600.
   if (process.env.PORT || process.env.HOST || process.env.SERVER_HOST) console.log('note: SERVER_SOCKET is set — PORT/HOST/SERVER_HOST are ignored; no TCP port is opened');
-  unixListen.listenUnix(httpServer, SERVER_SOCKET).then(
+  (FRONT ? startFront({ unix: SERVER_SOCKET, listenUnix: unixListen.listenUnix }).then((f) => f.result)
+    : unixListen.listenUnix(httpServer, SERVER_SOCKET)).then(
     (r) => {
       if (r === 'removed') console.log(`removed stale socket ${SERVER_SOCKET}`);
       console.log(`cmux-remote server on unix:${SERVER_SOCKET} with ${MACHINES.length} machine(s)`);
       afterListen();
     },
+    (e) => { console.error(`refusing to start: ${e.code || 'listen_failed'}: ${e.detail || e.message}`); process.exit(1); });
+} else if (FRONT) {
+  startFront({ port: PORT, host: HOST }).then(
+    (f) => { console.log(`cmux-remote server on http://${HOST}:${f.port} with ${MACHINES.length} machine(s)`); afterListen(); },
     (e) => { console.error(`refusing to start: ${e.code || 'listen_failed'}: ${e.detail || e.message}`); process.exit(1); });
 } else {
   httpServer.listen(PORT, HOST, () => {
@@ -1383,6 +1401,10 @@ if (SERVER_SOCKET) {
 
 // p41 A18: SIGTERM/SIGINT -> every open SSE stream gets `event: restarting`, then a short drain and
 // exit. Radar's timers (if enabled) are stopped first.
-graceful.install(() => { if (radar) radar.stop(); });
+if (FRONT) {
+  // Front door first (stop accepting; open streams closed after 5 s), then node's own drain + exit.
+  const h = () => { if (front) front.shutdown(); graceful.shutdown(() => { if (radar) radar.stop(); }); };
+  process.on('SIGTERM', h); process.on('SIGINT', h);
+} else graceful.install(() => { if (radar) radar.stop(); });
 // D52/D93/D99 process guards: installed at the top of this file, before main() (see installProcessGuards).
 }
