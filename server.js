@@ -1365,12 +1365,15 @@ const screenWs = require('./lib/screen-ws').createScreenWs({
     },
   },
 });
-httpServer.on('upgrade', (req, socket, head) => screenWs.handleUpgrade(req, socket, head));
 const graceful = require('./lib/graceful').createGraceful(httpServer);
 // p43: under Bun (the compiled runtime) Bun.serve owns the public listener and node:http sits behind it
 // on a private Unix socket (lib/front-door.js). Under Node the plain listen below is unchanged.
 const frontDoor = require('./lib/front-door');
 const FRONT = frontDoor.isBun();
+// Under Node, node:http owns upgrades. Under Bun the front door routes a first-head screen upgrade to its own
+// Bun.serve socket and its node-side 'upgrade' listener answers every later one 404; a second listener here
+// would write to the same socket.
+if (!FRONT) httpServer.on('upgrade', (req, socket, head) => screenWs.handleUpgrade(req, socket, head));
 let front = null;
 const startFront = (o) => frontDoor.start({ nodeServer: httpServer, ...o }).then((f) => { front = f; return f; });
 if (SERVER_SOCKET) {
