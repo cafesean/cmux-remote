@@ -48,7 +48,7 @@ final class FieldFixes024Tests: WiredTests {
     agents.log.removeAll()
     XCTAssertEqual(session.setPhoneAccess(true, port: 4123), .ready(id: "t2", hostname: "abc2.hyprmux.com"))
     XCTAssertEqual(try String(contentsOfFile: state.paths.tunnelTokenPath, encoding: .utf8), "tok-2")
-    XCTAssertEqual(Array(agents.log.suffix(2)), ["-tunnel", "+tunnel"])
+    XCTAssertEqual(Array(agents.log.filter { $0.hasSuffix("tunnel") }.suffix(2)), ["-tunnel", "+tunnel"])
     XCTAssertTrue(coreLog().contains("agent-restart agent=tunnel reason=token_changed"), coreLog())
     // same token again: no restart
     wrap { r in r.url.path == "/api/v1/apps/hyprmux/tunnels"
@@ -182,7 +182,7 @@ final class PairAndLaunchTests: XCTestCase {
     XCTAssertEqual(PairingStart.notRunning.text, "Bridge isn't running")
     hub.replies = [.response(status: 409, body: Data(#"{"error":"no_public_address"}"#.utf8))]
     XCTAssertEqual(srv.startPairing(), .refused("no_public_address"))
-    XCTAssertEqual(PairingStart.refused("no_public_address").text, "Turn on Phone access first.")
+    XCTAssertEqual(PairingStart.refused("no_public_address").text, "Turn on Remote Access first.")
     hub.replies = [.response(status: 200, body: Data(#"{"code":"123456","qr":"cmuxremote://pair?c=123456"}"#.utf8))]
     XCTAssertEqual(srv.startPairing(), .link("cmuxremote://pair?c=123456"))
     XCTAssertEqual(PairingStart.link("x").text, "Scan with the HyprMux app")

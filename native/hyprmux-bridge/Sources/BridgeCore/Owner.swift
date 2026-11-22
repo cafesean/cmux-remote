@@ -21,6 +21,8 @@ extension BridgePaths {
   public var pendingTunnelDeletePath: String { stateDir + "/pending-tunnel-delete.json" }
   public var planCachePath: String { stateDir + "/plan-cache.json" }
   public var installPolicyPath: String { stateDir + "/install-policy.json" }
+  /// "<sub>\n<email>\n": the menu's account line, fenced to the owner it was read for.
+  public var ownerEmailPath: String { stateDir + "/owner-email" }
 }
 
 public final class OwnerFiles {
@@ -71,6 +73,7 @@ public final class OwnerFiles {
   /// Delete the owner token file and the Keychain refresh item. Never touches plan-cache.json / install-policy.json.
   public func deleteCredentials() {
     try? FileManager.default.removeItem(atPath: paths.hubAccessTokenPath)
+    try? FileManager.default.removeItem(atPath: paths.ownerEmailPath)
     try? keychain.delete(service: InstallKeyStore.service, account: Self.refreshAccount)
   }
 }

@@ -102,7 +102,7 @@ public final class BridgeSession {
     return items.map { "\($0.0)=\($0.1.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }.joined(separator: "&")
   }
 
-  struct Tokens { let access: String; let refresh: String?; let exp: TimeInterval; let sub: String }
+  struct Tokens { let access: String; let refresh: String?; let exp: TimeInterval; let sub: String; var email: String? = nil }
 
   func tokenCall(_ endpoint: String, _ items: [(String, String)]) -> Result<Tokens, SignInFailure> {
     let r = auth.send(HubRequest(method: "POST", path: endpoint, query: nil,
@@ -113,16 +113,42 @@ public final class BridgeSession {
     guard let j = HubEnvelope.json(d), let at = j["access_token"] as? String,
           let sub = Self.jwtSub(at) else { return .failure(.tokenResponse) }
     let exp = clock.now() + ((j["expires_in"] as? Double) ?? 300)
-    return .success(Tokens(access: at, refresh: j["refresh_token"] as? String, exp: exp, sub: sub))
+    return .success(Tokens(access: at, refresh: j["refresh_token"] as? String, exp: exp, sub: sub, email: Self.email(j, sub: sub)))
   }
 
-  static func jwtSub(_ jwt: String) -> String? {
+  static func jwtClaims(_ jwt: String) -> [String: Any]? {
     let parts = jwt.split(separator: ".")
     guard parts.count >= 2 else { return nil }
     var s = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
     while s.count % 4 != 0 { s += "=" }
-    guard let d = Data(base64Encoded: s), let j = HubEnvelope.json(d) else { return nil }
-    return j["sub"] as? String
+    guard let d = Data(base64Encoded: s) else { return nil }
+    return HubEnvelope.json(d)
+  }
+
+  static func jwtSub(_ jwt: String) -> String? { jwtClaims(jwt)?["sub"] as? String }
+
+  /// The account email for the menu: the id token's email claim (same sub), else the access token's.
+  static func email(_ tokenResponse: [String: Any], sub: String) -> String? {
+    for k in ["id_token", "access_token"] {
+      guard let t = tokenResponse[k] as? String, let c = jwtClaims(t), c["sub"] as? String == sub,
+            let e = c["email"] as? String, e.contains("@"), !e.contains("\n") else { continue }
+      return e
+    }
+    return nil
+  }
+
+  /// The signed-in account's email (owner-email, fenced to the current owner); nil = not known yet.
+  public var accountEmail: String? {
+    guard let sub = ownerSub, let s = try? String(contentsOfFile: state.paths.ownerEmailPath, encoding: .utf8) else { return nil }
+    let parts = s.split(separator: "\n", maxSplits: 1).map(String.init)
+    guard parts.count == 2, parts[0] == sub else { return nil }
+    let e = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+    return e.isEmpty ? nil : e
+  }
+
+  func storeEmail(_ email: String?, sub: String) {
+    guard let email, accountEmail != email else { return }
+    try? BridgeState.writePrivate(state.paths.ownerEmailPath, sub + "\n" + email + "\n")
   }
 
   /// Callback → code → tokens. A new person = owner change (R8) first; then refresh token (Keychain) and access file.
@@ -162,6 +188,7 @@ public final class BridgeSession {
       logSignIn("save", error: SignInFailure.saveFailed.logCode)
       return .signedOut(message: SignInFailure.saveFailed.text)
     }
+    storeEmail(t.email, sub: t.sub)
     logSignIn("done")
     registerHubSession()
     return .signedIn(ownerSub: t.sub)
@@ -179,6 +206,7 @@ public final class BridgeSession {
     }
     guard case .response(200, let d) = r, let j = HubEnvelope.json(d), let at = j["access_token"] as? String else { return }
     if let newRT = j["refresh_token"] as? String { try? owner.storeRefreshToken(newRT) }
+    storeEmail(Self.email(j, sub: sub), sub: sub)
     let exp = clock.now() + ((j["expires_in"] as? Double) ?? 300)
     try? owner.writeAccessToken(OwnerAccessToken(ownerSub: sub, ownerEpoch: owner.readOwner().ownerEpoch, accessToken: at, exp: exp))
   }
@@ -210,7 +238,11 @@ public final class BridgeSession {
     }
     let ok = (200..<300).contains(s)
     CoreLog.append("hub-session", [("status", String(s)), ("result", ok ? "ok" : HubEnvelope.errorCode(s, d))], logsDir: state.paths.logsDir)
-    if ok { try? BridgeState.writePrivate(state.paths.hubSessionPath, sub + "\n") }
+    if ok {
+      try? BridgeState.writePrivate(state.paths.hubSessionPath, sub + "\n")
+      let u = (HubEnvelope.data(d) ?? HubEnvelope.json(d))?["user"] as? [String: Any]
+      if let e = u?["email"] as? String, e.contains("@"), !e.contains("\n") { storeEmail(e, sub: sub) }
+    }
     return ok
   }
 

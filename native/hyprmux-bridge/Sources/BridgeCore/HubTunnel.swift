@@ -192,6 +192,7 @@ public final class PhoneAccess {
       if state.ensureGeneration() != gen, state.hasOwnTunnelToken(), let last = state.readLastTunnel() {
         CoreLog.append("tunnel-ensure", [("status", "joined"), ("host", last.hostname), ("id", CoreLog.idPrefix(last.id))], logsDir: logs)
         _ = coordinator.registerRequired()
+        publishURL(last.hostname)
         return .ready(id: last.id, hostname: last.hostname)
       }
       let (s, t) = client.ensure(port: port, bearer: bearer)
@@ -209,8 +210,23 @@ public final class PhoneAccess {
         let r = (try? coordinator.agents.restart(.tunnel)) != nil
         CoreLog.append("agent-restart", [("agent", "tunnel"), ("reason", "token_changed"), ("result", r ? "ok" : "failed")], logsDir: logs)
       }
+      publishURL(t.hostname)
       return s
     }
+  }
+
+  /// server.js reads PUBLIC_URL (the pairing QR's u=) from the env file only at start: write the ensured hostname
+  /// and restart the server agent when it changed, so a pairing never points at a dead host.
+  func publishURL(_ hostname: String) {
+    let logs = state.paths.logsDir
+    guard let changed = try? state.setEnvValue("PUBLIC_URL", "https://\(hostname)") else {
+      CoreLog.append("public-url", [("result", "write_failed")], logsDir: logs)
+      return
+    }
+    guard changed else { return }
+    let agents = coordinator.agents
+    let r = agents.isRegistered(.server) ? ((try? agents.restart(.server)) != nil ? "ok" : "failed") : "not_registered"
+    CoreLog.append("agent-restart", [("agent", "server"), ("reason", "public_url_changed"), ("host", hostname), ("result", r)], logsDir: logs)
   }
 
   static func code(_ s: TunnelState) -> String {

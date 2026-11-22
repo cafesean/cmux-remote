@@ -88,6 +88,20 @@ public final class LoopbackServer: LocalServer {
 }
 
 /// What the Pair a Phone window shows.
+/// The pieces of a pairing link (scheme://pair?u=<address>&c=<code>) the Connect a Device window shows as text.
+public struct PairingLink: Equatable, Sendable {
+  public let link: String
+  public let address: String
+  public let code: String
+  public init(link: String, address: String, code: String) { self.link = link; self.address = address; self.code = code }
+  public static func parse(_ link: String) -> PairingLink? {
+    guard let q = URLComponents(string: link)?.queryItems,
+          let u = q.first(where: { $0.name == "u" })?.value, let c = q.first(where: { $0.name == "c" })?.value,
+          !u.isEmpty, !c.isEmpty else { return nil }
+    return PairingLink(link: link, address: u, code: c)
+  }
+}
+
 public enum PairingStart: Equatable, Sendable {
   case link(String)
   case notRunning
@@ -97,7 +111,7 @@ public enum PairingStart: Equatable, Sendable {
     switch self {
     case .link: return "Scan with the HyprMux app"
     case .notRunning: return "Bridge isn't running"
-    case .refused(let c) where c == "no_public_address": return "Turn on Phone access first."
+    case .refused(let c) where c == "no_public_address": return "Turn on Remote Access first."
     case .refused(let c): return "Couldn't start pairing (\(SignInFailure.safeCode(c) ?? "unknown"))"
     }
   }
