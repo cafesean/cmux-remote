@@ -43,11 +43,11 @@ test('package-bridge.sh assembles HyprMux Bridge.app (stub binaries)', { skip: !
     fs.copyFileSync(stub, path.join(rt, 'hyprmux-runtime'));
     const out = path.join(tmp, 'out');
     execFileSync(path.join(APPDIR, 'package-bridge.sh'), [out, path.join(tmp, 'work')], {
-      env: { PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_MENU_BIN: stub, BRIDGE_RUNTIME_DIR: rt, BRIDGE_CLOUDFLARED_BIN: stub },
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_MENU_BIN: stub, BRIDGE_RUNTIME_DIR: rt, BRIDGE_CLOUDFLARED_BIN: stub, BRIDGE_SCREEN_STREAM_BIN: stub },
       stdio: 'pipe',
     });
     const c = path.join(out, 'HyprMux Bridge.app', 'Contents');
-    for (const b of ['HyprMuxBridge', 'hyprmux-runtime', 'cloudflared']) {
+    for (const b of ['HyprMuxBridge', 'hyprmux-runtime', 'cloudflared', 'hm-screen-stream']) {
       const st = fs.statSync(path.join(c, 'MacOS', b));
       assert.ok(st.mode & 0o111, `${b} executable`);
     }
@@ -112,4 +112,72 @@ test('Connect refresh token is kept only in the Keychain store (never written to
     if (/writePrivate\(|createFile\(|\.write\(to:|print\(|NSLog\(/.test(line)) assert.doesNotMatch(line, /refresh/i, line);
   }
   assert.match(src, /keychain\.write\(service: InstallKeyStore\.service, account: Self\.refreshAccount/);
+});
+
+// Screen video helper (F1): prebuilt hm-screen-stream sits next to hyprmux-runtime in Contents/MacOS,
+// is signed before the app (inside-out), and the compiled runtime finds it there.
+function stubPackage(tmp) {
+  const stub = path.join(tmp, 'stub');
+  fs.writeFileSync(stub, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const rt = path.join(tmp, 'rt');
+  fs.mkdirSync(path.join(rt, 'server'), { recursive: true });
+  fs.copyFileSync(stub, path.join(rt, 'hyprmux-runtime'));
+  const out = path.join(tmp, 'out');
+  execFileSync(path.join(APPDIR, 'package-bridge.sh'), [out, path.join(tmp, 'work')], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_MENU_BIN: stub, BRIDGE_RUNTIME_DIR: rt, BRIDGE_CLOUDFLARED_BIN: stub, BRIDGE_SCREEN_STREAM_BIN: stub },
+    stdio: 'pipe',
+  });
+  return path.join(out, 'HyprMux Bridge.app');
+}
+
+test('sign-bridge.sh dry run signs hm-screen-stream (hardened, no JIT entitlements) before the app', { skip: !mac }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-sign-'));
+  try {
+    const app = stubPackage(tmp);
+    const log = execFileSync(path.join(APPDIR, 'sign-bridge.sh'), [app, path.join(tmp, 'signed')], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, SIGN_DRY_RUN: '1', SIGN_ID: 'TEST' },
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const signs = log.split('\n').filter((l) => l.startsWith('codesign '));
+    const idx = (re) => signs.findIndex((l) => re.test(l));
+    const helper = idx(/MacOS\/hm-screen-stream'?$/);
+    const appLine = idx(/HyprMux Bridge\.app'?$/);
+    assert.ok(helper >= 0, 'helper signed:\n' + log);
+    assert.ok(appLine > helper, 'helper signed before the app:\n' + log);
+    assert.match(signs[helper], /--options runtime/);
+    assert.doesNotMatch(signs[helper], /--entitlements/);
+    assert.ok(idx(/MacOS\/hyprmux-runtime'?$/) < appLine && idx(/MacOS\/HyprMuxBridge'?$/) < appLine);
+    assert.doesNotMatch(log, /notarytool|hdiutil create/, 'dry run never notarizes or builds a DMG');
+    assert.ok(!fs.existsSync(path.join(tmp, 'signed', 'HyprMuxBridge.dmg')));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('sign-bridge.sh refuses a package without hm-screen-stream', { skip: !mac }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-sign-'));
+  try {
+    const app = stubPackage(tmp);
+    fs.rmSync(path.join(app, 'Contents', 'MacOS', 'hm-screen-stream'));
+    const r = require('child_process').spawnSync(path.join(APPDIR, 'sign-bridge.sh'), [app, path.join(tmp, 'signed')], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, SIGN_DRY_RUN: '1', SIGN_ID: 'TEST' }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stderr, /missing MacOS\/hm-screen-stream/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('compiled runtime finds hm-screen-stream next to itself in Contents/MacOS', { skip: !mac }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-lookup-'));
+  try {
+    const app = stubPackage(tmp);
+    const { helperLookup } = require('../lib/screen-stream.js');
+    const macos = path.join(app, 'Contents', 'MacOS');
+    const r = helperLookup({ env: {}, execPath: path.join(macos, 'hyprmux-runtime'), run: () => { throw new Error('no toolchain on a user Mac'); } });
+    assert.deepStrictEqual(r, { bin: path.join(macos, 'hm-screen-stream') });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
