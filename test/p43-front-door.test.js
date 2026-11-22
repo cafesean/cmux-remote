@@ -1,7 +1,8 @@
 'use strict';
 // p43 HMXV-013: the Bun.serve front door on the compiled runtime. server.js is built with
 // `bun build --compile` and driven over TCP and over SERVER_SOCKET; a stub bridge stands in for cmux.
-// P43_QUIET_SSE_MS shortens the quiet-SSE hold (default 120000, the contract value).
+// P43_QUIET_SSE_MS shortens the quiet-SSE hold (default 120000, the contract value); P43_SLOW_MS shortens
+// the slow-upstream first-byte delay (default 30000, the contract value).
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -13,6 +14,10 @@ const { execFileSync, spawn } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const BUN = [process.env.BUN_BIN, path.join(os.homedir(), '.bun/bin/bun'), '/opt/homebrew/bin/bun'].find((p) => p && fs.existsSync(p));
 const QUIET_MS = Number(process.env.P43_QUIET_SSE_MS) || 120000;
+const SLOW_MS = Number(process.env.P43_SLOW_MS) || 30000;
+const BIG = 50 * 1024 * 1024;
+const net = require('net');
+const crypto = require('crypto');
 
 function stubBridge() {
   const s = { closes: [] };
@@ -22,6 +27,14 @@ function stubBridge() {
       res.write(': hi\n\n');
       req.on('close', () => s.closes.push(Date.now()));
       return;
+    }
+    if (req.url.startsWith('/cmux/fs/download')) {
+      const p = new URL(req.url, 'http://x').searchParams.get('path');
+      if (p === 'slow') { setTimeout(() => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('slow-ok'); }, SLOW_MS); return; }
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(BIG) });
+      const chunk = Buffer.alloc(64 * 1024, 7); let sent = 0;
+      const pump = () => { while (sent < BIG) { sent += chunk.length; if (!res.write(chunk)) return res.once('drain', pump); } res.end(); };
+      return pump();
     }
     res.writeHead(200, { 'content-type': 'application/json' }); res.end('{}');
   });
@@ -53,6 +66,55 @@ function req(where, p, { headers = {}, method = 'GET' } = {}) {
   });
 }
 
+// Raw RFC 6455 client: handshake, then the given masked frames; resolves the server's close code
+// (or 'end' when the socket closed without one) and the ms it took.
+function rawWs(port, frames, { wait = 8000 } = {}) {
+  return new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1');
+    const t0 = Date.now(); let buf = Buffer.alloc(0), up = false, done = false;
+    const fin = (v) => { if (done) return; done = true; s.destroy(); resolve({ ...v, ms: Date.now() - t0 }); };
+    setTimeout(() => fin({ code: 'timeout' }), wait);
+    s.on('connect', () => s.write('GET /api/cmux/screen/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+      'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
+    s.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (!up) {
+        const i = buf.indexOf('\r\n\r\n'); if (i < 0) return;
+        if (!/^HTTP\/1.1 101/.test(buf.toString('latin1', 0, 12))) return fin({ code: 'no101' });
+        up = true; buf = buf.subarray(i + 4);
+        for (const f of frames) s.write(f);
+      }
+      while (buf.length >= 2) {
+        let len = buf[1] & 0x7f, off = 2;
+        if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4; }
+        else if (len === 127) { if (buf.length < 10) return; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+        if (buf.length < off + len) return;
+        const op = buf[0] & 0x0f, pl = buf.subarray(off, off + len); buf = buf.subarray(off + len);
+        if (op === 8) return fin({ code: pl.length >= 2 ? pl.readUInt16BE(0) : 1005 });
+      }
+    });
+    s.on('close', () => fin({ code: 'end' })); s.on('error', () => fin({ code: 'error' }));
+  });
+}
+function maskedFrame(op, payload, fin = true) {
+  const len = payload.length, mask = crypto.randomBytes(4);
+  let head;
+  if (len < 126) head = Buffer.from([(fin ? 0x80 : 0) | op, 0x80 | len]);
+  else if (len < 65536) { head = Buffer.alloc(4); head[0] = (fin ? 0x80 : 0) | op; head[1] = 0x80 | 126; head.writeUInt16BE(len, 2); }
+  else { head = Buffer.alloc(10); head[0] = (fin ? 0x80 : 0) | op; head[1] = 0x80 | 127; head.writeBigUInt64BE(BigInt(len), 2); }
+  const body = Buffer.from(payload); for (let i = 0; i < body.length; i++) body[i] ^= mask[i & 3];
+  return Buffer.concat([head, mask, body]);
+}
+const rss = (pid) => { try { return Number(execFileSync('ps', ['-o', 'rss=', '-p', String(pid)], { encoding: 'utf8' }).trim()) * 1024; } catch (_) { return 0; } };
+async function ticket(port, p) {
+  const ms = JSON.parse((await req(port, '/api/machines')).body);
+  const list = Array.isArray(ms) ? ms : (ms.machines || ms.data || []);
+  const id = (list[0] && (list[0].id || list[0].machine)) || '';
+  const r = await req(port, `/api/cmux/fs/download-ticket?machine=${encodeURIComponent(id)}&path=${encodeURIComponent(p)}`);
+  assert.strictEqual(r.status, 200, r.body);
+  return JSON.parse(r.body).ticket;
+}
+
 function wsOpen(url) {
   return new Promise((resolve) => {
     const ws = new WebSocket(url);
@@ -61,7 +123,7 @@ function wsOpen(url) {
   });
 }
 
-test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', timeout: QUIET_MS + 120000 }, async (t) => {
+test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', timeout: QUIET_MS + SLOW_MS + 120000 }, async (t) => {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'p43-front-')));
   const bin = path.join(tmp, 'srv');
   execFileSync(BUN, ['build', '--compile', path.join(ROOT, 'server.js'), '--outfile', bin], { cwd: ROOT, stdio: 'pipe' });
@@ -132,10 +194,59 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
       const [a, b] = await Promise.all([req(bun.port, p), req(node.port, p)]);
       rows.push([p, a.status, b.status, a.headers['content-type'], b.headers['content-type']]);
     }
-    // Bun's Response adds application/octet-stream where node sent no content-type; types node sets must match.
-    for (const [p, a, b, ca, cb] of rows) { assert.strictEqual(a, b, `${p}: bun ${a} node ${b}`); if (cb) assert.strictEqual(ca, cb, `${p} content-type`); }
+    // content-type compared always: the front door must not add one where node sent none.
+    for (const [p, a, b, ca, cb] of rows) { assert.strictEqual(a, b, `${p}: bun ${a} node ${b}`); assert.strictEqual(ca, cb, `${p} content-type`); }
     const [ha, hb] = await Promise.all([req(bun.port, '/', { method: 'HEAD' }), req(node.port, '/', { method: 'HEAD' })]);
     assert.strictEqual(ha.status, hb.status, 'HEAD parity');
+  });
+
+  await t.test('50 MB download through the front door with bounded RSS', { todo: 'open: RSS grows ~5x the file; the body is read ahead without bound inside the compiled process' }, async () => {
+    const tk = await ticket(bun.port, 'big');
+    const base = rss(bun.child.pid); let peak = base;
+    const got = await new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port: bun.port, path: '/api/cmux/fs/download?ticket=' + encodeURIComponent(tk) }, (res) => {
+        let n = 0, paused = false;
+        const iv = setInterval(() => { peak = Math.max(peak, rss(bun.child.pid)); }, 50);
+        res.on('data', (d) => {
+          n += d.length;
+          // a slow reader for a while: without backpressure the rest of the file piles up in the front door
+          if (!paused && n > 5 * 1024 * 1024) { paused = true; res.pause(); setTimeout(() => res.resume(), 1500); }
+        });
+        res.on('end', () => { clearInterval(iv); resolve({ status: res.statusCode, n }); });
+        res.on('error', (e) => { clearInterval(iv); reject(e); });
+      }).on('error', reject);
+    });
+    assert.strictEqual(got.status, 200);
+    assert.strictEqual(got.n, BIG);
+    assert.ok(peak - base < 32 * 1024 * 1024, `front door RSS grew ${((peak - base) / 1048576).toFixed(1)} MB for a 50 MB file`);
+  });
+
+  await t.test(`slow upstream: ${SLOW_MS} ms to first byte still answers`, { timeout: SLOW_MS + 20000 }, async () => {
+    const tk = await ticket(bun.port, 'slow');
+    const t0 = Date.now();
+    const r = await req(bun.port, '/api/cmux/fs/download?ticket=' + encodeURIComponent(tk));
+    assert.strictEqual(r.status, 200, r.body);
+    assert.strictEqual(r.body, 'slow-ok');
+    assert.ok(Date.now() - t0 >= SLOW_MS - 50);
+  });
+
+  await t.test('Bun websocket adapter enforces the lib/ws.js client limits', { todo: 'open: Bun closes an oversize frame without a 1009 close frame' }, async (t2) => {
+    const { DEFAULTS } = require('../lib/ws');
+    const hello = maskedFrame(1, Buffer.from('hi'));
+    const [frameBig, msgBig, badUtf8, noHello, ok] = await Promise.all([
+      rawWs(bun.port, [hello, maskedFrame(2, Buffer.alloc(DEFAULTS.maxFramePayload + 1))]),
+      rawWs(bun.port, [hello, maskedFrame(2, Buffer.alloc(40 * 1024), false), maskedFrame(0, Buffer.alloc(40 * 1024))]),
+      rawWs(bun.port, [maskedFrame(1, Buffer.from([0xc3, 0x28]))]),
+      rawWs(bun.port, [], { wait: DEFAULTS.helloTimeoutMs + 3000 }),
+      rawWs(bun.port, [hello, maskedFrame(2, Buffer.alloc(DEFAULTS.maxMessage))], { wait: DEFAULTS.helloTimeoutMs + 1500 }),
+    ]);
+    t2.diagnostic(JSON.stringify({ frameBig, msgBig, badUtf8, noHello, ok }));
+    assert.strictEqual(frameBig.code, 1009, 'frame over 64 KiB');
+    assert.strictEqual(msgBig.code, 1009, 'reassembled message over 64 KiB');
+    assert.strictEqual(badUtf8.code, 1007, 'invalid UTF-8 text');
+    assert.strictEqual(noHello.code, 1008, 'no hello');
+    assert.ok(noHello.ms >= DEFAULTS.helloTimeoutMs - 100 && noHello.ms < DEFAULTS.helloTimeoutMs + 2000, `hello deadline at ${noHello.ms} ms`);
+    assert.strictEqual(ok.code, 'timeout', 'a 64 KiB message after the hello is accepted and the socket stays open');
   });
 
   await t.test('SERVER_SOCKET: no TCP listener, and a request over the socket is not local', async () => {
