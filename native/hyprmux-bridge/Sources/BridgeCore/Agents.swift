@@ -98,17 +98,29 @@ public struct Launchctl: Sendable {
   public func isLoaded(_ label: String) -> Bool { print(label).status == 0 }
 
   /// True when the job is `state = running` and its program lives inside `bundlePath`.
+  /// A plain job prints `program = /abs/path`; an SMAppService BundleProgram job prints only
+  /// `program identifier = Contents/MacOS/x (mode: 2)` (relative, no bundle), so its running pid's
+  /// executable path is read instead (`ps -o comm=`).
   public func isRunning(_ label: String, inside bundlePath: String) -> Bool {
     let r = print(label)
     guard r.status == 0 else { return false }
     var running = false
     var program: String?
+    var bundleProgram = false
+    var pid: String?
     for raw in r.output.split(separator: "\n") {
       let line = raw.trimmingCharacters(in: .whitespaces)
       if line == "state = running" { running = true }
       if line.hasPrefix("program = ") { program = String(line.dropFirst("program = ".count)) }
+      if line.hasPrefix("program identifier = ") { bundleProgram = true }
+      if line.hasPrefix("pid = ") { pid = String(line.dropFirst("pid = ".count)) }
     }
+    guard running else { return false }
     let root = bundlePath.hasSuffix("/") ? bundlePath : bundlePath + "/"
-    return running && (program?.hasPrefix(root) ?? false)
+    if let program { return program.hasPrefix(root) }
+    guard bundleProgram, let pid, Int(pid) != nil else { return false }
+    let ps = runner.run("/bin/ps", ["-o", "comm=", "-p", pid])
+    guard ps.status == 0 else { return false }
+    return ps.output.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(root)
   }
 }

@@ -40,9 +40,11 @@ public final class VersionGuard {
   let clock: BridgeClock
   let bundleVersion: String
   let bundlePath: String
+  /// The agent this process runs as (core), never restarted by its own check.
+  let selfAgent: BridgeAgent?
 
   public init(coordinator: AgentCoordinator, state: BridgeState, launchctl: Launchctl, probe: ServerProbe,
-              clock: BridgeClock, bundleVersion: String, bundlePath: String) {
+              clock: BridgeClock, bundleVersion: String, bundlePath: String, selfAgent: BridgeAgent? = nil) {
     self.coordinator = coordinator
     self.state = state
     self.launchctl = launchctl
@@ -50,6 +52,7 @@ public final class VersionGuard {
     self.clock = clock
     self.bundleVersion = bundleVersion
     self.bundlePath = bundlePath
+    self.selfAgent = selfAgent
   }
 
   /// One full check: version match + each required agent running from this bundle.
@@ -73,7 +76,7 @@ public final class VersionGuard {
     let last = state.readLastRunVersion()
     let versionChanged = last != bundleVersion
     if !versionChanged && waitHealthy(Self.launchCheckSeconds) { return .healthy }
-    if case .failed(let why) = coordinator.reregisterRequired() { return .failed(why) }
+    if case .failed(let why) = coordinator.reregisterRequired(skipping: selfAgent.map { [$0] } ?? []) { return .failed(why) }
     guard waitHealthy(Self.healthGateSeconds) else { return .updateDidNotStart }
     if versionChanged {
       do { try state.writeLastRunVersion(bundleVersion) } catch { return .failed("\(error)") }
