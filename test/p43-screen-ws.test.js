@@ -365,3 +365,123 @@ test('helper start in time clears the held-grant timers (no warning, no close)',
   assert.deepStrictEqual(logs, []); assert.strictEqual(ws.closed, null);
   assert.strictEqual(b.ops.filter((o) => o.op === 'grant').length, 2);
 });
+
+// ---- HMXV-010: rate control, admission, clock relay, overlay contract ----
+test('ping -> pong echoes id + clientTs and adds serverTs', async () => {
+  const { sw } = setup();
+  const { ws } = await open(sw);
+  ws.msg({ t: 'ping', id: 7, clientTs: 123456 });
+  const p = ws.texts('pong')[0];
+  assert.strictEqual(p.id, 7); assert.strictEqual(p.clientTs, 123456); assert.ok(p.serverTs > 0);
+});
+
+test('controller: client Stats with drops > 10 % -> one step down: Rate text + helper rate op at the new rate', async () => {
+  const { b, sw } = setup();
+  const { ws, s } = await open(sw);
+  assert.deepStrictEqual(s.state().rate, { kbps: 4000, fps: 30, w: 1280, h: 800 }, 'start 4 Mbps 30 fps, client size capped at native');
+  ws.msg({ t: 'stats', fps: 10, decodeMsP50: 3, decodeMsP95: 5, dropped: 10, rxKbps: 900, g2gMsP50: 80 });
+  s.rateTick();
+  assert.deepStrictEqual(ws.texts('rate')[0], { t: 'rate', kbps: 2800, fps: 30, w: 1280, h: 800, reason: 'congested', oversizedIdr: 0 });
+  assert.deepStrictEqual(b.ops.filter((o) => o.op === 'rate').at(-1), { op: 'rate', gen: 1, kbps: 2800, fps: 30, w: 1280, h: 800 });
+  s.rateTick();
+  assert.strictEqual(ws.texts('rate').length, 1, 'no Rate without a step');
+});
+
+test('controller: client g2gMsP50 above 1.5x its 10 s minimum is congestion', async () => {
+  const { sw } = setup();
+  const { ws, s } = await open(sw);
+  ws.msg({ t: 'stats', fps: 30, dropped: 0, decodeMsP50: 3, decodeMsP95: 5, rxKbps: 900, g2gMsP50: 60 }); s.rateTick();
+  ws.msg({ t: 'stats', fps: 30, dropped: 0, decodeMsP50: 3, decodeMsP95: 5, rxKbps: 900, g2gMsP50: 200 }); s.rateTick();
+  assert.strictEqual(ws.texts('rate')[0].kbps, 2800);
+});
+
+test('controller: admission uses the controller kbps (no fixed rate)', async () => {
+  const b = stubBridge();
+  const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: () => ({ id: 'm1' }), accept: () => null, refuse: () => {}, policy: null, bridge: b.api });
+  const { ws } = await open(sw);
+  ws.msg({ t: 'ready', gen: 1 });
+  ws.bufferedAmount = 150000;                 // 150 KB x 8 / 4000 kbps = 300 ms: fits under 400 ms with a small frame
+  b.push(video(1, 1, b.ops.find((o) => o.op === 'grant').grantId));
+  assert.strictEqual(ws.sent.filter((x) => x.bin).length, 1);
+  ws.bufferedAmount = 250000;                 // 500 ms: over
+  b.push(video(1, 2, b.ops.filter((o) => o.op === 'grant')[1].grantId));
+  assert.strictEqual(ws.sent.filter((x) => x.bin).length, 1);
+});
+
+test('oversized P-frame dropped (grant retired, IDR asked); oversize IDR: two downscales (new gen x0.75, x0.56) then Fallback{bandwidth}', async () => {
+  const { b, sw } = setup({ kbps: 8 });
+  const { ws, s } = await open(sw);
+  ws.msg({ t: 'ready', gen: 1 });
+  ws.bufferedAmount = 10000;
+  const g = b.ops.find((o) => o.op === 'grant');
+  b.push(video(1, 1, g.grantId, 0));
+  assert.ok(!s.state().grants.includes(g.grantId)); assert.ok(b.ops.some((o) => o.op === 'keyframe'));
+  const idrOnce = async (gen) => {
+    const gr = b.ops.filter((o) => o.op === 'grant' && o.gen === gen).at(-1) || b.ops.filter((o) => o.op === 'keyframe').at(-1);
+    b.push(video(gen, 1, gr.grantId, 1)); await tick(); await tick();
+  };
+  await idrOnce(1);
+  assert.strictEqual(ws.texts('reset').at(-1).gen, 2);
+  assert.deepStrictEqual(ws.texts('rate').at(-1), { t: 'rate', kbps: 4000, fps: 30, w: 960, h: 600, reason: 'downscale', oversizedIdr: 1 });
+  assert.deepStrictEqual(b.ops.filter((o) => o.op === 'rate' && o.gen === 2).at(-1), { op: 'rate', gen: 2, kbps: 4000, fps: 30, w: 960, h: 600 }, 'new gen starts at the downscaled size');
+  ws.msg({ t: 'ready', gen: 2 }); await idrOnce(2);
+  assert.strictEqual(ws.texts('rate').at(-1).w, 720);
+  ws.msg({ t: 'ready', gen: 3 }); await idrOnce(3);
+  assert.deepStrictEqual(ws.texts('fallback').at(-1), { t: 'fallback', reason: 'bandwidth' });
+  assert.strictEqual(s.state().oversizedIdr, 3);
+});
+
+test('admission under a falling drain rate: rate = min(controller, measured drain)', async () => {
+  let t = 0;
+  const b = stubBridge();
+  const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: () => ({ id: 'm1' }), accept: () => null, refuse: () => {}, policy: null, bridge: b.api, now: () => t });
+  const ws = fakeWs();
+  ws.send = (d) => { ws.sent.push(typeof d === 'string' ? JSON.parse(d) : { bin: d }); if (typeof d !== 'string') ws.bufferedAmount += d.length; return true; };
+  await open(sw, ws);
+  ws.msg({ t: 'ready', gen: 1 });
+  ws.bufferedAmount = 1000;
+  const gr = () => b.ops.filter((o) => o.op === 'grant').at(-1).grantId;
+  b.push(video(1, 1, gr())); t += 1000; ws.bufferedAmount -= 40;      // drained 40 B in 1 s: 0.32 kbps
+  ws.msg({ t: 'ack', gen: 1, seq: 1 });
+  b.push(video(1, 2, gr()));
+  assert.strictEqual(ws.sent.filter((x) => x.bin).length, 1, 'a frame the 4 Mbps controller would take is refused at the measured drain');
+});
+
+test('ack round trip feeds the controller: later acks 1.5x slower -> step down', async () => {
+  let t = 0;
+  const { b } = { b: stubBridge() };
+  const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: () => ({ id: 'm1' }), accept: () => null, refuse: () => {}, policy: null, bridge: b.api, now: () => t, kbps: () => 1e6 });
+  const { ws, s } = await open(sw);
+  ws.msg({ t: 'ready', gen: 1 });
+  const gr = () => b.ops.filter((o) => o.op === 'grant').at(-1).grantId;
+  b.push(video(1, 1, gr())); t += 20; ws.msg({ t: 'ack', gen: 1, seq: 1 }); t += 500; s.rateTick();
+  b.push(video(1, 2, gr())); t += 100; ws.msg({ t: 'ack', gen: 1, seq: 2 }); t += 500; s.rateTick();
+  assert.strictEqual(ws.texts('rate')[0].kbps, 2800);
+});
+
+test('clock: {t:"time", id, clientTs} -> helper time op scoped to gen; a time reply of another gen is not forwarded; <= 5/s', async () => {
+  const { b, sw } = setup();
+  const { ws } = await open(sw);
+  ws.msg({ t: 'time', id: 5, clientTs: 99 }); await tick();
+  assert.deepStrictEqual(b.ops.filter((o) => o.op === 'time')[0], { op: 'time', gen: 1, id: 5, clientTs: 99 });
+  const bins = () => ws.sent.filter((x) => x.bin).length;
+  b.push(pkt({ type: 4, gen: 2 }, 'old')); assert.strictEqual(bins(), 0, 'other gen ignored');
+  b.push(pkt({ type: 4, gen: 1 }, 'now')); assert.strictEqual(bins(), 1);
+  for (let i = 0; i < 6; i++) ws.msg({ t: 'time', id: 10 + i, clientTs: 1 });
+  assert.strictEqual(ws.texts('error').filter((e) => e.code === 'rate_limited').length, 2);
+});
+
+test('stall: emergency IDR and idle grants never stall; only sent, unprocessed charged video does', async () => {
+  const { b, sw } = setup({ limits: { STALL_MS: 40, EMERGENCY_MS: 10000 } });
+  const { ws } = await open(sw);
+  ws.msg({ t: 'ready', gen: 1 });
+  ws.msg({ t: 'keyframe', gen: 1, reason: 'decode_error' });
+  const kf = b.ops.find((o) => o.op === 'keyframe');
+  b.push(video(1, 1, kf.grantId, 1));
+  await wait(80);
+  assert.strictEqual(ws.texts('fallback').length, 0, 'sent emergency IDR unacked: not a stall');
+  const g = b.ops.find((o) => o.op === 'grant');
+  b.push(video(1, 2, g.grantId)); ws.msg({ t: 'ack', gen: 1, seq: 2 });
+  await wait(80);
+  assert.strictEqual(ws.texts('fallback').length, 0, 'acked: no stall');
+});
