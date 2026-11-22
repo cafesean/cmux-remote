@@ -86,9 +86,20 @@ public struct ProcessRunner: CommandRunner {
 public struct Launchctl: Sendable {
   public let runner: CommandRunner
   public let uid: UInt32
-  public init(runner: CommandRunner = ProcessRunner(), uid: UInt32 = getuid()) {
+  /// pid -> executable path (proc_pidpath). `ps -o comm=` prints the bare argv0 for these jobs, never a path.
+  public let pidPath: @Sendable (Int32) -> String?
+  public init(runner: CommandRunner = ProcessRunner(), uid: UInt32 = getuid(),
+              pidPath: @escaping @Sendable (Int32) -> String? = Launchctl.executablePath) {
     self.runner = runner
     self.uid = uid
+    self.pidPath = pidPath
+  }
+
+  /// Darwin libproc: the running pid's executable path, nil when the pid is gone or not ours to read.
+  public static func executablePath(pid: Int32) -> String? {
+    var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    let n = proc_pidpath(pid, &buf, UInt32(buf.count))
+    return n > 0 ? String(cString: buf) : nil
   }
 
   public func print(_ label: String) -> (status: Int32, output: String) {
@@ -100,7 +111,7 @@ public struct Launchctl: Sendable {
   /// True when the job is `state = running` and its program lives inside `bundlePath`.
   /// A plain job prints `program = /abs/path`; an SMAppService BundleProgram job prints only
   /// `program identifier = Contents/MacOS/x (mode: 2)` (relative, no bundle), so its running pid's
-  /// executable path is read instead (`ps -o comm=`).
+  /// executable path is read instead (proc_pidpath; `ps -o comm=` gives only the argv0 name).
   public func isRunning(_ label: String, inside bundlePath: String) -> Bool {
     let r = print(label)
     guard r.status == 0 else { return false }
@@ -118,9 +129,7 @@ public struct Launchctl: Sendable {
     guard running else { return false }
     let root = bundlePath.hasSuffix("/") ? bundlePath : bundlePath + "/"
     if let program { return program.hasPrefix(root) }
-    guard bundleProgram, let pid, Int(pid) != nil else { return false }
-    let ps = runner.run("/bin/ps", ["-o", "comm=", "-p", pid])
-    guard ps.status == 0 else { return false }
-    return ps.output.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(root)
+    guard bundleProgram, let pid, let n = Int32(pid), let exe = pidPath(n) else { return false }
+    return exe.hasPrefix(root)
   }
 }

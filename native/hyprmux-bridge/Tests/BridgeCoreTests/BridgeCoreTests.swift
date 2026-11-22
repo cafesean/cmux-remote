@@ -20,10 +20,12 @@ final class StubRunner: CommandRunner, @unchecked Sendable {
   var running: [String: String] = [:] // label -> program path
   /// SMAppService BundleProgram jobs: label -> (pid, executable path), printed the way launchd really does.
   var bundleProgram: [String: (pid: Int, exe: String)] = [:]
+  /// proc_pidpath stand-in: the full executable path of a BundleProgram pid.
+  var pidPath: @Sendable (Int32) -> String? { { [self] pid in self.bundleProgram.values.first { $0.pid == Int(pid) }?.exe } }
   func run(_ path: String, _ args: [String]) -> (status: Int32, output: String) {
     if path == "/bin/ps" {
       let pid = Int(args.last!) ?? -1
-      if let hit = bundleProgram.values.first(where: { $0.pid == pid }) { return (0, hit.exe + "\n") }
+      if let hit = bundleProgram.values.first(where: { $0.pid == pid }) { return (0, (hit.exe as NSString).lastPathComponent + "\n") } // real ps: bare argv0
       return (1, "")
     }
     let label = String(args.last!.split(separator: "/").last!)
@@ -70,7 +72,7 @@ final class BridgeCoreTests: XCTestCase {
     try FileManager.default.createDirectory(atPath: paths.launchAgentsDir, withIntermediateDirectories: true)
     runner = StubRunner()
     agents = FakeAgents()
-    let lc = Launchctl(runner: runner, uid: 501)
+    let lc = Launchctl(runner: runner, uid: 501, pidPath: runner.pidPath)
     coord = AgentCoordinator(agents: agents, legacy: LegacyGuard(launchctl: lc, launchAgentsDir: paths.launchAgentsDir), state: state)
   }
 
@@ -206,7 +208,7 @@ final class BridgeCoreTests: XCTestCase {
   // MARK: VersionGuard (R13)
 
   func makeGuard(_ probe: FakeProbe, _ clock: FakeClock, version: String = "0.2.1") -> VersionGuard {
-    VersionGuard(coordinator: coord, state: state, launchctl: Launchctl(runner: runner, uid: 501), probe: probe,
+    VersionGuard(coordinator: coord, state: state, launchctl: Launchctl(runner: runner, uid: 501, pidPath: runner.pidPath), probe: probe,
                  clock: clock, bundleVersion: version, bundlePath: bundle)
   }
 
@@ -216,7 +218,7 @@ final class BridgeCoreTests: XCTestCase {
 
   // 0.2.0 field bug: launchd prints BundleProgram jobs as 'program identifier' + pid, never 'program ='.
   func testIsRunningReadsBundleProgramJobsByPid() {
-    let lc = Launchctl(runner: runner, uid: 501)
+    let lc = Launchctl(runner: runner, uid: 501, pidPath: runner.pidPath)
     runner.bundleProgram["com.hyprmux.bridge.server"] = (pid: 4242, exe: bundle + "/Contents/MacOS/hyprmux-runtime")
     runner.bundleProgram["com.hyprmux.bridge.daemon"] = (pid: 4343, exe: "/Applications/Other.app/Contents/MacOS/hyprmux-runtime")
     XCTAssertTrue(lc.isRunning("com.hyprmux.bridge.server", inside: bundle))
@@ -231,7 +233,7 @@ final class BridgeCoreTests: XCTestCase {
     for (i, a) in [BridgeAgent.daemon, .server, .core].enumerated() {
       runner.bundleProgram[a.label] = (pid: 5000 + i, exe: bundle + "/Contents/MacOS/x")
     }
-    let g = VersionGuard(coordinator: coord, state: state, launchctl: Launchctl(runner: runner, uid: 501), probe: probe,
+    let g = VersionGuard(coordinator: coord, state: state, launchctl: Launchctl(runner: runner, uid: 501, pidPath: runner.pidPath), probe: probe,
                          clock: FakeClock(), bundleVersion: "0.2.1", bundlePath: bundle, selfAgent: .core)
     XCTAssertEqual(g.runAtLaunch(), .reregistered)
     XCTAssertFalse(agents.log.contains("-core"))
@@ -291,7 +293,7 @@ final class BridgeCoreTests: XCTestCase {
     // server comes up only after the re-register
     final class Flip: ServerProbe { let a: FakeAgents; init(_ a: FakeAgents) { self.a = a }
       func bridgeVersion() -> String? { a.log.isEmpty ? nil : "0.2.0" } }
-    let g2 = VersionGuard(coordinator: coord, state: state, launchctl: Launchctl(runner: runner, uid: 501), probe: Flip(agents),
+    let g2 = VersionGuard(coordinator: coord, state: state, launchctl: Launchctl(runner: runner, uid: 501, pidPath: runner.pidPath), probe: Flip(agents),
                           clock: clock, bundleVersion: "0.2.0", bundlePath: bundle)
     _ = g
     XCTAssertEqual(g2.runAtLaunch(), .reregistered)

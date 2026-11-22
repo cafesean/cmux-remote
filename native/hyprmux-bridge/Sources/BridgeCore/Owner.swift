@@ -120,6 +120,17 @@ public final class TunnelDeleteQueue {
     try save(q)
   }
 
+  /// An ensure got this tunnel id back: the hub kept it, so a queued delete of the same id must never run.
+  @discardableResult
+  public func drop(tunnelId: String?) throws -> Int {
+    guard let id = tunnelId else { return 0 }
+    var q = load()
+    let n = q.count
+    q.removeAll { $0.tunnelId == id }
+    if q.count != n { try save(q) }
+    return n - q.count
+  }
+
   /// Entries still waiting (menu shows pendingText while any is left). They never block a newer ensure:
   /// every DELETE carries ?id=, so a late one cannot remove a newer row (409 TUNNEL_CHANGED).
   public var hasPending: Bool { !load().isEmpty }

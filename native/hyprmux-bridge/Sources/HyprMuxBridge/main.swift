@@ -47,6 +47,9 @@ if CommandLine.arguments.contains("--core") {
   // Core loop: delete queue, token refresh 60 s before expiry, plan re-check (300 s), checkout poll (10 s).
   if let session = makeSession() {
     let tokenEndpoint = session.discover()?.token
+    // An owner from an earlier version never created the hub app session (team gate): do it once now.
+    session.refreshIfNeeded(tokenEndpoint: tokenEndpoint)
+    session.ensureHubSession()
     let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "core"))
     timer.schedule(deadline: .now(), repeating: CheckoutPoller.interval)
     timer.setEventHandler { session.coreTick(port: serverPort(), tokenEndpoint: tokenEndpoint) }
@@ -64,10 +67,12 @@ let statusIcon: NSImage? = {
   return img
 }()
 
-final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, ASWebAuthenticationPresentationContextProviding {
+final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, ASWebAuthenticationPresentationContextProviding {
   let session = makeSession()
   var authSession: ASWebAuthenticationSession?
   var qrWindow: NSWindow?
+  var qrImage: NSImageView?
+  var qrLabel: NSTextField?
   var accountText: String?
 
   func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor { NSApp.windows.first ?? NSWindow() }
@@ -274,35 +279,55 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, ASW
     }
   }
 
+  /// One Pair a Phone window: a second click brings it to front and refreshes the code in place (one code on
+  /// screen); closing the window drops it. No local server -> "Bridge isn't running".
   @objc func showQR() {
     DispatchQueue.global().async { [weak self] in
-      let link = self?.loopback()?.pairingLink()
-      DispatchQueue.main.async { self?.presentQR(link) }
+      let result = self?.loopback()?.startPairing() ?? .notRunning
+      CoreLog.append("pairing-start", [("result", result.logResult)], logsDir: paths.logsDir)
+      DispatchQueue.main.async { self?.presentQR(result) }
     }
   }
 
-  func presentQR(_ link: String?) {
-    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 340), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-    w.title = "Pair a Phone"
-    w.isReleasedWhenClosed = false
-    let view = NSImageView(frame: NSRect(x: 20, y: 40, width: 280, height: 280))
-    if let link, let f = CIFilter(name: "CIQRCodeGenerator") {
+  func presentQR(_ result: PairingStart) {
+    let w: NSWindow
+    if let existing = qrWindow {
+      w = existing
+    } else {
+      w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 340), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+      w.title = "Pair a Phone"
+      w.isReleasedWhenClosed = false
+      w.delegate = self
+      let view = NSImageView(frame: NSRect(x: 20, y: 40, width: 280, height: 280))
+      let label = NSTextField(labelWithString: "")
+      label.frame = NSRect(x: 20, y: 10, width: 280, height: 20)
+      w.contentView?.addSubview(view)
+      w.contentView?.addSubview(label)
+      w.center()
+      qrWindow = w
+      qrImage = view
+      qrLabel = label
+    }
+    qrImage?.image = nil
+    if case .link(let link) = result, let f = CIFilter(name: "CIQRCodeGenerator") {
       f.setValue(Data(link.utf8), forKey: "inputMessage")
       if let img = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)) {
         let rep = NSCIImageRep(ciImage: img)
         let ns = NSImage(size: rep.size)
         ns.addRepresentation(rep)
-        view.image = ns
+        qrImage?.image = ns
       }
     }
-    let label = NSTextField(labelWithString: link == nil ? "Turn on Phone access first." : "Scan with the HyprMux app")
-    label.frame = NSRect(x: 20, y: 10, width: 280, height: 20)
-    w.contentView?.addSubview(view)
-    w.contentView?.addSubview(label)
-    w.center()
+    qrLabel?.stringValue = result.text
     NSApp.activate(ignoringOtherApps: true)
     w.makeKeyAndOrderFront(nil)
-    qrWindow = w
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    guard (notification.object as? NSWindow) === qrWindow else { return }
+    qrWindow = nil
+    qrImage = nil
+    qrLabel = nil
   }
 
   @objc func handleURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {

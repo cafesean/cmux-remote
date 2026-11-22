@@ -21,6 +21,9 @@ public final class BridgeSession {
   var lastPlanCheck: TimeInterval = -.infinity
   public private(set) var tunnelState: TunnelState?
   public private(set) var plan: String?
+  /// The tunnel token a 'Tunnel not found' re-ensure already ran for (once per token, never a loop).
+  var notFoundHandledFor: String?
+  var tunnelLogOffset: UInt64 = 0
 
   public init(config: ConnectConfig, hub: HubTransport, auth: HubTransport, state: BridgeState, owner: OwnerFiles,
               coordinator: AgentCoordinator, agents: AgentService, clock: BridgeClock, key: Curve25519.Signing.PrivateKey) {
@@ -160,6 +163,7 @@ public final class BridgeSession {
       return .signedOut(message: SignInFailure.saveFailed.text)
     }
     logSignIn("done")
+    registerHubSession()
     return .signedIn(ownerSub: t.sub)
   }
 
@@ -181,6 +185,39 @@ public final class BridgeSession {
 
   public func signOut() throws {
     try OwnerChange(state: state, coordinator: coordinator, agents: agents, owner: owner, queue: queue, clock: clock).run(newOwner: nil)
+  }
+
+  // MARK: hub app session
+
+  public static let hubSessionPath = "/api/v1/apps/hyprmux/session"
+
+  /// True when the hub app session was created for the current owner.
+  public var hubSessionRecorded: Bool {
+    guard let sub = ownerSub, let s = try? String(contentsOfFile: state.paths.hubSessionPath, encoding: .utf8) else { return false }
+    return s.trimmingCharacters(in: .whitespacesAndNewlines) == sub
+  }
+
+  /// POST /apps/hyprmux/session (bearer): creates the hub app user the team gate needs. Recorded per owner on 2xx.
+  @discardableResult
+  public func registerHubSession() -> Bool {
+    guard let b = bearer, let sub = ownerSub else { return false }
+    let r = hub.send(HubRequest(method: "POST", path: Self.hubSessionPath, query: nil,
+                                headers: ["authorization": "Bearer \(b)", "content-type": "application/json"], body: "{}"),
+                     timeout: Self.hubTimeout)
+    guard case .response(let s, let d) = r else {
+      CoreLog.append("hub-session", [("result", "unreachable")], logsDir: state.paths.logsDir)
+      return false
+    }
+    let ok = (200..<300).contains(s)
+    CoreLog.append("hub-session", [("status", String(s)), ("result", ok ? "ok" : HubEnvelope.errorCode(s, d))], logsDir: state.paths.logsDir)
+    if ok { try? BridgeState.writePrivate(state.paths.hubSessionPath, sub + "\n") }
+    return ok
+  }
+
+  /// Core startup: an owner with no recorded hub session (signed in on 0.2.3 or earlier) gets one.
+  public func ensureHubSession() {
+    guard ownerSub != nil, !hubSessionRecorded else { return }
+    registerHubSession()
   }
 
   // MARK: plan
@@ -222,24 +259,43 @@ public final class BridgeSession {
       let c = HubTunnelClient(transport: hub, clock: clock, key: key)
       tunnelState = (try? PhoneAccess(state: state, coordinator: coordinator).turnOn(client: c, port: port, bearer: b)) ?? .failed("io")
       if case .limit = tunnelState { lastSnapshot = EntitlementSnapshot(enforced: true, tunnelAllowed: false) }
+      // The hub handed this tunnel back: a delete queued for it (0.2.3 queued one on every OFF) would kill it.
+      if case .ready(let id, _) = tunnelState, let n = try? queue.drop(tunnelId: id), n > 0 {
+        CoreLog.append("tunnel-delete", [("dropped", String(n)), ("id", CoreLog.idPrefix(id))], logsDir: state.paths.logsDir)
+      }
       return tunnelState
     }
+    // OFF only stops the tunnel agent: tunnel-token, last-tunnel and the hostname stay, so ON gets the same tunnel
+    // back. The hub tunnel is deleted only on Sign Out or an owner change (OwnerChange).
     try? agents.unregister(.tunnel)
     try? state.setPhoneAccess(false)
-    if let sub = ownerSub, let last = state.readLastTunnel() {
-      let now = clock.now()
-      try? queue.append(PendingTunnelDelete(ownerSub: sub, epoch: owner.readOwner().ownerEpoch, tunnelId: last.id,
-                                            hostname: last.hostname, at: now, nextAttempt: now, inFlight: false))
-      try? queue.process()
-    }
+    CoreLog.append("agent-stop", [("agent", "tunnel"), ("reason", "phone_access_off")], logsDir: state.paths.logsDir)
     tunnelState = nil
     return nil
   }
 
-  /// One core pass: delete queue, token refresh, plan re-check, checkout poll.
+  /// Core: cloudflared logging 'Tunnel not found' (hub deleted the tunnel under it) re-ensures once per token.
+  public func checkTunnelLog(port: Int) {
+    guard state.phoneAccessOn, bearer != nil, let tok = state.readTunnelToken(), notFoundHandledFor != tok,
+          let h = FileHandle(forReadingAtPath: state.paths.tunnelLogPath) else { return }
+    defer { try? h.close() }
+    let end = (try? h.seekToEnd()) ?? 0
+    if end < tunnelLogOffset { tunnelLogOffset = 0 }
+    let from = max(tunnelLogOffset, end > 65536 ? end - 65536 : 0)
+    try? h.seek(toOffset: from)
+    let text = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
+    tunnelLogOffset = end
+    guard text.contains("Tunnel not found") else { return }
+    notFoundHandledFor = tok
+    CoreLog.append("tunnel-not-found", [("action", "re_ensure")], logsDir: state.paths.logsDir)
+    _ = setPhoneAccess(true, port: port)
+  }
+
+  /// One core pass: delete queue, token refresh, tunnel log check, plan re-check, checkout poll.
   public func coreTick(port: Int, tokenEndpoint: String?) {
     try? queue.process()
     refreshIfNeeded(tokenEndpoint: tokenEndpoint)
+    checkTunnelLog(port: port)
     planRecheck(port: port)
     poller.tick(currentOwner: ownerSub) { readEntitlement(for: $0)?.plan }
   }

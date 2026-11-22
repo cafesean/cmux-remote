@@ -100,6 +100,23 @@ public enum SignInLog {
   }
 }
 
+/// One line per Bridge step in logs/core.log (tunnel ensure, agent restarts, pairing, hub session).
+/// Values are sanitized codes (letters, digits, . _ -; 64 max): never tokens or pairing codes.
+public enum CoreLog {
+  public static func line(_ event: String, _ fields: [(String, String?)], at: Date = Date()) -> String {
+    var s = "\(ISO8601DateFormatter().string(from: at)) \(event)"
+    for (k, v) in fields { if let v { s += " \(k)=\(SignInFailure.safeCode(v) ?? "unknown")" } }
+    return s + "\n"
+  }
+
+  public static func append(_ event: String, _ fields: [(String, String?)], logsDir: String) {
+    SignInLog.append(line(event, fields), logsDir: logsDir)
+  }
+
+  /// First 8 characters of a tunnel id (enough to match the hub row, not the whole id).
+  public static func idPrefix(_ id: String?) -> String? { id.map { String($0.prefix(8)) } }
+}
+
 public enum ConnectAuth {
   public static func verifier() -> String { InstallKeySigner.b64url(Data((0..<32).map { _ in UInt8.random(in: 0...255) })) }
   public static func challenge(_ verifier: String) -> String { InstallKeySigner.b64url(Data(SHA256.hash(data: Data(verifier.utf8)))) }

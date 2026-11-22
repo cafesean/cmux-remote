@@ -27,6 +27,11 @@ public struct BridgePaths: Sendable {
   public var lastRunVersionPath: String { stateDir + "/last-run-version" }
   public var phoneAccessPath: String { stateDir + "/phone-access" }
   public var coreStatusPath: String { stateDir + "/core-status.json" }
+  /// The owner sub whose hub app session (POST /apps/hyprmux/session) succeeded.
+  public var hubSessionPath: String { stateDir + "/hub-session" }
+  public var tunnelLogPath: String { logsDir + "/tunnel.log" }
+  public var ensureLockPath: String { stateDir + "/ensure.lock" }
+  public var ensureGenPath: String { stateDir + "/ensure-gen" }
 }
 
 public struct BridgeState: Sendable {
@@ -97,6 +102,8 @@ public struct BridgeState: Sendable {
     guard !token.contains("\n") else { throw BridgeError.io("newline") }
     try Self.writePrivate(paths.tunnelTokenPath, token)
   }
+
+  public func readTunnelToken() -> String? { try? String(contentsOfFile: paths.tunnelTokenPath, encoding: .utf8) }
 
   public var phoneAccessOn: Bool { fm.fileExists(atPath: paths.phoneAccessPath) }
 
