@@ -203,5 +203,5 @@ test('a 5 MiB body through Readable.fromWeb(res.body) lands intact', async () =>
 test('source scan: built-ins plus ./unix-listen only', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'unix-fetch.js'), 'utf8');
   const reqs = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]).sort();
-  assert.deepEqual(reqs, ['./unix-listen', 'http', 'stream']);
+  assert.deepEqual(reqs, ['./unix-listen', 'http', 'https', 'stream']);
 });
