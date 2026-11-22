@@ -3,7 +3,7 @@ import Foundation
 /// The menu bar menu as data: BridgeState-derived input -> items. main.swift only renders it.
 public enum MenuAction: Equatable, Sendable {
   case signIn, connectDevice, devices, toggleRemoteAccess, upgrade, managePlan, signOut, quit, openNotice
-  case restart, openLogs, stopBridge
+  case restart, openLogs, stopBridge, checkUpdate
 }
 
 public indirect enum MenuItem: Equatable, Sendable {
@@ -88,7 +88,8 @@ public enum MenuModel {
     out.append(.separator)
     if i.optionHeld {
       out += [.info("Troubleshooting"), .action("Restart", .restart), .action("Open Logs", .openLogs),
-              .action("Stop Bridge", .stopBridge), .info("Version \(i.version)"), .separator]
+              .action("Stop Bridge", .stopBridge), .action("Check for Update", .checkUpdate),
+              .info("Version \(i.version)"), .separator]
     }
     out.append(.action("Quit HyprMux Bridge", .quit))
     return out

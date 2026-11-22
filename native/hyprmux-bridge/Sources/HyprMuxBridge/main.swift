@@ -79,6 +79,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
   var statusText = "Starting"
   var noticeText: String?
   var coreNoticeURL: URL?
+  var updateText: String?
   var timer: Timer?
 
   override init() {
@@ -203,6 +204,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
       }
       if s.queue.hasPending { problems.append(TunnelDeleteQueue.pendingText) }
     }
+    if let u = updateText { problems.append(u) }
     let core = MenuNotice.from(CoreStatus.read(from: paths.coreStatusPath), bundleVersion: bundleVersion)
     coreNoticeURL = core?.url
     return MenuInput(status: statusText, hostname: state.phoneAccessOn ? state.readLastTunnel()?.hostname : nil,
@@ -233,6 +235,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     case .openNotice: openCoreNotice()
     case .managePlan: if let u = session?.manageURL { NSWorkspace.shared.open(u) }
     case .stopBridge: stopBridge()
+    case .checkUpdate: checkUpdate()
     }
   }
 
@@ -458,6 +461,15 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
   @objc func restart() { _ = coordinator.reregisterRequired(); poll() }
   @objc func openLogs() { NSWorkspace.shared.open(URL(fileURLWithPath: paths.logsDir)) }
   @objc func quit() { NSApp.terminate(nil) }
+
+  /// Troubleshooting (Option held): manual update check; the result shows as one line until the next check.
+  @objc func checkUpdate() {
+    switch UpdateCheck.evaluate(UpdateCheck.fetch(), current: bundleVersion) {
+    case .available(_, let url): NSWorkspace.shared.open(url); updateText = nil
+    case .upToDate: updateText = "Up to date"
+    case .couldNotCheck: updateText = UpdateCheck.couldNotCheckText
+    }
+  }
   /// Troubleshooting (Option held): unregister every agent until the next launch or Restart.
   @objc func stopBridge() { timer?.invalidate(); coordinator.unregisterAll(); statusText = "Stopped"; updateButton() }
 }

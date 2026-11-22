@@ -132,7 +132,7 @@ final class HubTests: XCTestCase {
     let url = ConnectAuth.authorizeURL(c, verifier: v, state: "s1")!.absoluteString
     XCTAssertTrue(url.contains("redirect_uri=hyprmux-bridge://oidc-callback"))
     XCTAssertTrue(url.contains("code_challenge_method=S256"))
-    XCTAssertTrue(url.contains("scope=openid%20offline_access%20hub:app"), url)
+    XCTAssertTrue(url.contains("scope=openid%20email%20offline_access%20hub:app"), url)
     XCTAssertTrue(url.contains("prompt=consent"), url)
     XCTAssertTrue(url.contains("resource=https://hub.appmatic.io/api"), url)
     let r = ConnectAuth.code(fromCallback: URL(string: "hyprmux-bridge://oidc-callback?error=redirect_uri_mismatch&state=s1"), expectedState: "s1")
