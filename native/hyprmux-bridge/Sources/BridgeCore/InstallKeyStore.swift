@@ -8,6 +8,7 @@ import Security
 public protocol KeychainStore: AnyObject {
   func read(service: String, account: String) throws -> Data?
   func write(service: String, account: String, data: Data) throws
+  func delete(service: String, account: String) throws
 }
 
 /// The Bridge's own per-install Ed25519 key. Lives only in the Keychain; any key file left by
@@ -62,6 +63,11 @@ public final class LoginKeychain: KeychainStore {
       st = SecItemAdd(add as CFDictionary, nil)
     }
     guard st == errSecSuccess else { throw BridgeError.io("keychain write \(st)") }
+  }
+
+  public func delete(service: String, account: String) throws {
+    let st = SecItemDelete(base(service, account) as CFDictionary)
+    guard st == errSecSuccess || st == errSecItemNotFound else { throw BridgeError.io("keychain delete \(st)") }
   }
 }
 #endif

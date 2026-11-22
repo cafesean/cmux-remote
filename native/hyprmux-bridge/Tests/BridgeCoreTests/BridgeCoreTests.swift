@@ -30,6 +30,7 @@ final class FakeKeychain: KeychainStore {
   var reads = 0
   func read(service: String, account: String) throws -> Data? { reads += 1; return items[service + "/" + account] }
   func write(service: String, account: String, data: Data) throws { items[service + "/" + account] = data }
+  func delete(service: String, account: String) throws { items[service + "/" + account] = nil }
 }
 
 final class FakeClock: BridgeClock {

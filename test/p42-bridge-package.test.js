@@ -87,3 +87,13 @@ test('Bridge has no auto-install code (no Sparkle, no installer launch, no write
 test('package.json version is the Bridge 0.2.x line', () => {
   assert.match(require('../package.json').version, /^0\.2\.\d+$/);
 });
+
+test('Connect refresh token is kept only in the Keychain store (never written to a file, never logged)', () => {
+  const dir = path.join(ROOT, 'native', 'hyprmux-bridge', 'Sources');
+  const src = fs.readdirSync(dir, { recursive: true }).filter((f) => f.endsWith('.swift'))
+    .map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+  for (const line of src.split('\n')) {
+    if (/writePrivate\(|createFile\(|\.write\(to:|print\(|NSLog\(/.test(line)) assert.doesNotMatch(line, /refresh/i, line);
+  }
+  assert.match(src, /keychain\.write\(service: InstallKeyStore\.service, account: Self\.refreshAccount/);
+});
