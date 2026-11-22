@@ -49,7 +49,7 @@ function setup(o = {}) {
   const b = stubBridge(o);
   const pol = o.policy === null ? null : (o.policy || policy(o.state || { plan: 'pro' }));
   const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: (id) => (id === 'm1' ? { id: 'm1' } : null),
-    accept: () => null, refuse: () => {}, policy: pol, bridge: b.api, kbps: () => o.kbps || 100000, limits: o.limits });
+    accept: () => null, refuse: () => {}, policy: pol, bridge: b.api, kbps: () => o.kbps || 100000, limits: o.limits, log: o.log || (() => {}) });
   return { b, sw };
 }
 const HELLO = { t: 'hello', v: 1, codecs: ['h264'], maxW: 1920, maxH: 1080, maxFps: 60, clientTs: 1 };
@@ -340,7 +340,7 @@ test('a grant held past GRANT_WARN_MS logs a warning; past GRANT_FAIL_MS -> erro
   const logs = [];
   const b = stubBridge({ noStart: true });
   const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: () => ({ id: 'm1' }), accept: () => null, refuse: () => {},
-    policy: null, bridge: b.api, kbps: () => 100000, log: (m) => logs.push(m), limits: { GRANT_WARN_MS: 20, GRANT_FAIL_MS: 60 } });
+    policy: null, bridge: b.api, kbps: () => 100000, log: (m) => { if (!/^screen-ws: rate /.test(m)) logs.push(m); }, limits: { GRANT_WARN_MS: 20, GRANT_FAIL_MS: 60 } });
   const { ws } = await open(sw);
   ws.msg({ t: 'ready', gen: 1 });
   await wait(35);
@@ -357,7 +357,7 @@ test('helper start in time clears the held-grant timers (no warning, no close)',
   const logs = [];
   const b = stubBridge({ noStart: true });
   const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: () => ({ id: 'm1' }), accept: () => null, refuse: () => {},
-    policy: null, bridge: b.api, kbps: () => 100000, log: (m) => logs.push(m), limits: { GRANT_WARN_MS: 20, GRANT_FAIL_MS: 40 } });
+    policy: null, bridge: b.api, kbps: () => 100000, log: (m) => { if (!/^screen-ws: rate /.test(m)) logs.push(m); }, limits: { GRANT_WARN_MS: 20, GRANT_FAIL_MS: 40 } });
   const { ws } = await open(sw);
   ws.msg({ t: 'ready', gen: 1 }); await tick();
   b.push(pkt({ type: 5, gen: 1 }, JSON.stringify({ kind: 'ready' }))); await tick();
@@ -385,6 +385,16 @@ test('controller: client Stats with drops > 10 % -> one step down: Rate text + h
   assert.deepStrictEqual(b.ops.filter((o) => o.op === 'rate').at(-1), { op: 'rate', gen: 1, kbps: 2800, fps: 30, w: 1280, h: 800 });
   s.rateTick();
   assert.strictEqual(ws.texts('rate').length, 1, 'no Rate without a step');
+});
+
+test('every rate step is logged (kbps fps size reason) for server.log', async () => {
+  const logs = [];
+  const { sw } = setup({ log: (m) => logs.push(m) });
+  const { ws, s } = await open(sw);
+  assert.match(logs.find((l) => /rate .*reason=start/.test(l)) || '', /screen-ws: rate 4000 kbps 30 fps 1280x800 reason=start native=1280x800 client=1920x1080/);
+  ws.msg({ t: 'stats', fps: 10, dropped: 10, decodeMsP50: 3, decodeMsP95: 5, rxKbps: 900, g2gMsP50: 80 });
+  s.rateTick();
+  assert.match(logs.at(-1), /^screen-ws: rate 2800 kbps 30 fps 1280x800 reason=congested gen=1 oversizedIdr=0$/);
 });
 
 test('controller: client g2gMsP50 above 1.5x its 10 s minimum is congestion', async () => {

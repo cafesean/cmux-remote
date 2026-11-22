@@ -53,7 +53,7 @@ test('the RTT minimum is a 10 s window: an old low sample expires', () => {
   adv(RATE.TICK_MS); rc.noteAckRtt(100); assert.strictEqual(rc.tick(), null, 'min is now 100');
 });
 
-test('clean 3 s: bitrate x1.1 up to the cap; then fps up; then resolution up (IDR)', () => {
+test('clean 3 s: bitrate x1.1 up to the cap; then fps up; resolution is restored first (IDR)', () => {
   const { rc, adv } = ctl();
   assert.deepStrictEqual(clean(rc, adv, 2500), [], 'nothing before 3 s clean');
   const [up] = clean(rc, adv, 500);
@@ -64,8 +64,10 @@ test('clean 3 s: bitrate x1.1 up to the cap; then fps up; then resolution up (ID
   assert.strictEqual(rc.rate().fps, 60, 'fps up after the 30 fps cap');
   const d = ctl(); d.rc.downscale();
   assert.strictEqual(d.rc.rate().w, 1440);
+  const [r1] = clean(d.rc, d.adv, 3000);
+  assert.strictEqual(r1.w, 1920, 'resolution back up first'); assert.strictEqual(r1.idr, true);
   clean(d.rc, d.adv, 3000 * 40);
-  assert.strictEqual(d.rc.rate().w, 1920, 'resolution back up last');
+  assert.strictEqual(d.rc.rate().w, 1920);
   assert.strictEqual(d.rc.rate().fps, 60);
   assert.strictEqual(d.rc.rate().kbps, 20000, 'cap 20 Mbps at 60 fps');
 });
@@ -92,4 +94,47 @@ test('downscale: x0.75 then x0.56 of the client size', () => {
   assert.strictEqual(rc.downscale().w, 1440);
   assert.strictEqual(rc.downscale().w, 1080);
   assert.strictEqual(rc.rate().h, 676, 'even sizes for the encoder');
+});
+
+// Sharpness regressions: a stream that stepped resolution down must get it back once the network is clean.
+const congest = (rc, adv) => { adv(RATE.TICK_MS); rc.onStats({ fps: 20, dropped: 5 }); return rc.tick(); };
+
+test('after congestion clears the controller returns to full resolution within N clean ticks', () => {
+  const { rc, adv } = ctl();
+  for (let i = 0; i < 200 && rc.resSteps < 2; i++) congest(rc, adv);
+  assert.strictEqual(rc.resSteps, 2, 'two resolution steps down');
+  assert.strictEqual(rc.rate().w, 1080);
+  const perStep = RATE.CLEAN_MS / RATE.TICK_MS;
+  let ticks = 0;
+  while (rc.rate().w !== 1920 && ticks < perStep * 2) { clean(rc, adv, RATE.TICK_MS); ticks++; }
+  assert.strictEqual(rc.rate().w, 1920, 'full size back after ' + ticks + ' clean ticks');
+  assert.ok(ticks <= perStep * 2, 'within one clean window per resolution step');
+  assert.strictEqual(rc.rate().h, 1200);
+});
+
+test('oversize IDR downscale is not sticky: the next clean window restores the size', () => {
+  const { rc, adv } = ctl();
+  rc.downscale(); rc.downscale();
+  assert.strictEqual(rc.rate().w, 1080);
+  clean(rc, adv, 6000);
+  assert.strictEqual(rc.rate().w, 1440, 'x0.75 back once the (6 s) hold of the second step ends');
+  clean(rc, adv, 3000);
+  assert.strictEqual(rc.rate().w, 1920, 'next clean window: full size');
+});
+
+test('repeated oversize IDRs back off the size restore (no IDR churn), capped at 30 s', () => {
+  const { rc, adv } = ctl();
+  rc.downscale(); clean(rc, adv, 3000); assert.strictEqual(rc.resSteps, 0);
+  rc.downscale(); clean(rc, adv, 3000); assert.strictEqual(rc.resSteps, 1, 'second oversize within 60 s holds 6 s');
+  clean(rc, adv, 3000); assert.strictEqual(rc.resSteps, 0);
+  for (let i = 0; i < 6; i++) rc.downscale();
+  clean(rc, adv, 29500); assert.ok(rc.resSteps > 0, 'held');
+  clean(rc, adv, 3000 * 8); assert.strictEqual(rc.resSteps, 0, 'hold capped at 30 s');
+});
+
+test('latency jitter within 20 ms of the minimum is clean (a fast link never looks congested)', () => {
+  const { rc, adv } = ctl();
+  rc.onStats({ fps: 30, dropped: 0, rttMs: 8 }); adv(RATE.TICK_MS); rc.tick();
+  for (let i = 0; i < 6; i++) { rc.onStats({ fps: 30, dropped: 0, rttMs: 24 }); adv(RATE.TICK_MS); const st = rc.tick(); assert.ok(!st || st.reason === 'clean', '3x but +16 ms: clean'); }
+  assert.strictEqual(rc.rate().kbps, 4400, 'stepped up after 3 s');
 });
