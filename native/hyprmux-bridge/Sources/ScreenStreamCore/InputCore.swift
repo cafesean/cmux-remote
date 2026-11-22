@@ -11,10 +11,16 @@ public enum MouseKind: UInt32, Equatable {
 
 public enum MouseButton: UInt32, Equatable { case left = 0, right = 1 }
 
+/// kCGMouseEventDeltaX / DeltaY of a dragged event (points moved since the last posted pointer event).
+public struct MouseDelta: Equatable {
+  public var dx: Double, dy: Double
+  public init(dx: Double, dy: Double) { self.dx = dx; self.dy = dy }
+}
+
 /// One step the helper performs, in order.
 public enum EventStep: Equatable {
-  /// CGEventCreateMouseEvent(type, point, button); clickState set when non-nil.
-  case mouse(MouseKind, x: Double, y: Double, button: MouseButton, clickState: Int?)
+  /// CGEventCreateMouseEvent(type, point, button); clickState and delta set when non-nil.
+  case mouse(MouseKind, x: Double, y: Double, button: MouseButton, clickState: Int?, delta: MouseDelta? = nil)
   /// CGEventCreateScrollWheelEvent(pixel units, wheelCount 2, wheel1, wheel2).
   case scroll(wheel1: Int32, wheel2: Int32)
   /// CGEventCreateKeyboardEvent(keycode, down) + CGEventSetFlags(flags).
@@ -126,12 +132,15 @@ public struct InputItem: Equatable {
 
 /// Consecutive moves (same kind) collapse to the last one; everything else keeps its place and order.
 public enum Coalesce {
-  public static func moves(_ items: [InputItem]) -> [InputItem] {
-    var out: [InputItem] = []
+  public static func moves(_ items: [InputItem]) -> [InputItem] { groups(items).map(\.item) }
+
+  /// Each kept item with the items it superseded (in order), so their seqs can be acked as posted.
+  public static func groups(_ items: [InputItem]) -> [(item: InputItem, superseded: [InputItem])] {
+    var out: [(item: InputItem, superseded: [InputItem])] = []
     for it in items {
-      if it.isMove, let last = out.last, last.isMove, last.type == it.type, last.epoch == it.epoch, last.gen == it.gen {
-        out[out.count - 1] = it
-      } else { out.append(it) }
+      if it.isMove, let last = out.last?.item, last.isMove, last.type == it.type, last.epoch == it.epoch, last.gen == it.gen {
+        out[out.count - 1] = (it, out[out.count - 1].superseded + [last])
+      } else { out.append((it, [])) }
     }
     return out
   }
@@ -161,7 +170,7 @@ public enum InputPlanner {
     return DisplayMap.inputPoint(fx: fx, fy: fy, in: d)
   }
 
-  // JXA ptr(): one raw left-button event; down is preceded by a move; down/up carry clickState 1.
+  // JXA ptr(): one raw left-button event; down is preceded by a move; down/drag/up carry clickState 1.
   static func pointer(_ it: InputItem, _ d: DisplayGeometry?, _ leftHeld: Bool) -> Result<[EventStep], PlanError> {
     guard let d else { return .failure(.nodisplay) }
     guard let p = point(it, d) else { return .failure(.badcoords) }
@@ -175,7 +184,8 @@ public enum InputPlanner {
     }
     var s: [EventStep] = []
     if kind == .leftDown { s.append(.mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil)) }
-    s.append(.mouse(kind, x: p.x, y: p.y, button: .left, clickState: kind == .leftDown || kind == .leftUp ? 1 : nil))
+    // down/dragged/up carry clickState 1 (the engine fills a dragged event's delta from the last posted point).
+    s.append(.mouse(kind, x: p.x, y: p.y, button: .left, clickState: kind == .moved ? nil : 1))
     return .success(s)
   }
 
@@ -258,7 +268,7 @@ public struct HeldSet {
   /// Record one posted step.
   public mutating func observe(_ s: EventStep, epoch: UInt32, now: UInt64) {
     switch s {
-    case let .mouse(kind, x, y, button, _):
+    case let .mouse(kind, x, y, button, _, _):
       lastX = x; lastY = y
       switch kind {
       case .leftDown, .rightDown: held[.button(button)] = HeldEntry(epoch: epoch, lastEventUs: now, x: x, y: y)
@@ -304,6 +314,8 @@ public struct HeldSet {
 
 public enum InputRecord: Equatable {
   case posted(epoch: UInt32, seq: UInt32)
+  /// A move/drag superseded by a later one in the same batch: never posted itself, acked so the client drains.
+  case coalesced(epoch: UInt32, seq: UInt32)
   case failed(epoch: UInt32, seq: UInt32?, why: String)
   case released(epoch: UInt32)
   case watchdog(epoch: UInt32, what: String)
@@ -311,6 +323,7 @@ public enum InputRecord: Equatable {
   public var json: [String: Any] {
     switch self {
     case let .posted(e, s): return ["kind": "posted", "epoch": e, "seq": s]
+    case let .coalesced(e, s): return ["kind": "posted", "epoch": e, "seq": s, "coalesced": true]
     case let .failed(e, s, w): var o: [String: Any] = ["kind": "failed", "epoch": e, "why": w]; if let s { o["seq"] = s }; return o
     case let .released(e): return ["kind": "released", "epoch": e]
     case let .watchdog(e, w): return ["kind": "watchdog_up", "epoch": e, "what": w]
@@ -351,15 +364,19 @@ public struct InputEngine {
   /// One batch, in order (consecutive moves coalesced first).
   public mutating func run(_ items: [InputItem], _ env: Env) -> [InputRecord] {
     var out: [InputRecord] = []
-    for it in Coalesce.moves(items) {
+    for (it, superseded) in Coalesce.groups(items) {
+      for x in superseded { out.append(.coalesced(epoch: x.epoch, seq: x.seq)) }
       guard admit(it) else { out.append(.failed(epoch: it.epoch, seq: it.seq, why: "stale")); continue }
       guard env.axTrusted() else { out.append(.failed(epoch: it.epoch, seq: it.seq, why: "noax")); continue }
       switch InputPlanner.plan(it, display: env.display(), secureInput: env.secureInput(), leftHeld: held.contains(.button(.left))) {
       case let .failure(e): out.append(.failed(epoch: it.epoch, seq: it.seq, why: e.rawValue))
       case let .success(steps):
         var ok = true
-        for s in steps {
+        for var s in steps {
           if case .pause = s { _ = env.post(s); continue }
+          if case let .mouse(.leftDragged, x, y, b, c, nil) = s {
+            s = .mouse(.leftDragged, x: x, y: y, button: b, clickState: c, delta: MouseDelta(dx: x - held.lastX, dy: y - held.lastY))
+          }
           guard env.post(s) else { ok = false; break }
           held.observe(s, epoch: it.epoch, now: env.now())
         }
