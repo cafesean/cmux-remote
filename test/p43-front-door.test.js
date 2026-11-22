@@ -213,6 +213,7 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
       s.on('close', () => resolve(buf));
     });
     assert.ok(!/HTTP\/1\.1 101/.test(r), 'second-request upgrade got 101');
+    assert.ok(/HTTP\/1\.1 404/.test(r), 'second-request upgrade got no 404: ' + JSON.stringify(r));
   });
 
   await t.test('WS handshake: 101 on the screen path, 404 elsewhere; echo round-trips', async () => {
@@ -226,6 +227,13 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
       r.on('upgrade', () => resolve(101)); r.on('error', () => resolve('error')); r.end();
     });
     assert.strictEqual(raw, 404);
+    // The same refusal on a fresh connection (routed by the front door's first-head check, not node).
+    const fresh = await new Promise((resolve) => {
+      const r = http.request({ host: '127.0.0.1', port: bun.port, path: '/api/cmux/other/ws', agent: false, headers: { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } });
+      r.on('response', (res) => { resolve(res.statusCode); res.resume(); });
+      r.on('upgrade', () => resolve(101)); r.on('error', () => resolve('error')); r.end();
+    });
+    assert.strictEqual(fresh, 404);
   });
 
   await t.test('SSE client disconnect closes the node side (upstream sees it) within 1 s', async () => {
