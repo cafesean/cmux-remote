@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- HyprMux Bridge: hyprmux-runtime (bun build with compile). Only the JIT entitlements JavaScriptCore needs.
+     No dyld environment variables and library validation stays on (security review 2026-11-06 P1):
+     this binary holds every HyprMux secret, so nothing may inject code into it. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+</dict>
+</plist>
