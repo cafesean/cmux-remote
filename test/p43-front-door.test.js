@@ -263,7 +263,7 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
     assert.strictEqual(ha.status, hb.status, 'HEAD parity');
   });
 
-  await t.test('50 MB download through the front door with bounded RSS (slow reader)', async () => {
+  await t.test('50 MB download through the front door with bounded RSS (slow reader)', async (t3) => {
     const tk = await ticket(bun.port, 'big');
     const base = rss(bun.child.pid); let peak = base;
     const got = await new Promise((resolve, reject) => {
@@ -281,6 +281,7 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
     });
     assert.strictEqual(got.status, 200);
     assert.strictEqual(got.n, BIG);
+    t3.diagnostic(`rss base ${(base / 1048576).toFixed(1)} MB, peak ${(peak / 1048576).toFixed(1)} MB`);
     assert.ok(peak - base < 64 * 1024 * 1024, `front door RSS grew ${((peak - base) / 1048576).toFixed(1)} MB for a 50 MB file`);
   });
 
