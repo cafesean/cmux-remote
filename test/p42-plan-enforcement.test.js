@@ -439,3 +439,35 @@ test('credential change closes sessions at once: revoke and same-hubDeviceId rep
   assert.strictEqual(pr.revoke(a.id), true);
   assert.strictEqual(closed, true);
 });
+
+test('server.js R9: Free with the local machine NOT first: lists show local only; body-field, ?machine= and /api/sessions?machine= of the remote -> 402 machines; /api/sessions omits it', async (t) => {
+  const lan = Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === 'IPv4' && !i.internal);
+  if (!lan) return t.skip('no LAN IPv4');
+  const hub = await listen((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url.endsWith('/entitlement')) return res.end(JSON.stringify({ enforced: true, entitlement: { plan: 'free', limits: { maxMachines: 1, maxDevices: 1, remoteDesktop: 'view' } } }));
+    return res.end(JSON.stringify({ devices: [] }));
+  });
+  const seen = [];
+  const br = await new Promise((r) => { const sv = http.createServer((req, res) => { seen.push(req.url); res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(req.url.startsWith('/cmux/sessions') ? JSON.stringify({ machineId: 'b-' + req.headers.host, sessions: [{ id: 'b-' + req.headers.host + ':s1' }] }) : '{}'); });
+  sv.listen(0, '0.0.0.0', () => r(sv)); });
+  const port = br.address().port;
+  const d = dir(); signIn(d);
+  const s = await bootServer({ env: { SERVER_TOKEN: 'tok', HMX_PLAN_STATE_DIR: d, HMX_HUB_URL: `http://127.0.0.1:${hub.address().port}`,
+    CMUX_MACHINES: JSON.stringify([{ id: 'remote', label: 'R', baseUrl: `http://${lan.address}:${port}`, secret: 'sb' }, { id: 'local', label: 'L', baseUrl: `http://127.0.0.1:${port}`, secret: 'sb' }]) } });
+  const H = { authorization: 'Bearer tok', 'content-type': 'application/json' };
+  try {
+    let r = await fetch(s.base + '/api/cmux/machines', { headers: H });
+    assert.deepStrictEqual((await r.json()).machines.map((m) => m.id), ['local']);
+    r = await fetch(s.base + '/api/cmux/send', { method: 'POST', headers: H, body: JSON.stringify({ machine: 'remote', text: 'x' }) });
+    assert.strictEqual(r.status, 402); assert.strictEqual((await r.json()).details.limit, 'machines');
+    r = await fetch(s.base + '/api/sessions?machine=remote', { headers: H });
+    assert.strictEqual(r.status, 402);
+    r = await fetch(s.base + '/api/sessions', { headers: H });
+    const body = await r.json();
+    assert.deepStrictEqual(body.machines.map((m) => m.id), ['local']);
+    assert.ok(body.sessions.every((x) => x.id.startsWith('b-127.0.0.1')));
+    assert.ok(s.alive());
+  } finally { await s.stop(); hub.close(); br.close(); }
+});

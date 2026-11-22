@@ -172,7 +172,10 @@ if (RADAR_ENABLED && SOCKET_MODE) {
 // BUG2: a registry id first (PWA, unchanged); else the bridge machineId the sessions list reports
 // (the native app sends session.machine) via the map lib/sessions-proxy.js learns. Callers that can
 // miss it await ensureMachine(id) first (readBody / handleApi below).
-const findMachine = (id) => (id ? MACHINES.find((m) => m.id === id) || sessionsProxy.lookup(id) : MACHINES[0]) || null;
+// p42 R9: an omitted id selects the first machine the plan allows (the local one first); pure and sync.
+const findMachine = (id) => (id ? MACHINES.find((m) => m.id === id) || sessionsProxy.lookup(id) : (planPolicy ? visibleMachinesOrdered()[0] : MACHINES[0])) || null;
+const planAllowed = (m) => !planPolicy || !m || planPolicy.allowedMachines(machineOrder()).includes(m.id);
+const machinesRefusal = () => planPolicyLib.planLimit('machines');
 const ensureMachine = async (id) => { if (id && !MACHINES.some((m) => m.id === id)) await sessionsProxy.ensure(id); };
 
 // Cloudflare Access service-token headers, for machines reached over a named tunnel gated by CF Access.
@@ -190,7 +193,7 @@ function upstream(m, pathAndQuery, init) {
 }
 
 // p41 B1: /api/sessions* pass-through (mounted in handleApi next to the completions relay).
-const sessionsProxy = require('./lib/sessions-proxy').createSessionsProxy({ machines: MACHINES, upstream, accessHeaders, findMachine });
+const sessionsProxy = require('./lib/sessions-proxy').createSessionsProxy({ machines: MACHINES, upstream, accessHeaders, findMachine, allowed: (m) => planAllowed(m), refusal: () => machinesRefusal() });
 
 // Fetch a bridge endpoint with its secret (+ CF Access token if set) and a hard timeout.
 // D52: ONE retry when the connect itself was refused (no byte reached the bridge, so no double send;
@@ -358,7 +361,8 @@ const sendQueue = sendQueueLib.createSendQueue({
   },
 });
 
-const readBody = require('./lib/read-body').createReadBody({ ensureMachine, sendJson });
+const readBody = require('./lib/read-body').createReadBody({ ensureMachine, sendJson,
+  checkMachine: async (mid) => { if (!planPolicy) return null; const m = findMachine(mid); return m && !planAllowed(m) ? machinesRefusal() : null; } });
 
 // ---- download tickets -------------------------------------------------------
 // A file download is a NAVIGATION (an <a download> click), and a navigation cannot carry an
@@ -392,6 +396,10 @@ function ticketCredOk(tk) {
 function machineOrder() {
   const lm = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl));
   return lm ? [lm.id, ...MACHINES.filter((m) => m !== lm).map((m) => m.id)] : MACHINES.map((m) => m.id);
+}
+function visibleMachinesOrdered() {
+  const ids = planPolicy ? planPolicy.allowedMachines(machineOrder()) : machineOrder();
+  return ids.map((id) => MACHINES.find((m) => m.id === id)).filter(Boolean);
 }
 function visibleMachines() {
   if (!planPolicy) return MACHINES;
