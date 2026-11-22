@@ -112,3 +112,76 @@ test('D299 fold: two live cmux panes resolving to one sessionId are still two ro
   const aliases = l.sessions.flatMap((s) => s.aliases || []);
   assert.deepEqual(aliases, ['mini:surface:orphan']);
 });
+
+// ---- D299 follow-up: single-row endpoints (thread, stream, rename) use the newest list build's claims ----
+
+function sharedCwd() {
+  const home = mk();
+  const { x, y } = twoTranscripts(home);
+  fs.mkdirSync(path.join(home, '.claude', 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', 'sessions', `${PID}.json`), JSON.stringify({ pid: PID, sessionId: 'sessX', cwd: '/w', startedAt: Date.now() }));
+  const table = procs.parsePs([' 1 0 /sbin/launchd', ` ${PID - 1} 1 -zsh`, ` ${PID} ${PID - 1} claude`].join('\n'));
+  const snap = { table, sessions: [{ socket: '/s', name: 'm-hyprmux-mini-2', attached: 1, epoch: 1, created: 1, surfaceId: 'surface:A', clientPids: [],
+    panes: [{ id: '%1', pid: PID - 1, active: true, cwd: '/w' }] }] };
+  const events = [{ ts: Date.now() - 1000, event: 'Notification', surfaceId: 'surface:B', cwd: '/w' }];
+  const r = createSessionRoutes({ machineId: 'mini', backend: 'cmux', home, listSnapshotMs: 0, joinPollMs: 50, statusPollMs: 60000,
+    sseHead: (res) => res.writeHead(200, { 'content-type': 'text/event-stream' }),
+    loadTree: async () => [
+      { ref: 'workspace:1', title: 'WORKERS', tabs: [{ id: 'surface:A', ref: 'surface:1', title: 'tmux', type: 'terminal' }] },
+      { ref: 'workspace:2', title: 'CHIEF', tabs: [{ id: 'surface:B', ref: 'surface:2', title: 'claude', type: 'terminal' }] },
+    ],
+    readEvents: async () => ({ events, more: false }), procSnapshot: async () => snap });
+  return { home, x, y, r };
+}
+const get = (r, p) => new Promise((resolve) => {
+  let code = 0;
+  r.handle({ method: 'GET', headers: {} }, { writeHead(c) { code = c; }, end: (b) => resolve({ code, json: JSON.parse(b) }) }, new URL('http://x' + p));
+});
+const texts = (j) => (j.messages || []).map((m) => m.text);
+const B_THREAD = `/cmux/sessions/${encodeURIComponent('mini:surface:B')}/thread`;
+
+test('D299 thread: after a list build where A claims X, opening B shows B\'s own transcript, never A\'s', async () => {
+  const { r } = sharedCwd();
+  await list(r);
+  const t = await get(r, B_THREAD);
+  assert.equal(t.code, 200);
+  assert.deepEqual(texts(t.json), ['chief'], `B's thread: ${JSON.stringify(texts(t.json))}`);
+  const a = await get(r, `/cmux/sessions/${encodeURIComponent('mini:surface:A')}/thread`);
+  assert.deepEqual(texts(a.json), ['worker']);
+});
+
+test('D299 thread: with no list build yet, opening B still never shows A\'s transcript (bounded build first)', async () => {
+  const { r } = sharedCwd();
+  const t = await get(r, B_THREAD);
+  assert.equal(t.code, 200);
+  assert.deepEqual(texts(t.json), ['chief'], `B's thread: ${JSON.stringify(texts(t.json))}`);
+});
+
+test('D299 rename: naming pane B keys the name to B\'s session, never A\'s', async () => {
+  const { r, home } = sharedCwd();
+  await list(r);
+  const out = await r.rename({ sessionId: 'mini:surface:B', name: 'Chief' });
+  assert.equal(out.code, 200, JSON.stringify(out.body));
+  const names = JSON.parse(fs.readFileSync(path.join(home, '.cmux-remote', 'session-names.json'), 'utf8'));
+  assert.deepEqual(Object.keys(names), ['sessY']);
+});
+
+test('D299 stream: B\'s thread-stream (and its join poll) tails B\'s transcript, never A\'s', async () => {
+  const { r, x, y } = sharedCwd();
+  await list(r);
+  const frames = [];
+  const handlers = {};
+  const req = { method: 'GET', headers: {}, on: (ev, fn) => { handlers[ev] = fn; } };
+  const res = { writeHead() {}, write: (s) => { const m = /^data: (.*)\n\n$/s.exec(s); if (m) frames.push(JSON.parse(m[1])); }, end() {}, on() {}, headersSent: true };
+  r.handle(req, res, new URL(`http://x/cmux/sessions/${encodeURIComponent('mini:surface:B')}/thread-stream`));
+  try {
+    await new Promise((ok) => setTimeout(ok, 700));
+    fs.appendFileSync(x, row(3, 'x-new'));
+    fs.appendFileSync(y, row(4, 'y-new'));
+    const until = Date.now() + 4000;
+    while (Date.now() < until && !frames.some((f) => f.type === 'msg' && f.msg.text === 'y-new')) await new Promise((ok) => setTimeout(ok, 100));
+    const seen = frames.filter((f) => f.type === 'msg').map((f) => f.msg.text);
+    assert.ok(seen.includes('y-new'), `B's stream: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.includes('x-new') && !seen.includes('worker'), `B's stream carried A's transcript: ${JSON.stringify(seen)}`);
+  } finally { if (handlers.close) handlers.close(); }
+});

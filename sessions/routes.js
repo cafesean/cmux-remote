@@ -57,6 +57,7 @@ const LIMITS = {
   listIdleRefreshMs: 15000,          // D278: while idle the list is still rebuilt this often, so a new client gets it at once
   listWarmStartMs: 3000,             // D278: the first build runs this long after the bridge starts (not on the first GET)
   kindStickyMs: 120000,              // D279: an inconclusive probe keeps a pane's last agent kind (and transcript) this long
+  claimsWaitMs: 4000,                // D299: a single-row read with a cwd-guessed join and no list build yet waits this long for one
   attachmentIndexDigits: 6,           // longest attachment index accepted in /attachment/:n
   ...statusline.LIMITS,               // A12 status-line limits (sessions/statusline.js)
   ...choice.LIMITS,                   // A14 answer-choice limits (sessions/choice.js)
@@ -249,6 +250,48 @@ function createSessionRoutes(deps) {
   async function readMarker(sessionId) {
     if (!sessionId || sessionId.length > LIMITS.markerIdMax || !/^[A-Za-z0-9_-]+$/.test(sessionId)) return null;
     try { return JSON.parse(await fsp.readFile(path.join(home, '.claude', 'needs-you', sessionId), 'utf8')); } catch (_) { return null; }
+  }
+
+  // D299: sessionId -> tab id, for every session a pane holds by its own process or hook event, from the
+  // newest list build. A single-row read (thread, stream, rename...) excludes the sessions OTHER panes hold
+  // from its cwd guess, so opening a pane never shows another pane's transcript in the same cwd.
+  let lastClaims = null;
+  function excludeFor(tabId) {
+    if (!lastClaims) return null;
+    const s = new Set();
+    for (const [sid, t] of lastClaims) if (t !== tabId) s.add(sid);
+    return s.size ? s : null;
+  }
+  function withExclude(d, tabId) {
+    const x = excludeFor(tabId);
+    if (x) d.excludeSessionIds = x; else delete d.excludeSessionIds;
+    return d;
+  }
+  // No build yet: start one (or join the one in flight) and wait at most claimsWaitMs for it.
+  async function ensureClaims() {
+    if (lastClaims) return;
+    let t = null;
+    await Promise.race([rebuildList().catch(() => {}), new Promise((ok) => { t = setTimeout(ok, LIMITS.claimsWaitMs); })]);
+    clearTimeout(t);
+  }
+  // describe() for one row outside a list build.
+  async function describeRow(entry, d, unread) {
+    let r = await describe(entry, withExclude(d, entry.tab.id), unread);
+    if (r.join && r.join.via === 'cwd' && !lastClaims) {
+      await ensureClaims();
+      const x = excludeFor(entry.tab.id);
+      if (x && x.has(r.join.sessionId)) r = await describe(entry, withExclude(d, entry.tab.id), unread);
+    }
+    return r;
+  }
+  async function joinRow(entry, d) {
+    let j = await transcriptFor(joinSurface(entry.tab), withExclude(d, entry.tab.id));
+    if (j && j.via === 'cwd' && !lastClaims) {
+      await ensureClaims();
+      const x = excludeFor(entry.tab.id);
+      if (x && x.has(j.sessionId)) j = await transcriptFor(joinSurface(entry.tab), withExclude(d, entry.tab.id));
+    }
+    return j;
   }
 
   // D279: surface id -> { kind, join, at } of the last conclusive agent answer (see describe).
@@ -485,6 +528,9 @@ function createSessionRoutes(deps) {
       }
     }
     const sessions = results.filter((r) => !folded.has(r)).map((r) => r.session);
+    const claims = new Map();
+    results.forEach((r, i) => { if (r.join && r.join.via !== 'cwd' && !claims.has(r.join.sessionId)) claims.set(r.join.sessionId, tabs[i].tab.id); });
+    lastClaims = claims;
     // p41 D189 (additive): Remote Desktop TCC setup status, so the app can say "needs setup on this Mac".
     let screen = null;
     if (deps.screenStatus) { try { screen = await deps.screenStatus(); } catch (_) { screen = null; } }
@@ -493,7 +539,7 @@ function createSessionRoutes(deps) {
 
   async function thread(res, entry, u) {
     const d = requestDeps();
-    const { session, join } = await describe(entry, d, await unreadFor(entry.tab));
+    const { session, join } = await describeRow(entry, d, await unreadFor(entry.tab));
     if (session.kind === 'codex') return send(res, 200, { title: session.title, messages: [], cursor: null, unsupported: 'codex' });
     const o = join && await safeOpen(join.path);
     if (!o) return send(res, 200, { title: session.title, messages: [], cursor: null });
@@ -518,7 +564,7 @@ function createSessionRoutes(deps) {
 
   async function attachment(res, entry, nRaw) {
     if (!/^\d+$/.test(nRaw) || nRaw.length > LIMITS.attachmentIndexDigits) return send(res, 400, { error: 'bad_index' });
-    const { session, join } = await describe(entry, requestDeps(), null);
+    const { session, join } = await describeRow(entry, requestDeps(), null);
     const o = join && session.kind === 'claude' && await safeOpen(join.path);
     if (!o) return send(res, 404, { error: 'not_found' });
     let a = null;
@@ -562,7 +608,7 @@ function createSessionRoutes(deps) {
     const size = (u && u.searchParams.get('size')) || 'thumb';
     if (size !== 'thumb' && size !== 'full') return send(res, 400, { error: 'bad_size' });
     const root = uploadRoot();
-    const { session, join } = await describe(entry, requestDeps(), null);
+    const { session, join } = await describeRow(entry, requestDeps(), null);
     const o = root && join && session.kind === 'claude' && await safeOpen(join.path);
     if (!o) return send(res, 404, { error: 'not_found' });
     let refs = null;
@@ -614,7 +660,7 @@ function createSessionRoutes(deps) {
     sseHead(res);
     const hb = setInterval(() => { if (!closed) res.write(': hb\n\n'); }, LIMITS.streamHeartbeatMs);
     let first;
-    try { first = await describe(entry, requestDeps(), await unreadFor(entry.tab)); } catch (_) { first = null; }
+    try { first = await describeRow(entry, requestDeps(), await unreadFor(entry.tab)); } catch (_) { first = null; }
     if (closed) return;
     if (first && first.session.kind === 'codex') { emit({ type: 'unsupported', unsupported: 'codex' }); return; }
     if (first) lastStatus = first.session.status;
@@ -633,6 +679,9 @@ function createSessionRoutes(deps) {
       })();
     };
     const every = (fn) => setInterval(fn, joinPollMs);
+    // D299: every poll excludes the sessions other panes hold, as of the newest list build.
+    const joinDeps = { ...liveDeps(), setInterval: every };
+    Object.defineProperty(joinDeps, 'excludeSessionIds', { enumerable: true, get: () => excludeFor(entry.tab.id) || undefined });
     stopJoin = watchJoin(joinSurface(entry.tab), (j) => {
       if (closed) return;
       if (path0 != null && j.path !== path0) emit({ type: 'reset' });
@@ -644,13 +693,13 @@ function createSessionRoutes(deps) {
         return;
       }
       startTail(j.path);
-    }, { ...liveDeps(), setInterval: every });
+    }, joinDeps);
     const statusTick = async () => {
       try {
         const now = await findTab(id);
         if (closed || now === null) return;            // tree read failed: try again next poll
         if (!now) { emit({ type: 'gone' }); res.end(); done(); return; }
-        const { session } = await describe(now, requestDeps(), await unreadFor(now.tab));
+        const { session } = await describeRow(now, requestDeps(), await unreadFor(now.tab));
         if (!closed && session.status !== lastStatus) {
           emit({ type: 'status', status: session.status });
           lastStatus = session.status;
@@ -663,7 +712,7 @@ function createSessionRoutes(deps) {
   // ---- A10 sub-agents ----------------------------------------------------------------------------
   // The session's main transcript, real and checked, or null (not claude / no join / refused).
   async function mainTranscript(entry) {
-    const { session, join } = await describe(entry, requestDeps(), null);
+    const { session, join } = await describeRow(entry, requestDeps(), null);
     if (session.kind !== 'claude' || !join) return { session, path: null };
     const o = await safeOpen(join.path);
     if (!o) return { session, path: null };
@@ -794,7 +843,7 @@ function createSessionRoutes(deps) {
     if (!entry) return { code: 404, body: { error: 'not_found' } };
     const d = requestDeps();
     d.freshChoice = true;
-    const { session } = await describe(entry, d, await unreadFor(entry.tab));
+    const { session } = await describeRow(entry, d, await unreadFor(entry.tab));
     if (form) return choices.commitForm({ current: session.choice || null, choiceId: b.choiceId, answers: b.answers, surface }, io);
     return choices.commit({ current: session.choice || null, choiceId: b.choiceId, index, label: b.label, surface }, io);
   }
@@ -811,11 +860,11 @@ function createSessionRoutes(deps) {
     if (pv) return pv === 'private' ? { code: 423, body: { error: 'private' } } : { code: 503, body: { error: 'gate_unavailable' } };
     const d = requestDeps();
     let join = null;
-    if (entry.tab.type !== 'browser') { try { join = await transcriptFor(joinSurface(entry.tab), d); } catch (_) { join = null; } }
+    if (entry.tab.type !== 'browser') { try { join = await joinRow(entry, d); } catch (_) { join = null; } }
     const r = nameStore.set(nameKey(join, entry.tab), v.name);
     if (!r.ok) return { code: r.error === 'names_full' ? 409 : 400, body: { error: r.error } };
     invalidateList();   // D272: the next list shows the new name, not the snapshot from before it
-    const { session } = await describe(entry, d, await unreadFor(entry.tab));
+    const { session } = await describeRow(entry, d, await unreadFor(entry.tab));
     return { code: 200, body: { ok: true, sessionId: b.sessionId, name: r.name || null, title: session.title } };
   }
 
