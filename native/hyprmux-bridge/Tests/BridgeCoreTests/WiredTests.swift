@@ -7,6 +7,7 @@ final class StubHubProtocol: URLProtocol {
   struct Seen { let method: String; let url: URL; let headers: [String: String]; let body: String }
   nonisolated(unsafe) static var seen: [Seen] = []
   nonisolated(unsafe) static var handler: ((Seen) -> (Int, Any))?
+  nonisolated(unsafe) static var clock: FakeClock?
 
   override class func canInit(with request: URLRequest) -> Bool { true }
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -22,6 +23,11 @@ final class StubHubProtocol: URLProtocol {
                     body: String(decoding: body, as: UTF8.self))
     Self.seen.append(seen)
     let (status, obj) = Self.handler?(seen) ?? (404, [:])
+    if status < 0 { // hub never answers: burn the request timeout on the fake clock, then time out
+      Self.clock?.t += request.timeoutInterval
+      client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+      return
+    }
     let data = (obj as? Data) ?? (try! JSONSerialization.data(withJSONObject: obj))
     client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!,
                         cacheStoragePolicy: .notAllowed)
@@ -31,7 +37,7 @@ final class StubHubProtocol: URLProtocol {
   override func stopLoading() {}
 }
 
-final class WiredTests: XCTestCase {
+class WiredTests: XCTestCase {
   var home = ""
   var state: BridgeState!
   var agents: FakeAgents!
@@ -43,6 +49,7 @@ final class WiredTests: XCTestCase {
   var plan = "free"
   var enforced = true
   var tunnelN = 0
+  var nextSub = "A"
 
   static func jwt(_ sub: String) -> String {
     let p = InstallKeySigner.b64url(try! JSONSerialization.data(withJSONObject: ["sub": sub]))
@@ -59,6 +66,7 @@ final class WiredTests: XCTestCase {
     coord = AgentCoordinator(agents: agents, legacy: LegacyGuard(launchctl: Launchctl(runner: StubRunner(), uid: 501),
                                                                  launchAgentsDir: home + "/none"), state: state)
     clock = FakeClock(); clock.t = 2_000_000
+    StubHubProtocol.clock = clock
     kc = FakeKeychain()
     let cfg = URLSessionConfiguration.ephemeral
     cfg.protocolClasses = [StubHubProtocol.self]
@@ -69,8 +77,8 @@ final class WiredTests: XCTestCase {
       case ("GET", "/.well-known/openid-configuration"):
         return (200, ["authorization_endpoint": "https://auth.example.test/oauth/authorize", "token_endpoint": "https://auth.example.test/oauth/token"])
       case ("POST", "/oauth/token"):
-        if r.body.contains("grant_type=refresh_token") { return (200, ["access_token": Self.jwt("A"), "expires_in": 600]) }
-        return (200, ["access_token": Self.jwt("A"), "refresh_token": "RT-A", "expires_in": 600])
+        if r.body.contains("grant_type=refresh_token") { return (200, ["access_token": Self.jwt(nextSub), "expires_in": 600]) }
+        return (200, ["access_token": Self.jwt(nextSub), "refresh_token": "RT-\(nextSub)", "expires_in": 600])
       case ("POST", "/api/v1/apps/hyprmux/tunnels"):
         tunnelN += 1
         if enforced && plan == "free" && tunnelN == 1 {
@@ -102,10 +110,11 @@ final class WiredTests: XCTestCase {
 
   func calls(_ method: String, _ path: String) -> [StubHubProtocol.Seen] { StubHubProtocol.seen.filter { $0.method == method && $0.url.path == path } }
 
-  func signIn() throws -> BridgeSession.PendingSignIn {
+  func signIn(_ sub: String = "A") throws -> BridgeSession.PendingSignIn {
+    nextSub = sub
     let p = try XCTUnwrap(session.beginSignIn())
     let cb = URL(string: "hyprmux-bridge://oidc-callback?code=c1&state=\(p.state)")
-    XCTAssertEqual(session.completeSignIn(p, callback: cb), .signedIn(ownerSub: "A"))
+    XCTAssertEqual(session.completeSignIn(p, callback: cb), .signedIn(ownerSub: sub))
     return p
   }
 
