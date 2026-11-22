@@ -172,7 +172,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, ASW
         if s.plan != "pro" { add("Upgrade", #selector(upgrade)) }
         add("Sign Out", #selector(signOut))
       } else {
-        add(accountText ?? "Sign In…", #selector(signIn))
+        if let why = accountText { add(why, nil, enabled: false) }
+        add("Sign In…", #selector(signIn))
       }
       if let t = s.tunnelState {
         switch t {
@@ -209,13 +210,23 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, ASW
   @objc func signIn() {
     guard let s = session else { return }
     DispatchQueue.global().async { [weak self] in
-      let pending = s.beginSignIn()
+      let begun = s.beginSignInResult()
       DispatchQueue.main.async {
         guard let self else { return }
-        guard let pending else { self.accountText = SignInState.unavailableText; return }
-        let a = ASWebAuthenticationSession(url: pending.url, callbackURLScheme: "hyprmux-bridge") { url, _ in
+        self.accountText = nil
+        let pending: BridgeSession.PendingSignIn
+        switch begun {
+        case .failure(let f): self.accountText = f.text; return
+        case .success(let p): pending = p
+        }
+        let a = ASWebAuthenticationSession(url: pending.url, callbackURLScheme: "hyprmux-bridge") { url, error in
           DispatchQueue.global().async {
-            if case .signedOut(let m) = s.completeSignIn(pending, callback: url) {
+            if url == nil, let error {
+              let f: SignInFailure = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+                ? .cancelled : .browserError(code: (error as NSError).code)
+              let m = s.signInFailed(f, step: "browser")
+              DispatchQueue.main.async { self.accountText = m }
+            } else if case .signedOut(let m) = s.completeSignIn(pending, callback: url) {
               DispatchQueue.main.async { self.accountText = m }
             } else { _ = s.readEntitlement() }
           }
@@ -223,7 +234,11 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, ASW
         a.presentationContextProvider = self
         a.prefersEphemeralWebBrowserSession = false
         self.authSession = a
-        if !a.start() { self.accountText = SignInState.unavailableText }
+        if a.start() {
+          s.logSignIn("window")
+        } else {
+          self.accountText = s.signInFailed(.windowNotOpened, step: "window")
+        }
       }
     }
   }

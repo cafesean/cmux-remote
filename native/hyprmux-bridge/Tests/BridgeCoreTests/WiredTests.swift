@@ -128,6 +128,10 @@ class WiredTests: XCTestCase {
     XCTAssertEqual(kc.items["com.hyprmux.bridge/connect-refresh"], Data("RT-A".utf8))
     let at = try String(contentsOfFile: state.paths.hubAccessTokenPath, encoding: .utf8)
     XCTAssertFalse(at.contains("RT-A"))
+    // core.log: one line per step, never the verifier, state, code or tokens
+    let log = try String(contentsOfFile: state.paths.logsDir + "/core.log", encoding: .utf8)
+    XCTAssertTrue(log.contains("step=token status=200 result=ok") && log.contains("step=done result=ok"), log)
+    for secret in [p.verifier, p.state, "code=c1", "RT-A", Self.jwt("A")] { XCTAssertFalse(log.contains(secret), secret) }
 
     // phone access: Free at the limit -> limit + upgrade link, no token
     XCTAssertEqual(session.setPhoneAccess(true, port: 4123), .limit(upgradeUrl: "https://hyprmux.com/pricing"))
@@ -180,7 +184,10 @@ class WiredTests: XCTestCase {
   func testWiredAuthorizeErrorAndHiddenSignIn() throws {
     let p = try XCTUnwrap(session.beginSignIn())
     XCTAssertEqual(session.completeSignIn(p, callback: URL(string: "hyprmux-bridge://oidc-callback?error=redirect_uri_mismatch")),
-                   .signedOut(message: SignInState.unavailableText))
+                   .signedOut(message: "Sign-in failed: redirect_uri_mismatch"))
+    let log = try String(contentsOfFile: state.paths.logsDir + "/core.log", encoding: .utf8)
+    XCTAssertTrue(log.contains("sign-in step=discover status=200 result=ok"), log)
+    XCTAssertTrue(log.contains("sign-in step=callback result=redirect_uri_mismatch"), log)
     XCTAssertNil(session.ownerSub)
     XCTAssertEqual(session.setPhoneAccess(true, port: 1), .signInRequired)
     XCTAssertEqual(coord.tick(), .registered([.daemon, .server, .core]))
@@ -188,6 +195,7 @@ class WiredTests: XCTestCase {
                                auth: HTTPHubTransport(base: URL(string: "https://auth.example.test")!), state: state,
                                owner: OwnerFiles(paths: state.paths, keychain: kc), coordinator: coord, agents: agents, clock: clock, key: key)
     XCTAssertNil(hidden.beginSignIn())
+    XCTAssertEqual(hidden.beginSignInResult().map { $0.url }, .failure(.noClientId))
   }
 
   func testWiredFairUseNoUpgrade() throws {

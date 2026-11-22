@@ -18,7 +18,84 @@ public struct ConnectConfig: Equatable, Sendable {
 public enum SignInState: Equatable, Sendable {
   case signedOut(message: String?)
   case signedIn(ownerSub: String)
+  /// Only for a build with no client id; every other failure says what went wrong (SignInFailure.text).
   public static let unavailableText = "Sign-in isn't available yet"
+}
+
+/// Why a sign-in attempt ended signed out. `text` is the menu line; `logCode` goes to core.log.
+public enum SignInFailure: Error, Equatable, Sendable {
+  case noClientId
+  case unreachable                       // OIDC discovery failed
+  case windowNotOpened                   // ASWebAuthenticationSession.start() returned false
+  case cancelled                         // ASWebAuthenticationSessionError.canceledLogin
+  case browserError(code: Int)           // any other ASWebAuthenticationSession error
+  case callbackError(String)             // ?error= on the redirect back
+  case badCallback                       // no callback URL, state mismatch, or no code
+  case token(status: Int?, error: String?) // token exchange not 200 (nil status = no response)
+  case tokenResponse                     // 200 without access token, refresh token or sub
+  case saveFailed                        // owner / Keychain / access-token write failed
+
+  public var text: String {
+    switch self {
+    case .noClientId: return SignInState.unavailableText
+    case .unreachable: return "Couldn't reach sign-in"
+    case .windowNotOpened: return "Couldn't open the sign-in window"
+    case .cancelled: return "Sign-in cancelled"
+    case .browserError(let c): return "Sign-in failed: browser error \(c)"
+    case .callbackError(let e): return "Sign-in failed: \(e)"
+    case .badCallback: return "Sign-in failed: bad callback"
+    case .token(let s, _): return "Sign-in failed: token \(s.map(String.init) ?? "no response")"
+    case .tokenResponse: return "Sign-in failed: token response incomplete"
+    case .saveFailed: return "Sign-in failed: couldn't save the account"
+    }
+  }
+
+  public var logCode: String {
+    switch self {
+    case .noClientId: return "no_client_id"
+    case .unreachable: return "discovery_failed"
+    case .windowNotOpened: return "window_not_opened"
+    case .cancelled: return "cancelled"
+    case .browserError(let c): return "browser_error_\(c)"
+    case .callbackError(let e): return e
+    case .badCallback: return "bad_callback"
+    case .token(let s, let e): return e ?? (s == nil ? "no_response" : "http_error")
+    case .tokenResponse: return "token_response_incomplete"
+    case .saveFailed: return "save_failed"
+    }
+  }
+
+  /// OAuth error codes are short ASCII; anything else (or a value that could carry data) is cut to [A-Za-z0-9._-]{1,64}.
+  public static func safeCode(_ s: String?) -> String? {
+    guard let s else { return nil }
+    let kept = String(String.UnicodeScalarView(s.unicodeScalars.filter {
+      ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || "._-".unicodeScalars.contains($0)
+    }).prefix(64))
+    return kept.isEmpty ? "unknown" : kept
+  }
+}
+
+/// One line per sign-in step in logs/core.log: step, http status, error code. Never tokens, codes or verifiers:
+/// the line builder takes no free text beyond the step name and a sanitized error code.
+public enum SignInLog {
+  public static func line(step: String, status: Int? = nil, error: String? = nil, at: Date) -> String {
+    let f = ISO8601DateFormatter()
+    var s = "\(f.string(from: at)) sign-in step=\(step)"
+    if let status { s += " status=\(status)" }
+    s += " result=" + (SignInFailure.safeCode(error) ?? "ok")
+    return s + "\n"
+  }
+
+  public static func append(_ line: String, logsDir: String) {
+    let fm = FileManager.default
+    try? fm.createDirectory(atPath: logsDir, withIntermediateDirectories: true)
+    let path = logsDir + "/core.log"
+    if !fm.fileExists(atPath: path) { fm.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]) }
+    guard let h = FileHandle(forWritingAtPath: path) else { return }
+    defer { try? h.close() }
+    _ = try? h.seekToEnd()
+    try? h.write(contentsOf: Data(line.utf8))
+  }
 }
 
 public enum ConnectAuth {
@@ -37,20 +114,21 @@ public enum ConnectAuth {
   }
 
   /// Callback handling: any error (incl. redirect_uri_mismatch), state mismatch, or missing code → stay signed out.
-  public static func code(fromCallback url: URL?, expectedState: String) -> Result<String, SignInError> {
-    guard let url, let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return .failure(.unavailable) }
+  public static func code(fromCallback url: URL?, expectedState: String) -> Result<String, SignInFailure> {
+    guard let url, let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return .failure(.badCallback) }
     func q(_ n: String) -> String? { items.first { $0.name == n }?.value }
-    if q("error") != nil { return .failure(.unavailable) }
-    guard q("state") == expectedState, let code = q("code"), !code.isEmpty else { return .failure(.unavailable) }
+    if let e = q("error") { return .failure(.callbackError(SignInFailure.safeCode(e)!)) }
+    guard q("state") == expectedState, let code = q("code"), !code.isEmpty else { return .failure(.badCallback) }
     return .success(code)
   }
 
-  public enum SignInError: Error, Equatable { case unavailable }
+  public typealias SignInError = SignInFailure
 
-  public static func stateAfter(_ r: Result<String, SignInError>, ownerSub: String?) -> SignInState {
+  public static func stateAfter(_ r: Result<String, SignInFailure>, ownerSub: String?) -> SignInState {
     switch r {
     case .success where ownerSub != nil: return .signedIn(ownerSub: ownerSub!)
-    default: return .signedOut(message: SignInState.unavailableText)
+    case .failure(let f): return .signedOut(message: f.text)
+    default: return .signedOut(message: SignInFailure.tokenResponse.text)
     }
   }
 }

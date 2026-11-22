@@ -47,28 +47,50 @@ public final class BridgeSession {
 
   public struct Endpoints: Equatable { public var authorize: String; public var token: String }
 
-  public func discover() -> Endpoints? {
+  public func discover() -> Endpoints? { discoverWithStatus().endpoints }
+
+  func discoverWithStatus() -> (endpoints: Endpoints?, status: Int?) {
     let r = auth.send(HubRequest(method: "GET", path: "/.well-known/openid-configuration", query: nil, headers: [:], body: nil),
                       timeout: Self.hubTimeout)
-    guard case .response(200, let d) = r, let j = HubEnvelope.json(d), let a = j["authorization_endpoint"] as? String,
-          let t = j["token_endpoint"] as? String else { return nil }
-    return Endpoints(authorize: a, token: t)
+    guard case .response(let s, let d) = r else { return (nil, nil) }
+    guard s == 200, let j = HubEnvelope.json(d), let a = j["authorization_endpoint"] as? String,
+          let t = j["token_endpoint"] as? String else { return (nil, s) }
+    return (Endpoints(authorize: a, token: t), s)
+  }
+
+  /// Appends one sign-in step to logs/core.log (step, http status, error code only).
+  public func logSignIn(_ step: String, status: Int? = nil, error: String? = nil) {
+    SignInLog.append(SignInLog.line(step: step, status: status, error: error, at: Date(timeIntervalSince1970: clock.now())),
+                     logsDir: state.paths.logsDir)
+  }
+
+  /// Logs a failure the menu saw (window, cancel, browser error) and returns its menu line.
+  public func signInFailed(_ f: SignInFailure, step: String) -> String {
+    logSignIn(step, error: f.logCode)
+    return f.text
   }
 
   public struct PendingSignIn: Equatable { public let url: URL; public let verifier: String; public let state: String; public let token: String }
 
-  /// nil = sign-in hidden (no client id) or the issuer is unreachable → "Sign-in isn't available yet".
-  public func beginSignIn() -> PendingSignIn? {
-    guard config.signInVisible, let ep = discover() else { return nil }
+  /// nil = sign-in hidden (no client id) or the issuer is unreachable; beginSignInResult says which.
+  public func beginSignIn() -> PendingSignIn? { try? beginSignInResult().get() }
+
+  public func beginSignInResult() -> Result<PendingSignIn, SignInFailure> {
+    guard config.signInVisible else { logSignIn("begin", error: SignInFailure.noClientId.logCode); return .failure(.noClientId) }
+    let (found, status) = discoverWithStatus()
+    guard let ep = found else { logSignIn("discover", status: status, error: SignInFailure.unreachable.logCode); return .failure(.unreachable) }
+    logSignIn("discover", status: status)
     var c = config
     c.issuer = ""
     let v = ConnectAuth.verifier()
     let st = ConnectAuth.verifier()
     guard let base = ConnectAuth.authorizeURL(c, verifier: v, state: st),
-          var comps = URLComponents(string: ep.authorize) else { return nil }
+          var comps = URLComponents(string: ep.authorize) else {
+      logSignIn("authorize_url", error: SignInFailure.unreachable.logCode); return .failure(.unreachable)
+    }
     comps.queryItems = URLComponents(url: base, resolvingAgainstBaseURL: false)?.queryItems
-    guard let url = comps.url else { return nil }
-    return PendingSignIn(url: url, verifier: v, state: st, token: ep.token)
+    guard let url = comps.url else { logSignIn("authorize_url", error: SignInFailure.unreachable.logCode); return .failure(.unreachable) }
+    return .success(PendingSignIn(url: url, verifier: v, state: st, token: ep.token))
   }
 
   static func form(_ items: [(String, String)]) -> String {
@@ -79,12 +101,14 @@ public final class BridgeSession {
 
   struct Tokens { let access: String; let refresh: String?; let exp: TimeInterval; let sub: String }
 
-  func tokenCall(_ endpoint: String, _ items: [(String, String)]) -> Result<Tokens, ConnectAuth.SignInError> {
+  func tokenCall(_ endpoint: String, _ items: [(String, String)]) -> Result<Tokens, SignInFailure> {
     let r = auth.send(HubRequest(method: "POST", path: endpoint, query: nil,
                                  headers: ["content-type": "application/x-www-form-urlencoded"], body: Self.form(items)),
                       timeout: Self.hubTimeout)
-    guard case .response(200, let d) = r, let j = HubEnvelope.json(d), let at = j["access_token"] as? String,
-          let sub = Self.jwtSub(at) else { return .failure(.unavailable) }
+    guard case .response(let s, let d) = r else { return .failure(.token(status: nil, error: nil)) }
+    guard s == 200 else { return .failure(.token(status: s, error: SignInFailure.safeCode(HubEnvelope.errorCode(s, d)))) }
+    guard let j = HubEnvelope.json(d), let at = j["access_token"] as? String,
+          let sub = Self.jwtSub(at) else { return .failure(.tokenResponse) }
     let exp = clock.now() + ((j["expires_in"] as? Double) ?? 300)
     return .success(Tokens(access: at, refresh: j["refresh_token"] as? String, exp: exp, sub: sub))
   }
@@ -101,11 +125,24 @@ public final class BridgeSession {
   /// Callback → code → tokens. A new person = owner change (R8) first; then refresh token (Keychain) and access file.
   @discardableResult
   public func completeSignIn(_ pending: PendingSignIn, callback: URL?) -> SignInState {
-    let code = ConnectAuth.code(fromCallback: callback, expectedState: pending.state)
-    guard case .success(let c) = code else { return .signedOut(message: SignInState.unavailableText) }
+    let c: String
+    switch ConnectAuth.code(fromCallback: callback, expectedState: pending.state) {
+    case .failure(let f): logSignIn("callback", error: f.logCode); return .signedOut(message: f.text)
+    case .success(let got): c = got; logSignIn("callback")
+    }
     let r = tokenCall(pending.token, [("grant_type", "authorization_code"), ("code", c), ("redirect_uri", config.redirectURI),
                                       ("client_id", config.clientId), ("code_verifier", pending.verifier), ("resource", config.resource)])
-    guard case .success(let t) = r, let refresh = t.refresh else { return .signedOut(message: SignInState.unavailableText) }
+    let t: Tokens
+    switch r {
+    case .failure(let f):
+      if case .token(let s, _) = f { logSignIn("token", status: s, error: f.logCode) } else { logSignIn("token", status: 200, error: f.logCode) }
+      return .signedOut(message: f.text)
+    case .success(let got) where got.refresh == nil:
+      logSignIn("token", status: 200, error: SignInFailure.tokenResponse.logCode)
+      return .signedOut(message: SignInFailure.tokenResponse.text)
+    case .success(let got): t = got; logSignIn("token", status: 200)
+    }
+    let refresh = t.refresh!
     do {
       let cur = owner.readOwner()
       if cur.ownerSub != t.sub {
@@ -119,8 +156,10 @@ public final class BridgeSession {
       let o = owner.readOwner()
       try owner.writeAccessToken(OwnerAccessToken(ownerSub: t.sub, ownerEpoch: o.ownerEpoch, accessToken: t.access, exp: t.exp))
     } catch {
-      return .signedOut(message: SignInState.unavailableText)
+      logSignIn("save", error: SignInFailure.saveFailed.logCode)
+      return .signedOut(message: SignInFailure.saveFailed.text)
     }
+    logSignIn("done")
     return .signedIn(ownerSub: t.sub)
   }
 

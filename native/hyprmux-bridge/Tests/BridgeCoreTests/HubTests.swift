@@ -133,8 +133,10 @@ final class HubTests: XCTestCase {
     XCTAssertTrue(url.contains("redirect_uri=hyprmux-bridge://oidc-callback"))
     XCTAssertTrue(url.contains("code_challenge_method=S256"))
     let r = ConnectAuth.code(fromCallback: URL(string: "hyprmux-bridge://oidc-callback?error=redirect_uri_mismatch&state=s1"), expectedState: "s1")
-    XCTAssertEqual(ConnectAuth.stateAfter(r, ownerSub: nil), .signedOut(message: "Sign-in isn't available yet"))
-    XCTAssertEqual(ConnectAuth.code(fromCallback: nil, expectedState: "s1"), .failure(.unavailable))
+    XCTAssertEqual(ConnectAuth.stateAfter(r, ownerSub: nil), .signedOut(message: "Sign-in failed: redirect_uri_mismatch"))
+    XCTAssertEqual(ConnectAuth.code(fromCallback: nil, expectedState: "s1"), .failure(.badCallback))
+    XCTAssertEqual(ConnectAuth.code(fromCallback: URL(string: "hyprmux-bridge://oidc-callback?code=x&state=other"), expectedState: "s1"),
+                   .failure(.badCallback))
     XCTAssertEqual(ConnectAuth.code(fromCallback: URL(string: "hyprmux-bridge://oidc-callback?code=x&state=s1"), expectedState: "s1"), .success("x"))
     // local pairing still works: the base set registers without any sign-in
     XCTAssertEqual(coord.tick(), .registered([.daemon, .server, .core]))
