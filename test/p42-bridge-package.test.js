@@ -9,7 +9,7 @@ const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const APPDIR = path.join(ROOT, 'scripts', 'bridge-app');
-const BUNDLE_ID = 'ai.yobolabs.hyprmux.bridge';
+const BUNDLE_ID = 'com.hyprmux.bridge';
 const AGENTS = ['daemon', 'server', 'tunnel', 'core'];
 const mac = process.platform === 'darwin';
 

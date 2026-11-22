@@ -4,10 +4,10 @@
      Bridge with SMAppService.agent. BundleProgram is relative to the app bundle. -->
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>ai.yobolabs.hyprmux.bridge.daemon</string>
+  <key>Label</key><string>com.hyprmux.bridge.server</string>
   <key>BundleProgram</key><string>Contents/MacOS/hyprmux-runtime</string>
-  <key>ProgramArguments</key><array><string>hyprmux-runtime</string><string>bridge</string></array>
-  <key>AssociatedBundleIdentifiers</key><array><string>ai.yobolabs.hyprmux.bridge</string></array>
+  <key>ProgramArguments</key><array><string>hyprmux-runtime</string><string>server</string></array>
+  <key>AssociatedBundleIdentifiers</key><array><string>com.hyprmux.bridge</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>

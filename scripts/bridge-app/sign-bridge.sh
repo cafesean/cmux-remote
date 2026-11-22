@@ -19,7 +19,7 @@ C="$APP/Contents"
 mkdir -p "$OUT"
 
 # 0. sanity: the pieces package-bridge.sh adds
-for f in MacOS/HyprMuxBridge MacOS/hyprmux-runtime MacOS/cloudflared Library/LaunchAgents/ai.yobolabs.hyprmux.bridge.core.plist Info.plist; do
+for f in MacOS/HyprMuxBridge MacOS/hyprmux-runtime MacOS/cloudflared Library/LaunchAgents/com.hyprmux.bridge.core.plist Info.plist; do
   [ -e "$C/$f" ] || { echo "missing $f (run package-bridge.sh first)" >&2; exit 2; }
 done
 CF_TEAM=$(grep '^team=' $HERE/cloudflared.ref | cut -d= -f2-)

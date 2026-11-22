@@ -17,7 +17,7 @@ public struct BridgePaths: Sendable {
 
   public var stateDir: String { home + "/Library/Application Support/HyprMux" }
   /// No spaces allowed in socket paths ("Application Support" has one): Caches, recreated by the runtime.
-  public var runDir: String { home + "/Library/Caches/ai.yobolabs.hyprmux/run" }
+  public var runDir: String { home + "/Library/Caches/com.hyprmux.bridge/run" }
   public var launchAgentsDir: String { home + "/Library/LaunchAgents" }
   public var logsDir: String { stateDir + "/logs" }
   public var envPath: String { stateDir + "/.env" }

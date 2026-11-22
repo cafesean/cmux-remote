@@ -119,8 +119,8 @@ if (mode === 'tunnel') {
   supervise(process.execPath, [mode], Object.assign({}, process.env, { HYPRMUX_LOGGED: '1' }), ['ignore', fd, fd]);
 } else {
   // Bridge socket dir: cmux-remote refuses socket paths with spaces ("Application Support" has one), so
-  // the socket lives in ~/Library/Caches/ai.yobolabs.hyprmux/run (0700). Caches can be purged: recreate.
-  const runDir = path.join(os.homedir(), 'Library', 'Caches', 'ai.yobolabs.hyprmux', 'run');
+  // the socket lives in ~/Library/Caches/com.hyprmux.bridge/run (0700). Caches can be purged: recreate.
+  const runDir = path.join(os.homedir(), 'Library', 'Caches', 'com.hyprmux.bridge', 'run');
   fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(runDir, 0o700);
   process.chdir(STATE_DIR);   // loadenv.js reads the .env in the CWD

@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleIdentifier</key><string>ai.yobolabs.hyprmux.bridge</string>
+  <key>CFBundleIdentifier</key><string>com.hyprmux.bridge</string>
   <key>CFBundleName</key><string>HyprMux Bridge</string>
   <key>CFBundleDisplayName</key><string>HyprMux Bridge</string>
   <key>CFBundleExecutable</key><string>HyprMuxBridge</string>
@@ -16,7 +16,7 @@
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
-      <key>CFBundleURLName</key><string>ai.yobolabs.hyprmux.bridge</string>
+      <key>CFBundleURLName</key><string>com.hyprmux.bridge</string>
       <key>CFBundleURLSchemes</key><array><string>hyprmux-bridge</string></array>
     </dict>
   </array>

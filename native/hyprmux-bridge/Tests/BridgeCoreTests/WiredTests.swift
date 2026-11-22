@@ -125,7 +125,7 @@ class WiredTests: XCTestCase {
     XCTAssertTrue(p.url.absoluteString.contains("redirect_uri=hyprmux-bridge://oidc-callback"))
     let tok = try XCTUnwrap(calls("POST", "/oauth/token").first)
     XCTAssertTrue(tok.body.contains("grant_type=authorization_code") && tok.body.contains("code_verifier=\(p.verifier)"))
-    XCTAssertEqual(kc.items["ai.yobolabs.hyprmux.bridge/connect-refresh"], Data("RT-A".utf8))
+    XCTAssertEqual(kc.items["com.hyprmux.bridge/connect-refresh"], Data("RT-A".utf8))
     let at = try String(contentsOfFile: state.paths.hubAccessTokenPath, encoding: .utf8)
     XCTAssertFalse(at.contains("RT-A"))
 
@@ -173,7 +173,7 @@ class WiredTests: XCTestCase {
     XCTAssertNil(del.headers["authorization"])
     XCTAssertNotNil(del.headers["x-hmx-sig"])
     XCTAssertNil(session.ownerSub)
-    XCTAssertNil(kc.items["ai.yobolabs.hyprmux.bridge/connect-refresh"])
+    XCTAssertNil(kc.items["com.hyprmux.bridge/connect-refresh"])
     XCTAssertFalse(FileManager.default.fileExists(atPath: state.paths.hubAccessTokenPath))
   }
 

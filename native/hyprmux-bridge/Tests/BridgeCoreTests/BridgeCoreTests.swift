@@ -73,10 +73,10 @@ final class BridgeCoreTests: XCTestCase {
   // AC0: labels + bundle id
   func testLabels() {
     XCTAssertEqual(BridgeAgent.allCases.map(\.label), [
-      "ai.yobolabs.hyprmux.bridge.daemon", "ai.yobolabs.hyprmux.bridge.server",
-      "ai.yobolabs.hyprmux.bridge.tunnel", "ai.yobolabs.hyprmux.bridge.core"])
-    XCTAssertEqual(BridgeAgent.server.plistName, "ai.yobolabs.hyprmux.bridge.server.plist")
-    XCTAssertEqual(BridgeAgent.bundleIdentifier, "ai.yobolabs.hyprmux.bridge")
+      "com.hyprmux.bridge.daemon", "com.hyprmux.bridge.server",
+      "com.hyprmux.bridge.tunnel", "com.hyprmux.bridge.core"])
+    XCTAssertEqual(BridgeAgent.server.plistName, "com.hyprmux.bridge.server.plist")
+    XCTAssertEqual(BridgeAgent.bundleIdentifier, "com.hyprmux.bridge")
   }
 
   // AC1 + AC14: legacy C3 / hand-install label blocks every agent; gone -> daemon, server, core; tunnel off

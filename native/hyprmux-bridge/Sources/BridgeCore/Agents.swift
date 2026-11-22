@@ -7,7 +7,7 @@ import ServiceManagement
 public enum BridgeAgent: String, CaseIterable, Sendable {
   case daemon, server, tunnel, core
 
-  public static let bundleIdentifier = "ai.yobolabs.hyprmux.bridge"
+  public static let bundleIdentifier = "com.hyprmux.bridge"
   public var label: String { "\(Self.bundleIdentifier).\(rawValue)" }
   public var plistName: String { label + ".plist" }
 
