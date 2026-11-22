@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- HyprMux Bridge agent. Lives in HyprMux Bridge.app/Contents/Library/LaunchAgents and is registered by the
+     Bridge with SMAppService.agent. BundleProgram is relative to the app bundle. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.yobolabs.hyprmux.bridge.server</string>
+  <key>BundleProgram</key><string>Contents/MacOS/hyprmux-runtime</string>
+  <key>ProgramArguments</key><array><string>hyprmux-runtime</string><string>server</string></array>
+  <key>AssociatedBundleIdentifiers</key><array><string>ai.yobolabs.hyprmux.bridge</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

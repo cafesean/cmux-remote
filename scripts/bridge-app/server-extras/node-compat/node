@@ -1,0 +1,6 @@
+#!/bin/sh
+# p41 C3 / D128: `node` for the bundled cmux-remote bin scripts. A clean Mac has no node, so the bundled
+# bun runtime acts as one (BUN_BE_BUN=1 runs files and -e like the bun CLI). Lives in
+# HyprMux.app/Contents/Resources/server/node-compat; the runtime is Contents/MacOS/hyprmux-runtime.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BUN_BE_BUN=1 exec "$HERE/../../../MacOS/hyprmux-runtime" "$@"

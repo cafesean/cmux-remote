@@ -1,0 +1,7 @@
+# cloudflared bundled into HyprMux Bridge.app. Bump deliberately: version, tgz sha256 (GitHub asset digest),
+# binary sha256 (from the release notes). package-bridge.sh refuses a mismatch.
+version=2026.10.7
+url=https://github.com/cloudflare/cloudflared/releases/download/2026.10.7/cloudflared-darwin-arm64.tgz
+tgz_sha256=3586ccf397e98e5f437e60e7c307ca6ac463e110580503af8bb8e6f9ebf831bd
+bin_sha256=2136431d5eb467bf447d2ee514b713e192719b143aec1d9e09bf7dc290d5bb12
+team=68WVV388M8

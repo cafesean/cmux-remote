@@ -1,0 +1,6 @@
+#!/bin/bash
+# p41 C3 / D128: the bundled bridge's ACCOUNT_BIN_DIR (HYPERMUX_BIN_DIR). cmux runs this in a pane whose
+# environment the bridge does not control, so it sets HYPERMUX_NODE itself, then runs the real script.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export HYPERMUX_NODE="$HERE/../node-compat/node"
+exec "$HERE/../bin/hypermux-account-setup" "$@"

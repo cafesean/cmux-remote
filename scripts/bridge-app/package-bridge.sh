@@ -1,0 +1,53 @@
+#!/bin/zsh
+# Assemble HyprMux Bridge.app (unsigned; signing + notarization is a separate step).
+#   Contents/MacOS/HyprMuxBridge                    menu bar app + `--core` agent (swift build -c release)
+#   Contents/MacOS/hyprmux-runtime                  bun-compiled server|bridge|tunnel (build-runtime.sh)
+#   Contents/MacOS/cloudflared                      pinned + verified (cloudflared.ref), Cloudflare's signature kept
+#   Contents/Resources/server/                      files the server reads at run time
+#   Contents/Library/LaunchAgents/*.plist           registered by the Bridge with SMAppService.agent
+#   Contents/Info.plist                             version = package.json version
+# Usage: scripts/bridge-app/package-bridge.sh <out-dir> [work-dir]   -> <out-dir>/HyprMux Bridge.app
+# Test seams (local builds only): BRIDGE_MENU_BIN, BRIDGE_RUNTIME_DIR, BRIDGE_CLOUDFLARED_BIN use prebuilt pieces.
+set -euo pipefail
+HERE=${0:A:h}
+REPO=${HERE:h:h}
+OUT=${1:?out dir}
+WORK=${2:-$(mktemp -d)}
+APP="$OUT/HyprMux Bridge.app"
+C="$APP/Contents"
+VERSION=$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' $REPO/package.json | head -1)
+rm -rf "$APP"; mkdir -p "$C/MacOS" "$C/Resources" "$C/Library/LaunchAgents"
+
+# 1. menu bar / core binary
+if [ -n "${BRIDGE_MENU_BIN:-}" ]; then MENU=$BRIDGE_MENU_BIN; else
+  swift build -c release --package-path $REPO/native/hyprmux-bridge >&2
+  MENU=$(swift build -c release --package-path $REPO/native/hyprmux-bridge --show-bin-path)/HyprMuxBridge
+fi
+install -m 755 "$MENU" "$C/MacOS/HyprMuxBridge"
+
+# 2. runtime
+RT=${BRIDGE_RUNTIME_DIR:-}
+if [ -z "$RT" ]; then RT=$WORK/rt; $HERE/build-runtime.sh $RT; fi
+install -m 755 $RT/hyprmux-runtime "$C/MacOS/hyprmux-runtime"
+if [ -d $RT/server ]; then cp -R $RT/server "$C/Resources/server"; fi
+
+# 3. cloudflared (pinned, both hashes + Cloudflare team checked)
+ref() { grep "^$1=" $HERE/cloudflared.ref | cut -d= -f2-; }
+if [ -n "${BRIDGE_CLOUDFLARED_BIN:-}" ]; then CF=$BRIDGE_CLOUDFLARED_BIN; else
+  mkdir -p $WORK/cfd
+  curl -fsSL -o $WORK/cfd/cf.tgz "$(ref url)"
+  [ "$(shasum -a 256 $WORK/cfd/cf.tgz | cut -d' ' -f1)" = "$(ref tgz_sha256)" ] || { echo "cloudflared tgz sha256 mismatch" >&2; exit 3; }
+  tar -xzf $WORK/cfd/cf.tgz -C $WORK/cfd
+  [ "$(shasum -a 256 $WORK/cfd/cloudflared | cut -d' ' -f1)" = "$(ref bin_sha256)" ] || { echo "cloudflared binary sha256 mismatch" >&2; exit 3; }
+  SIG=$(codesign -dv $WORK/cfd/cloudflared 2>&1 || true)   # not `| grep -q`: SIGPIPE + pipefail fails it
+  [[ "$SIG" == *"TeamIdentifier=$(ref team)"* ]] || { echo "cloudflared not signed by Cloudflare" >&2; exit 3; }
+  CF=$WORK/cfd/cloudflared
+fi
+install -m 755 "$CF" "$C/MacOS/cloudflared"
+
+# 4. LaunchAgents + Info.plist
+cp $HERE/LaunchAgents/*.plist "$C/Library/LaunchAgents/"
+for p in "$C"/Library/LaunchAgents/*.plist; do plutil -lint -s "$p"; done
+sed "s/__VERSION__/$VERSION/g" $HERE/Info.plist > "$C/Info.plist"
+plutil -lint -s "$C/Info.plist"
+echo "packaged: $APP ($VERSION, cloudflared $(ref version))"
