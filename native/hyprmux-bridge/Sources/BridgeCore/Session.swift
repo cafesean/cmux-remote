@@ -21,6 +21,8 @@ public final class BridgeSession {
   var lastPlanCheck: TimeInterval = -.infinity
   public private(set) var tunnelState: TunnelState?
   public private(set) var plan: String?
+  /// Plan management page from the entitlement (https only); nil hides Manage Plan…
+  public private(set) var manageURL: URL?
   /// The tunnel token a 'Tunnel not found' re-ensure already ran for (once per token, never a loop).
   var notFoundHandledFor: String?
   var tunnelLogOffset: UInt64 = 0
@@ -267,6 +269,7 @@ public final class BridgeSession {
     // A paid plan, or enforcement off, lifts a Free limit the last ensure hit.
     let snap = EntitlementSnapshot(enforced: enforced, tunnelAllowed: !atLimit || !enforced || plan != "free")
     self.plan = plan
+    manageURL = (e["manageUrl"] as? String).flatMap(URL.init(string:)).flatMap { $0.scheme == "https" ? $0 : nil }
     return (plan, snap)
   }
 

@@ -160,6 +160,17 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
         mi.isEnabled = false
         mi.toolTip = tip
         menu.addItem(mi)
+      case .prominent(let t, let a):
+        let mi = NSMenuItem(title: t, action: #selector(performMenuAction(_:)), keyEquivalent: "")
+        mi.target = self
+        mi.tag = menuActions.count
+        menuActions.append(a)
+        mi.attributedTitle = NSAttributedString(string: t, attributes: [
+          .font: NSFont.menuFont(ofSize: 0).withTraits(.bold), .foregroundColor: NSColor.controlAccentColor])
+        if let img = NSImage(systemSymbolName: MenuModel.upgradeSymbol, accessibilityDescription: nil) {
+          mi.image = img.withSymbolConfiguration(.init(paletteColors: [.white, .controlAccentColor]))
+        }
+        menu.addItem(mi)
       case .action(let t, let a, let checked):
         let mi = NSMenuItem(title: t, action: #selector(performMenuAction(_:)), keyEquivalent: "")
         mi.target = self
@@ -196,8 +207,9 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     coreNoticeURL = core?.url
     return MenuInput(status: statusText, hostname: state.phoneAccessOn ? state.readLastTunnel()?.hostname : nil,
                      signInVisible: s?.config.signInVisible ?? false, signedIn: signedIn, email: s?.accountEmail, plan: s?.plan,
-                     problems: problems, notice: core?.text, noticeOpens: core?.url != nil,
-                     remoteAccessOn: state.phoneAccessOn, version: bundleVersion)
+                     canManagePlan: s?.manageURL != nil, problems: problems, notice: core?.text, noticeOpens: core?.url != nil,
+                     remoteAccessOn: state.phoneAccessOn, version: bundleVersion,
+                     optionHeld: NSEvent.modifierFlags.contains(.option))
   }
 
   func menuNeedsUpdate(_ menu: NSMenu) {
@@ -219,6 +231,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     case .signOut: signOut()
     case .quit: quit()
     case .openNotice: openCoreNotice()
+    case .managePlan: if let u = session?.manageURL { NSWorkspace.shared.open(u) }
+    case .stopBridge: stopBridge()
     }
   }
 
@@ -444,6 +458,14 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
   @objc func restart() { _ = coordinator.reregisterRequired(); poll() }
   @objc func openLogs() { NSWorkspace.shared.open(URL(fileURLWithPath: paths.logsDir)) }
   @objc func quit() { NSApp.terminate(nil) }
+  /// Troubleshooting (Option held): unregister every agent until the next launch or Restart.
+  @objc func stopBridge() { timer?.invalidate(); coordinator.unregisterAll(); statusText = "Stopped"; updateButton() }
+}
+
+extension NSFont {
+  func withTraits(_ t: NSFontDescriptor.SymbolicTraits) -> NSFont {
+    NSFont(descriptor: fontDescriptor.withSymbolicTraits(t), size: pointSize) ?? self
+  }
 }
 
 let app = NSApplication.shared
