@@ -133,6 +133,13 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
   const node = await boot(process.execPath, [path.join(ROOT, 'server.js')], { ...env, HOME: fs.mkdtempSync(path.join(tmp, 'n-')) });
   t.after(() => { bun.child.kill('SIGKILL'); node.child.kill('SIGKILL'); up.server.close(); fs.rmSync(tmp, { recursive: true, force: true }); });
 
+  // The internal node port: the compiled process's other TCP listener.
+  const innerPort = () => {
+    const out = execFileSync('lsof', ['-a', '-p', String(bun.child.pid), '-iTCP', '-sTCP:LISTEN', '-P', '-Fn'], { encoding: 'utf8' });
+    const ps = [...out.matchAll(/^n\S*:(\d+)$/gm)].map((m) => Number(m[1])).filter((p) => p !== bun.port);
+    return ps[0];
+  };
+
   // Started now, checked last: a quiet SSE must survive QUIET_MS through the front door.
   const quiet = new Promise((resolve) => {
     const r = http.get({ host: '127.0.0.1', port: bun.port, path: '/api/cmux/stream?machine=&surface=q' }, (res) => {
@@ -151,13 +158,61 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
   await t.test('tunnel-shaped request with spoofed X-Forwarded-For / x-hm-peer / x-hm-front is not local', async () => {
     for (const h of [
       { 'x-forwarded-for': '127.0.0.1', 'x-hm-peer': '127.0.0.1' },
-      { 'x-hm-peer': '127.0.0.1', 'x-hm-front': 'guess' },
       { 'cf-connecting-ip': '127.0.0.1', 'x-hm-peer': '::1', 'x-hm-front': '0'.repeat(64) },
     ]) {
       const r = await req(bun.port, '/api/pair/hello', { headers: h });
-      if (h['x-forwarded-for'] || h['cf-connecting-ip']) assert.strictEqual(r.status, 403, JSON.stringify(h) + r.body);
-      else assert.strictEqual(r.status, 200, 'a client copy of x-hm-* is replaced, not trusted or fatal: ' + r.body);
+      assert.strictEqual(r.status, 403, JSON.stringify(h) + r.body);
     }
+    // x-hm-* carry no meaning any more: harmless on a real loopback client, worthless on the internal port
+    const ok = await req(bun.port, '/api/pair/hello', { headers: { 'x-hm-peer': '203.0.113.9', 'x-hm-front': 'guess' } });
+    assert.strictEqual(ok.status, 200, ok.body);
+    const inner = await req(innerPort(), '/api/pair/hello', { headers: { 'x-hm-peer': '127.0.0.1', 'x-hm-front': '0'.repeat(64) } });
+    assert.strictEqual(inner.status, 403, inner.body);
+  });
+
+  await t.test('the node side never sees x-hm-peer / x-hm-front from the front door', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'lib/front-door.js'), 'utf8') + fs.readFileSync(path.join(ROOT, 'lib/pairing.js'), 'utf8');
+    assert.ok(!/x-hm-(peer|front)/.test(src), 'x-hm-peer / x-hm-front still referenced');
+  });
+
+  await t.test('direct local dialer to the internal node port is not local', async () => {
+    const p = innerPort();
+    assert.ok(p && p !== bun.port, 'internal port ' + p);
+    const r = await req(p, '/api/pair/hello');
+    assert.strictEqual(r.status, 403, r.body);
+    const v = await req(p, '/api/version');
+    assert.strictEqual(v.status, 200, 'the internal port still serves non-local routes');
+  });
+
+  await t.test('keep-alive: the second request on one connection keeps the peer', async () => {
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const ports = [];
+    const one = () => new Promise((resolve, reject) => {
+      const r = http.get({ host: '127.0.0.1', port: bun.port, path: '/api/pair/hello', agent, headers: { host: '127.0.0.1' } }, (res) => {
+        ports.push(res.socket.localPort);
+        let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => resolve({ status: res.statusCode, body: b }));
+      });
+      r.on('error', reject);
+    });
+    const a = await one(); const b = await one(); const c = await one();
+    agent.destroy();
+    assert.strictEqual(new Set(ports).size, 1, 'requests did not share one connection: ' + ports);
+    for (const r of [a, b, c]) assert.strictEqual(r.status, 200, r.body);
+  });
+
+  await t.test('a later upgrade on a keep-alive connection is not a websocket', async () => {
+    const r = await new Promise((resolve) => {
+      const s = net.connect(bun.port, '127.0.0.1');
+      let buf = '';
+      s.on('connect', () => s.write('GET /api/version HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n'));
+      s.on('data', (d) => {
+        const first = !buf; buf += d;
+        if (first) s.write('GET /api/cmux/screen/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n');
+      });
+      setTimeout(() => { s.destroy(); resolve(buf); }, 1500);
+      s.on('close', () => resolve(buf));
+    });
+    assert.ok(!/HTTP\/1\.1 101/.test(r), 'second-request upgrade got 101');
   });
 
   await t.test('WS handshake: 101 on the screen path, 404 elsewhere; echo round-trips', async () => {
@@ -200,7 +255,7 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
     assert.strictEqual(ha.status, hb.status, 'HEAD parity');
   });
 
-  await t.test('50 MB download through the front door with bounded RSS', { todo: 'open: Bun.serve pulls a streamed Response body without socket backpressure, and a paused node:http IncomingMessage still reads ahead under Bun' }, async () => {
+  await t.test('50 MB download through the front door with bounded RSS (slow reader)', async () => {
     const tk = await ticket(bun.port, 'big');
     const base = rss(bun.child.pid); let peak = base;
     const got = await new Promise((resolve, reject) => {
@@ -210,7 +265,7 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
         res.on('data', (d) => {
           n += d.length;
           // a slow reader for a while: without backpressure the rest of the file piles up in the front door
-          if (!paused && n > 5 * 1024 * 1024) { paused = true; res.pause(); setTimeout(() => res.resume(), 1500); }
+          if (!paused && n > 5 * 1024 * 1024) { paused = true; res.pause(); setTimeout(() => res.resume(), 3000); }
         });
         res.on('end', () => { clearInterval(iv); resolve({ status: res.statusCode, n }); });
         res.on('error', (e) => { clearInterval(iv); reject(e); });
