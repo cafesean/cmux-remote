@@ -1375,7 +1375,11 @@ const FRONT = frontDoor.isBun();
 // would write to the same socket.
 if (!FRONT) httpServer.on('upgrade', (req, socket, head) => screenWs.handleUpgrade(req, socket, head));
 let front = null;
-const startFront = (o) => frontDoor.start({ nodeServer: httpServer, ...o }).then((f) => { front = f; return f; });
+// The screen socket under Bun: the front door runs screenWs.gate (auth, plan, machine, display) before any 101,
+// then the Bun adapter (lib/bun-ws.js: lib/ws.js limits, hello deadline) hands the socket to screenWs.attach.
+const screenBunWs = FRONT ? require('./lib/bun-ws').websocket((conn, data) => { screenWs.attach(conn, data.gate); },
+  { onHelloTimeout: (w) => w.close(1008, 'hello') }) : null;
+const startFront = (o) => frontDoor.start({ nodeServer: httpServer, websocket: screenBunWs, wsGate: screenWs.gate, ...o }).then((f) => { front = f; return f; });
 if (SERVER_SOCKET) {
   // lib/unix-listen.js checks the directory (real path, 0700, ours, safe ancestors), refuses a live
   // socket at the path, removes a stale one, listens, then chmods the socket 0600.

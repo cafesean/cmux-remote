@@ -131,7 +131,16 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
   const env = { HOME: tmp, CMUX_MACHINE_URL: up.base, CMUX_MACHINE_SECRET: 's3', CMUX_MACHINE_LABEL: 'stub', PORT: '0', HOST: '127.0.0.1' };
   const bun = await boot(bin, [], env);
   const node = await boot(process.execPath, [path.join(ROOT, 'server.js')], { ...env, HOME: fs.mkdtempSync(path.join(tmp, 'n-')) });
-  t.after(() => { bun.child.kill('SIGKILL'); node.child.kill('SIGKILL'); up.server.close(); fs.rmSync(tmp, { recursive: true, force: true }); });
+  // Test-only echo websocket on the same front door (production has none): handshake, framing, adapter limits.
+  const echoBin = path.join(tmp, 'echo');
+  execFileSync(BUN, ['build', '--compile', path.join(ROOT, 'test/fixtures/front-door-echo.js'), '--outfile', echoBin], { cwd: ROOT, stdio: 'pipe' });
+  const echo = await new Promise((resolve, reject) => {
+    const c = spawn(echoBin, [], { env: { PATH: process.env.PATH, TMPDIR: os.tmpdir() }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = ''; const to = setTimeout(() => reject(new Error('echo: no port\n' + out)), 15000);
+    c.stdout.on('data', (d) => { out += d; const m = /echo on (\d+)/.exec(out); if (m) { clearTimeout(to); resolve({ child: c, port: Number(m[1]) }); } });
+    c.stderr.on('data', (d) => { out += d; });
+  });
+  t.after(() => { bun.child.kill('SIGKILL'); node.child.kill('SIGKILL'); echo.child.kill('SIGKILL'); up.server.close(); fs.rmSync(tmp, { recursive: true, force: true }); });
 
   // The internal node port: the compiled process's other TCP listener.
   const innerPort = () => {
@@ -216,11 +225,18 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
     assert.ok(/HTTP\/1\.1 404/.test(r), 'second-request upgrade got no 404: ' + JSON.stringify(r));
   });
 
-  await t.test('WS handshake: 101 on the screen path, 404 elsewhere; echo round-trips', async () => {
-    const a = await wsOpen(`ws://127.0.0.1:${bun.port}/api/cmux/screen/ws`);
+  await t.test('WS handshake (test echo harness): 101 on the screen path, echo round-trips; server: 404 elsewhere', async () => {
+    const a = await wsOpen(`ws://127.0.0.1:${echo.port}/api/cmux/screen/ws`);
     assert.ok(a.ok, 'no 101 on /api/cmux/screen/ws');
-    const echo = await new Promise((r) => { a.ws.onmessage = (e) => r(e.data); a.ws.send('ping'); });
-    assert.strictEqual(echo, 'ping'); a.ws.close();
+    const got = await new Promise((r) => { a.ws.onmessage = (e) => r(e.data); a.ws.send('ping'); });
+    assert.strictEqual(got, 'ping'); a.ws.close();
+    // The real server has no echo: without SERVER_TOKEN the screen path is refused before any 101.
+    const srv = await new Promise((resolve) => {
+      const r = http.request({ host: '127.0.0.1', port: bun.port, path: '/api/cmux/screen/ws?machine=', agent: false, headers: { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } });
+      r.on('response', (res) => { resolve(res.statusCode); res.resume(); });
+      r.on('upgrade', (res, sock) => { sock.destroy(); resolve(101); }); r.on('error', () => resolve('error')); r.end();
+    });
+    assert.strictEqual(srv, 503, 'unsecured server must refuse the screen socket');
     const raw = await new Promise((resolve) => {
       const r = http.request({ host: '127.0.0.1', port: bun.port, path: '/api/cmux/other/ws', headers: { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } });
       r.on('response', (res) => { resolve(res.statusCode); res.resume(); });
@@ -298,11 +314,11 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
     const { DEFAULTS } = require('../lib/ws');
     const hello = maskedFrame(1, Buffer.from('hi'));
     const [frameBig, msgBig, badUtf8, noHello, ok] = await Promise.all([
-      rawWs(bun.port, [hello, maskedFrame(2, Buffer.alloc(DEFAULTS.maxFramePayload + 1))]),
-      rawWs(bun.port, [hello, maskedFrame(2, Buffer.alloc(40 * 1024), false), maskedFrame(0, Buffer.alloc(40 * 1024))]),
-      rawWs(bun.port, [maskedFrame(1, Buffer.from([0xc3, 0x28]))]),
-      rawWs(bun.port, [], { wait: DEFAULTS.helloTimeoutMs + 3000 }),
-      rawWs(bun.port, [hello, maskedFrame(2, Buffer.alloc(DEFAULTS.maxMessage))], { wait: DEFAULTS.helloTimeoutMs + 1500 }),
+      rawWs(echo.port, [hello, maskedFrame(2, Buffer.alloc(DEFAULTS.maxFramePayload + 1))]),
+      rawWs(echo.port, [hello, maskedFrame(2, Buffer.alloc(40 * 1024), false), maskedFrame(0, Buffer.alloc(40 * 1024))]),
+      rawWs(echo.port, [maskedFrame(1, Buffer.from([0xc3, 0x28]))]),
+      rawWs(echo.port, [], { wait: DEFAULTS.helloTimeoutMs + 3000 }),
+      rawWs(echo.port, [hello, maskedFrame(2, Buffer.alloc(DEFAULTS.maxMessage))], { wait: DEFAULTS.helloTimeoutMs + 1500 }),
     ]);
     t2.diagnostic(JSON.stringify({ frameBig, msgBig, badUtf8, noHello, ok }));
     assert.strictEqual(frameBig.code, 1009, 'frame over 64 KiB');
@@ -313,7 +329,7 @@ test('front door on the compiled runtime', { skip: !BUN && 'bun not installed', 
   });
 
   await t.test('Bun websocket adapter: invalid UTF-8 text closes 1007', { todo: 'open: Bun 1.3 drops the TCP connection on invalid UTF-8 text before the message handler runs' }, async () => {
-    const r = await rawWs(bun.port, [maskedFrame(1, Buffer.from([0xc3, 0x28]))]);
+    const r = await rawWs(echo.port, [maskedFrame(1, Buffer.from([0xc3, 0x28]))]);
     assert.strictEqual(r.code, 1007, JSON.stringify(r));
   });
 
