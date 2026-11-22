@@ -42,6 +42,7 @@ public struct BridgeState: Sendable {
     try Self.mkdirPrivate(paths.runDir)
     if fm.fileExists(atPath: paths.envPath) {
       guard chmod(paths.envPath, 0o600) == 0 else { throw BridgeError.io("chmod .env") }
+      try appendPlanKeys()
       return
     }
     let bridgeSecret = try Self.randomHex(24)
@@ -57,8 +58,22 @@ public struct BridgeState: Sendable {
       "CMUX_MACHINE_SECRET=\(bridgeSecret)",
       "CMUX_MACHINE_LABEL=\(shortHostName())",
       "DEVICES_FILE=\(paths.devicesPath)",
-    ]
+    ] + planKeyLines()
     try Self.writePrivate(paths.envPath, lines.joined(separator: "\n") + "\n")
+  }
+
+  /// p42: plan enforcement in server.js is on only when it knows the Bridge state dir and the hub.
+  public static let hubBase = "https://hub.appmatic.io"
+  func planKeyLines() -> [String] { ["HMX_PLAN_STATE_DIR=\(paths.stateDir)", "HMX_HUB_URL=\(Self.hubBase)"] }
+
+  /// An existing env file keeps every line as written; only missing plan keys are appended, never rewritten.
+  func appendPlanKeys() throws {
+    let text = (try? String(contentsOfFile: paths.envPath, encoding: .utf8)) ?? ""
+    let have = Set(text.split(separator: "\n").compactMap { $0.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } })
+    let add = planKeyLines().filter { !have.contains(String($0.split(separator: "=", maxSplits: 1)[0])) }
+    if add.isEmpty { return }
+    let sep = text.isEmpty || text.hasSuffix("\n") ? "" : "\n"
+    try Self.writePrivate(paths.envPath, text + sep + add.joined(separator: "\n") + "\n")
   }
 
   /// First Bridge launch on a Mac that ran the app host: retire its pairings and tunnel token (.env kept),

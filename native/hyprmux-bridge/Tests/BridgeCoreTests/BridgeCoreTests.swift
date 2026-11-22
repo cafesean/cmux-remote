@@ -131,7 +131,11 @@ final class BridgeCoreTests: XCTestCase {
     let env = "PORT=4123\nSERVER_TOKEN=aaa\nBRIDGE_SECRET=bbb\n"
     FileManager.default.createFile(atPath: paths.envPath, contents: Data(env.utf8), attributes: [.posixPermissions: 0o644])
     try state.ensure()
-    XCTAssertEqual(try String(contentsOfFile: paths.envPath, encoding: .utf8), env)
+    // Every existing line kept verbatim; only the p42 plan keys are appended, once.
+    let planKeys = "HMX_PLAN_STATE_DIR=\(paths.stateDir)\nHMX_HUB_URL=\(BridgeState.hubBase)\n"
+    XCTAssertEqual(try String(contentsOfFile: paths.envPath, encoding: .utf8), env + planKeys)
+    try state.ensure()
+    XCTAssertEqual(try String(contentsOfFile: paths.envPath, encoding: .utf8), env + planKeys)
     XCTAssertEqual(try mode(paths.envPath), 0o600)
     XCTAssertEqual(try mode(paths.stateDir), 0o700)
     XCTAssertEqual(try mode(paths.runDir), 0o700)
@@ -143,6 +147,8 @@ final class BridgeCoreTests: XCTestCase {
     XCTAssertNotNil(Int(e["PORT"] ?? ""))
     XCTAssertEqual(e["SERVER_TOKEN"]?.count, 48)
     XCTAssertEqual(e["BRIDGE_SECRET"]?.count, 48)
+    XCTAssertEqual(e["HMX_PLAN_STATE_DIR"], paths.stateDir)
+    XCTAssertEqual(e["HMX_HUB_URL"], BridgeState.hubBase)
     XCTAssertEqual(try mode(paths.envPath), 0o600)
   }
 
@@ -175,7 +181,7 @@ final class BridgeCoreTests: XCTestCase {
     XCTAssertFalse(fm.fileExists(atPath: paths.tunnelTokenPath))
     XCTAssertTrue(fm.fileExists(atPath: paths.devicesPath + ".c3-retired"))
     XCTAssertEqual(fm.contents(atPath: paths.tunnelTokenPath + ".c3-retired"), Data("c3".utf8))
-    XCTAssertEqual(fm.contents(atPath: paths.envPath), Data("PORT=1\n".utf8))
+    XCTAssertTrue(String(decoding: fm.contents(atPath: paths.envPath) ?? Data(), as: UTF8.self).hasPrefix("PORT=1\n"))   // kept; p42 plan keys appended
     try state.setPhoneAccess(true)
     XCTAssertFalse(coord.tick() == .registered([.daemon, .server, .core, .tunnel]))
     try state.writeTunnelToken("bridge-token") // stub ensure
