@@ -73,6 +73,14 @@ public final class LoopbackServer: LocalServer {
     return false
   }
 
+  /// 0.3.1: the bridge's capture / input truth (server.js -> bridge /cmux/screen/info); nil when not answering.
+  public func screenTruth(timeout: TimeInterval = 2) -> BridgeScreenTruth? {
+    let r = transport.send(HubRequest(method: "GET", path: "/api/cmux/screen/info", query: nil,
+                                      headers: ["authorization": "Bearer \(token)"], body: nil), timeout: timeout)
+    guard case .response(let s, let d) = r, s == 200 else { return nil }
+    return BridgeScreenTruth.parse(d)
+  }
+
   /// The pairing link for the QR window (server.js /api/pair/start), nil when the server refuses.
   public func pairingLink() -> String? { if case .link(let l) = startPairing() { return l } else { return nil } }
 

@@ -65,6 +65,36 @@ public enum RemoteDesktopPermissions {
   public static var restartSkipping: Set<BridgeAgent> { Set(BridgeAgent.allCases).subtracting(restartAgents) }
 }
 
+/// 0.3.1: what the bridge (the process that captures and posts input) reports in /cmux/screen/info.
+public enum CaptureTruth: Equatable, Sendable { case granted, denied, unknown }
+
+public struct BridgeScreenTruth: Equatable, Sendable {
+  public var capture: CaptureTruth
+  /// The bridge's input-trust check (canControl); nil = not reported.
+  public var control: Bool?
+  public init(capture: CaptureTruth, control: Bool?) { self.capture = capture; self.control = control }
+
+  /// canCapture true -> granted, false -> denied (a real capture failed), anything else ("unknown") -> unknown.
+  public static func parse(_ d: Data) -> BridgeScreenTruth? {
+    guard let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return nil }
+    let cap: CaptureTruth
+    if let n = j["canCapture"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() { cap = n.boolValue ? .granted : .denied }
+    else { cap = .unknown }
+    var ctl: Bool? = nil
+    if let n = j["canControl"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() { ctl = n.boolValue }
+    return BridgeScreenTruth(capture: cap, control: ctl)
+  }
+}
+
+extension RemoteDesktopPermissions {
+  /// The status the menu shows. Screen Recording is missing ONLY on a real capture failure the bridge reported; the
+  /// menu app's own CGPreflightScreenCaptureAccess is not consulted (it is not the capturing process). Accessibility
+  /// comes from the bridge's input-trust check, else the live AXIsProcessTrusted read on menu open.
+  public static func menuStatus(bridge: BridgeScreenTruth?, localAccessibility: Bool) -> PermissionStatus {
+    PermissionStatus(screenRecording: bridge?.capture != .denied, accessibility: bridge?.control ?? localAccessibility)
+  }
+}
+
 /// Remembers that the first-run permission step has run (one empty file in the state dir).
 public struct SetupMarker: Sendable {
   public let path: String

@@ -2476,7 +2476,7 @@ const BROWSER_SHOT_MAX_BYTES = Math.max(1, Number(process.env.BROWSER_SHOT_MAX_B
 const browserShotLimiter = require('./lib/shot-limiter').createShotLimiter({ minMs: BROWSER_SHOT_MIN_MS });
 // p41 D97: Mac screen — lib/mac-screen.js owns flags, TCC errors, limits; text rides osascript stdin.
 const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => secretsIn.childEnv(),
-  secret: SECRET, host: HOST, socket: SOCKET, captureGranted: () => screenRecordingTruth() });
+  secret: SECRET, host: HOST, socket: SOCKET, captureGranted: () => screenRecordingTruth(), probeCapture: true });
 // p43: video Remote Desktop helper owner. Same flags (insecure-LAN force-off included) and D253 guard as the
 // JPEG routes; while a video viewer owns control the JPEG input routes answer 409 control_busy.
 const screenStream = require('./lib/screen-stream').createScreenStream({ flags: macScreen.flags,
@@ -2512,6 +2512,8 @@ function screenRecordingTruth() {
 }
 // p41 D189: Remote Desktop setup (TCC grants the Mac screen needs) — probe cached, reminder flag.
 const rdSetup = require('./lib/rd-setup').createRdSetup({ childEnv: () => secretsIn.childEnv(), flags: () => macScreen.flags, observed: () => macScreen.observed() });
+// 0.3.1: settle canCapture at start with one 1x1 real capture, so info never shows a stale osascript preflight.
+if (macScreen.flags.view) setTimeout(() => { macScreen.probeCapture().catch(() => {}); }, 2000).unref();
 function cmuxBrowserShot(res, surface, px = null) {
   const gate = browserShotLimiter.take(surface);
   if (!gate.ok) return send(res, 429, { error: 'rate_limited', retryMs: gate.retryMs });

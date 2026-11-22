@@ -117,7 +117,9 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
   /// Re-reads both grants (menu open; no polling). A grant that just appeared restarts server + bridge once,
   /// through the SMAppService path (never launchctl), so capture works without quitting anything.
   func checkPermissions() {
-    let now = permissionProbe.status()
+    // 0.3.1: the menu line trusts the bridge's real capture result, not this process's preflight.
+    let now = RemoteDesktopPermissions.menuStatus(bridge: loopback()?.screenTruth(),
+                                                  localAccessibility: permissionProbe.status().accessibility)
     permissions = now
     guard permissionWatcher.observe(now) else { return }
     CoreLog.append("permission-granted-restart", [("screen", now.screenRecording ? "1" : "0"),
