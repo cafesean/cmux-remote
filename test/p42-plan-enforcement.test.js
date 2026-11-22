@@ -142,7 +142,7 @@ function mkPairing(policy, extra = {}) {
 test('Mode F offline: first claim 200, second 402 devices, code not consumed by the refusal; local Allow key never counts', async () => {
   const p = createPolicy({ hub: stubHub({ fail: true }).client, stateDir: dir(), now: clock().now, log: quiet });
   const pr = mkPairing(p);
-  const c1 = pr.start('token').code, c2 = pr.start('token').code;
+  const c1 = pr.start('t' + Math.random()).code, c2 = pr.start('t' + Math.random()).code;
   assert.strictEqual((await call(pr, 'POST', '/api/pair/claim', { code: c1 })).status, 200);
   const r2 = await call(pr, 'POST', '/api/pair/claim', { code: c2 });
   assert.strictEqual(r2.status, 402); assert.strictEqual(r2.body.details.limit, 'devices');
@@ -155,28 +155,113 @@ test('Mode F offline: first claim 200, second 402 devices, code not consumed by 
   assert.strictEqual(p.claimAllowed([{ id: 'a', local: true }, { id: 'b', local: false }]), false);
 });
 
-test('Mode E claim: hubDeviceId active -> 200 + stored + listed; missing -> 402 not_in_plan; same id re-claim replaces older key; hanging hub -> 503 BUSY, code still usable', async () => {
-  const d = dir(); signIn(d); const hub = stubHub({ devices: [{ id: 'h1', status: 'active' }, { id: 'h2', status: 'paused' }] });
+const crypto = require('crypto');
+function keypair() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  return { pub: publicKey.export({ format: 'der', type: 'spki' }).subarray(12).toString('base64url'), priv: privateKey };
+}
+const signFor = (kp, { ownerSub = 'A', installId, hubDeviceId, nonce }) =>
+  crypto.sign(null, Buffer.from(['hmx-bind-v1', 'hyprmux', ownerSub, installId, hubDeviceId, nonce].join('\n')), kp.priv).toString('base64url');
+async function signedClaim(pr, body, kp, ownerSub = 'A') {
+  const n = await call(pr, 'GET', '/api/pair/nonce?code=' + body.code);
+  assert.strictEqual(n.status, 200);
+  return call(pr, 'POST', '/api/pair/claim', { ...body, nonce: n.body.nonce, signature: signFor(kp, { ownerSub, installId: n.body.bridgeInstallId, hubDeviceId: body.hubDeviceId, nonce: n.body.nonce }) });
+}
+async function signedBind(pr, key, hubDeviceId, kp, ownerSub = 'A') {
+  const H = { authorization: 'Bearer ' + key };
+  const n = await call(pr, 'GET', '/api/pair/nonce', undefined, H);
+  assert.strictEqual(n.status, 200);
+  return call(pr, 'POST', '/api/pair/bind', { hubDeviceId, nonce: n.body.nonce, signature: signFor(kp, { ownerSub, installId: n.body.bridgeInstallId, hubDeviceId, nonce: n.body.nonce }) }, H);
+}
+
+test('Mode E claim (R2/R4): signed active id -> 200 + stored + listed; missing 402 not_in_plan; paused 402; no proof 401 bad_proof; no publicKey 402 key_required; same id re-claim replaces older key; hanging hub -> 503 BUSY', async () => {
+  const d = dir(); signIn(d); const k1 = keypair(), k2 = keypair();
+  const hub = stubHub({ devices: [{ id: 'h1', status: 'active', publicKey: k1.pub }, { id: 'h2', status: 'paused', publicKey: k2.pub }, { id: 'h3', status: 'active' }] });
   const p = createPolicy({ hub: hub.client, stateDir: d, now: clock().now, log: quiet });
   const pr = mkPairing(p);
-  const r1 = await call(pr, 'POST', '/api/pair/claim', { code: pr.start('token').code, hubDeviceId: 'h1' });
+  const r1 = await signedClaim(pr, { code: pr.start('t' + Math.random()).code, hubDeviceId: 'h1' }, k1);
   assert.strictEqual(r1.status, 200);
   assert.strictEqual(pr.list()[0].hubDeviceId, 'h1');
-  const r2 = await call(pr, 'POST', '/api/pair/claim', { code: pr.start('token').code, hubDeviceId: 'hX' });
-  assert.strictEqual(r2.body.details.reason, 'not_in_plan');
-  const r3 = await call(pr, 'POST', '/api/pair/claim', { code: pr.start('token').code, hubDeviceId: 'h2' });
-  assert.strictEqual(r3.body.details.reason, 'paused');
-  const r4 = await call(pr, 'POST', '/api/pair/claim', { code: pr.start('token').code, hubDeviceId: 'h1' });
+  assert.strictEqual((await signedClaim(pr, { code: pr.start('t' + Math.random()).code, hubDeviceId: 'hX' }, k1)).body.details.reason, 'not_in_plan');
+  assert.strictEqual((await signedClaim(pr, { code: pr.start('t' + Math.random()).code, hubDeviceId: 'h2' }, k2)).body.details.reason, 'paused');
+  assert.strictEqual((await signedClaim(pr, { code: pr.start('t' + Math.random()).code, hubDeviceId: 'h3' }, k1)).body.details.reason, 'key_required');
+  // a copied active hubDeviceId without the private key -> 401 bad_proof, the original key keeps working
+  const code = pr.start('t' + Math.random()).code;
+  const stolen = await signedClaim(pr, { code, hubDeviceId: 'h1' }, keypair());
+  assert.strictEqual(stolen.status, 401); assert.strictEqual(stolen.body.error, 'bad_proof');
+  assert.ok(pr.verifyKey(r1.body.deviceKey));
+  assert.strictEqual((await call(pr, 'POST', '/api/pair/claim', { code: pr.start('t' + Math.random()).code, hubDeviceId: 'h1' })).status, 401);
+  const r4 = await signedClaim(pr, { code: pr.start('t' + Math.random()).code, hubDeviceId: 'h1' }, k1);
   assert.strictEqual(r4.status, 200);
   assert.strictEqual(pr.verifyKey(r1.body.deviceKey), null); assert.ok(pr.verifyKey(r4.body.deviceKey));
-  const g = await call(pr, 'GET', '/api/pair/devices', undefined, { authorization: 'Bearer ' + r4.body.deviceKey, ...fwd }, '127.0.0.1');
+  const g = await call(pr, 'GET', '/api/pair/devices', undefined, { authorization: 'Bearer ' + r4.body.deviceKey, ...fwd });
   assert.strictEqual(g.status, 200); assert.strictEqual(g.body.devices[0].hubDeviceId, 'h1');
   const d2 = dir(); signIn(d2); const h2 = stubHub({ hang: true });
   const p2 = createPolicy({ hub: h2.client, stateDir: d2, now: clock().now, timeoutMs: 30, log: quiet });
-  const pr2 = mkPairing(p2); const code = pr2.start('token').code;
-  const b = await call(pr2, 'POST', '/api/pair/claim', { code, hubDeviceId: 'h1' });
+  const pr2 = mkPairing(p2); const c2 = pr2.start('t' + Math.random()).code;
+  const b = await call(pr2, 'POST', '/api/pair/claim', { code: c2, hubDeviceId: 'h1' });
   assert.strictEqual(b.status, 503); assert.strictEqual(pr2.list().length, 0);
-  h2.hang = false; h2.devices = [{ id: 'h1', status: 'active' }];
+  assert.strictEqual((await call(pr2, 'GET', '/api/pair/nonce?code=' + c2)).status, 200, 'code still usable');
+});
+
+test('nonce (R4): key or reservable code -> 200 (code not consumed); none 401; bad code 404; nonce of key A rejected for a code claim; never 402', async () => {
+  const d = dir(); signIn(d); const k1 = keypair();
+  const p = createPolicy({ hub: stubHub({ devices: [{ id: 'h1', status: 'active', publicKey: k1.pub }] }).client, stateDir: d, now: clock().now, log: quiet });
+  const pr = mkPairing(p);
+  const legacy = pr.claim(pr.start('t' + Math.random()).code, 'old');                 // unbound legacy key
+  const nk = await call(pr, 'GET', '/api/pair/nonce', undefined, { authorization: 'Bearer ' + legacy.deviceKey, ...fwd });
+  assert.strictEqual(nk.status, 200); assert.ok(nk.body.bridgeInstallId);
+  assert.strictEqual((await call(pr, 'GET', '/api/pair/nonce')).status, 401);
+  assert.strictEqual((await call(pr, 'GET', '/api/pair/nonce?code=ZZZZZZZZ')).status, 404);
+  const code = pr.start('t' + Math.random()).code;
+  const sig = signFor(k1, { installId: nk.body.bridgeInstallId, hubDeviceId: 'h1', nonce: nk.body.nonce });
+  const x = await call(pr, 'POST', '/api/pair/claim', { code, hubDeviceId: 'h1', nonce: nk.body.nonce, signature: sig });
+  assert.strictEqual(x.status, 401); assert.strictEqual(x.body.error, 'bad_proof');
+});
+
+test('bind (R4): unbound key 402 unbound elsewhere, signed bind -> 200 then passes; exact retry 200 no-op; other id 409 already_bound; paused 402; owner-null bind 200 no-op with zero hub calls', async () => {
+  const d = dir(); signIn(d); const k1 = keypair(), k2 = keypair();
+  const hub = stubHub({ devices: [{ id: 'h1', status: 'active', publicKey: k1.pub }, { id: 'h2', status: 'active', publicKey: k2.pub }, { id: 'h3', status: 'paused', publicKey: k1.pub }] });
+  const p = createPolicy({ hub: hub.client, stateDir: d, now: clock().now, log: quiet });
+  const pr = mkPairing(p);
+  const legacy = pr.claim(pr.start('t' + Math.random()).code, 'old');
+  const dev = () => pr.byId(legacy.id);
+  let x = await p.authorize(req(fwd), U, { cred: { kind: 'device', dev: dev() } });
+  assert.strictEqual(x.body.details.reason, 'unbound');
+  assert.strictEqual((await signedBind(pr, legacy.deviceKey, 'h3', k1)).body.details.reason, 'paused');
+  assert.strictEqual(dev().hubDeviceId, undefined);
+  const b1 = await signedBind(pr, legacy.deviceKey, 'h1', k1);
+  assert.strictEqual(b1.status, 200); assert.deepStrictEqual(b1.body, { bound: true });
+  assert.strictEqual(await p.authorize(req(fwd), U, { cred: { kind: 'device', dev: dev() } }), null);
+  assert.strictEqual((await signedBind(pr, legacy.deviceKey, 'h1', k1)).status, 200);
+  assert.strictEqual((await signedBind(pr, legacy.deviceKey, 'h2', k2)).status, 409);
+  // two legacy keys binding the same id: the older bound key is revoked
+  const other = pr.claim(pr.start('t' + Math.random()).code, 'other');
+  assert.strictEqual((await signedBind(pr, other.deviceKey, 'h1', k1)).status, 200);
+  assert.strictEqual(pr.verifyKey(legacy.deviceKey), null);
+  // owner-null: no-op, nothing written, zero hub calls
+  const d2 = dir(); const h2 = stubHub(); const p2 = createPolicy({ hub: h2.client, stateDir: d2, now: clock().now, log: quiet });
+  const pr2 = mkPairing(p2); const k = pr2.claim(pr2.start('t' + Math.random()).code, 'x');
+  const n0 = h2.calls;
+  const r = await call(pr2, 'POST', '/api/pair/bind', { hubDeviceId: 'h1', nonce: 'n', signature: 's' }, { authorization: 'Bearer ' + k.deviceKey });
+  assert.deepStrictEqual([r.status, r.body], [200, { bound: false }]); assert.strictEqual(h2.calls, n0);
+  assert.strictEqual(pr2.byId(k.id).hubDeviceId, undefined);
+});
+
+test('D-mode migration bind (R2): enforced:false + signed bind -> bound:true stored; hub down -> bound:false; flip to enforced -> admitted without re-binding', async () => {
+  const d = dir(); signIn(d); const k1 = keypair(); const c = clock();
+  const hub = stubHub({ entitlement: { enforced: false }, devices: [{ id: 'h1', status: 'active', publicKey: k1.pub }] });
+  const p = createPolicy({ hub: hub.client, stateDir: d, now: c.now, log: quiet });
+  const pr = mkPairing(p);
+  const a = pr.claim(pr.start('t' + Math.random()).code, 'a'), b = pr.claim(pr.start('t' + Math.random()).code, 'b');
+  const r = await signedBind(pr, a.deviceKey, 'h1', k1);
+  assert.deepStrictEqual([r.status, r.body], [200, { bound: true }]);
+  hub.fail = true; c.t += 301000;
+  const r2 = await signedBind(pr, b.deviceKey, 'h1', k1);
+  assert.deepStrictEqual([r2.status, r2.body], [200, { bound: false }]);
+  hub.fail = false; hub.entitlement = { enforced: true, plan: 'free', limits: { maxMachines: 1, maxDevices: 1, remoteDesktop: 'view' } }; c.t += 61000;
+  await p.refresh();
+  assert.strictEqual(await p.authorize(req(fwd), U, { cred: { kind: 'device', dev: pr.byId(a.id) } }), null);
 });
 
 test('start: non-local SERVER_TOKEN on Free -> 402 server_token_remote; bad key 401 on /api/pair/devices even on a cold cache', async () => {
