@@ -22,7 +22,7 @@ const os = require('os');
 const { redactTokens } = require('../lib/redact-tokens');
 const path = require('path');
 
-const { detectKind, foregroundCommand, harnessOf, latestSurfaceEvent } = require('./detect');
+const { detectKind, foregroundCommand, harnessOf, isCodeMode, latestSurfaceEvent } = require('./detect');
 const { readThread, tailThread, readAttachment, uploadRefs, BadCursorError } = require('./transcript-claude');
 const uploads = require('./uploads');
 const thumbs = require('./thumbs');
@@ -294,6 +294,7 @@ function createSessionRoutes(deps) {
     else kindMemo.delete(tab.id);
     // A Codex transcript is never parsed with the Claude reader (no Codex normaliser yet): kind only.
     if (s.kind !== 'terminal' && join && join.kind === 'codex') s.kind = 'codex';
+    if (s.kind === 'claude' && isCodeMode(fg)) s.codeMode = true;                    // D287: Code Mode pilot build in front
     if (s.kind === 'terminal') { const h = harnessOf(fg); if (h) s.harness = h; }   // D262: pi, gemini, hermes… (terminal view)
     userName = nameStore.get(nameKey(join, tab));
     if (userName) s.userNamed = true;

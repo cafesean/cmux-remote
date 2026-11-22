@@ -30,6 +30,19 @@ const CODEX_PKG = /@openai[\\/]codex/;
 // Where each agent keeps its transcripts: a hint only, used when the foreground command is unknown.
 const CLAUDE_TRANSCRIPT = /[\\/]\.claude[\\/]projects[\\/]|[\\/]\.claude-swap-backup[\\/]sessions[\\/][^\\/]+[\\/]projects[\\/]/;
 const CODEX_TRANSCRIPT = /[\\/]\.codex[\\/]sessions[\\/]/;
+// p41 D287: Claude Code "Code Mode" pilot builds live under ~/.local/share/claude/pilot/<version>, so the
+// program is a bare version number (no 'claude' basename). Matched on the program path from argv only
+// (the process env is never read). CODE_MODE_BIN_RE overrides the pattern for other installs.
+const CODE_MODE_BIN_DEFAULT = /[\\/]claude[\\/]pilot[\\/]/;
+let codeModeMemo = { src: null, re: CODE_MODE_BIN_DEFAULT };
+function codeModeRe() {
+  const src = process.env.CODE_MODE_BIN_RE || '';
+  if (src === codeModeMemo.src) return codeModeMemo.re;
+  let re = CODE_MODE_BIN_DEFAULT;
+  if (src) { try { re = new RegExp(src); } catch (_) { re = CODE_MODE_BIN_DEFAULT; } }
+  codeModeMemo = { src, re };
+  return re;
+}
 
 const PS_TIMEOUT = 3000;
 const TMUX_TIMEOUT = 3000;
@@ -70,6 +83,7 @@ function harnessOf(cmd) {
 }
 
 function programKind(tok) {
+  if (codeModeRe().test(String(tok))) return 'claude';
   const b = base(tok);
   if (CLAUDE_RE.test(b)) return 'claude';
   if (CODEX_RE.test(b)) return 'codex';
@@ -90,6 +104,18 @@ function kindOfCommand(cmd) {
   if (!RUNTIMES.has(base(words[0]))) return 'other';
   const script = words.slice(1).find((w) => !w.startsWith('-'));
   return (script && programKind(script)) || 'other';
+}
+
+// D287: true when the command's program (first word, or an interpreter's script) is a Code Mode build.
+function isCodeMode(cmd) {
+  const s = String(cmd == null ? '' : cmd).trim();
+  if (!s) return false;
+  const words = s.split(/\s+/);
+  const re = codeModeRe();
+  if (re.test(words[0])) return true;
+  if (!RUNTIMES.has(base(words[0]))) return false;
+  const script = words.slice(1).find((w) => !w.startsWith('-'));
+  return !!(script && re.test(script));
 }
 
 function detectKind(info) {
@@ -207,4 +233,4 @@ async function foregroundCommand(surface, backend, deps) {
   return eventsForeground(s, d);
 }
 
-module.exports = { detectKind, foregroundCommand, kindOfCommand, harnessOf, latestSurfaceEvent, EXITED };
+module.exports = { detectKind, foregroundCommand, kindOfCommand, harnessOf, isCodeMode, latestSurfaceEvent, EXITED };
