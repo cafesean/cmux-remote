@@ -271,6 +271,29 @@ final class BridgeCoreTests: XCTestCase {
     XCTAssertEqual(state.readLastRunVersion(), "0.2.1")
   }
 
+  // AC11 + AC17: runtime never answers (fake clock) -> core writes the notice + previous.url; the menu shows it as a link
+  func testMenuShowsUpdateDidNotStartWithPreviousURL() throws {
+    try state.ensure()
+    try state.writeLastRunVersion("0.2.0")
+    let outcome = makeGuard(FakeProbe(), FakeClock()).runAtLaunch()
+    XCTAssertEqual(outcome, .updateDidNotStart)
+    let manifest = Data(#"{"version":"0.2.1","url":"https://example.test/b-0.2.1.dmg","previous":{"version":"0.2.0","url":"https://example.test/b-0.2.0.dmg"}}"#.utf8)
+    try CoreStatus.from(outcome, version: "0.2.1", manifest: manifest, at: 1).write(to: paths.coreStatusPath)
+    XCTAssertEqual(try mode(paths.coreStatusPath), 0o600)
+    let notice = MenuNotice.from(CoreStatus.read(from: paths.coreStatusPath), bundleVersion: "0.2.1")
+    XCTAssertEqual(notice, MenuNotice(text: "Update didn't start. Install the previous version",
+                                      url: URL(string: "https://example.test/b-0.2.0.dmg")))
+    XCTAssertEqual(state.readLastRunVersion(), "0.2.0")
+    // stale file from another build, or a healthy launch -> nothing shown
+    XCTAssertNil(MenuNotice.from(CoreStatus.read(from: paths.coreStatusPath), bundleVersion: "0.2.2"))
+    try CoreStatus.from(.healthy, version: "0.2.1", manifest: nil, at: 2).write(to: paths.coreStatusPath)
+    XCTAssertNil(MenuNotice.from(CoreStatus.read(from: paths.coreStatusPath), bundleVersion: "0.2.1"))
+    // manifest unreachable -> notice still shown, no link
+    let noLink = CoreStatus.from(.updateDidNotStart, version: "0.2.1", manifest: nil, at: 3)
+    XCTAssertEqual(MenuNotice.from(noLink, bundleVersion: "0.2.1")?.url, nil)
+    XCTAssertEqual(MenuNotice.from(noLink, bundleVersion: "0.2.1")?.text, VersionGuard.failureMessage)
+  }
+
   // Update check: manual only
   func testUpdateCheck() {
     let j = Data(#"{"version":"0.3.0","url":"https://example.test/b.dmg","sha256":"z"}"#.utf8)

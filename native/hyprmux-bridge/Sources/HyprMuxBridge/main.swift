@@ -26,10 +26,9 @@ if CommandLine.arguments.contains("--core") {
                               probe: LocalServerProbe(port: serverPort()), clock: SystemClock(),
                               bundleVersion: bundleVersion, bundlePath: Bundle.main.bundlePath)
   let outcome = guardian.runAtLaunch()
-  let status: [String: Any] = ["version": bundleVersion, "launch": "\(outcome)", "at": Date().timeIntervalSince1970]
-  if let data = try? JSONSerialization.data(withJSONObject: status) {
-    try? BridgeState.writePrivate(paths.coreStatusPath, String(decoding: data, as: UTF8.self))
-  }
+  let manifest = outcome == .updateDidNotStart ? UpdateCheck.fetch() : nil
+  try? CoreStatus.from(outcome, version: bundleVersion, manifest: manifest, at: Date().timeIntervalSince1970)
+    .write(to: paths.coreStatusPath)
   dispatchMain()
 }
 
@@ -39,6 +38,7 @@ final class MenuController: NSObject, NSMenuDelegate {
   var statusText = "Starting"
   var noticeText: String?
   var updateText: String?
+  var coreNoticeURL: URL?
   var timer: Timer?
 
   override init() {
@@ -90,6 +90,10 @@ final class MenuController: NSObject, NSMenuDelegate {
     menu.removeAllItems()
     add("Status: \(statusText)", nil, enabled: false)
     if let n = noticeText { add(n, nil, enabled: false) }
+    if let core = MenuNotice.from(CoreStatus.read(from: paths.coreStatusPath), bundleVersion: bundleVersion) {
+      coreNoticeURL = core.url
+      add(core.text, core.url == nil ? nil : #selector(openCoreNotice))
+    }
     add("Version \(bundleVersion)", nil, enabled: false)
     menu.addItem(.separator())
     let phone = NSMenuItem(title: "Phone access", action: #selector(togglePhone), keyEquivalent: "")
@@ -117,6 +121,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
   }
 
+  @objc func openCoreNotice() { if let u = coreNoticeURL { NSWorkspace.shared.open(u) } }
   @objc func restart() { _ = coordinator.reregisterRequired(); poll() }
   @objc func openLogs() { NSWorkspace.shared.open(URL(fileURLWithPath: paths.logsDir)) }
   @objc func stopBridge() { timer?.invalidate(); coordinator.unregisterAll(); statusText = "Stopped" }
