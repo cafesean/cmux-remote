@@ -4,6 +4,7 @@ import Foundation
 public enum MenuAction: Equatable, Sendable {
   case signIn, connectDevice, devices, toggleRemoteAccess, upgrade, managePlan, signOut, quit, openNotice
   case restart, openLogs, stopBridge, checkUpdate
+  case allowScreenRecording, allowAccessibility
 }
 
 public indirect enum MenuItem: Equatable, Sendable {
@@ -37,13 +38,17 @@ public struct MenuInput: Equatable, Sendable {
   public var version: String
   /// Option held while the menu opened: show the Troubleshooting section.
   public var optionHeld: Bool
+  /// Remote Desktop grants, re-read on menu open; nil = not read (no permission block).
+  public var permissions: PermissionStatus?
 
   public init(status: String, hostname: String? = nil, signInVisible: Bool = true, signedIn: Bool = false, email: String? = nil,
               plan: String? = nil, canManagePlan: Bool = false, problems: [String] = [], notice: String? = nil,
-              noticeOpens: Bool = false, remoteAccessOn: Bool = false, version: String, optionHeld: Bool = false) {
+              noticeOpens: Bool = false, remoteAccessOn: Bool = false, version: String, optionHeld: Bool = false,
+              permissions: PermissionStatus? = nil) {
     self.status = status; self.hostname = hostname; self.signInVisible = signInVisible; self.signedIn = signedIn
     self.email = email; self.plan = plan; self.canManagePlan = canManagePlan; self.problems = problems; self.notice = notice
     self.noticeOpens = noticeOpens; self.remoteAccessOn = remoteAccessOn; self.version = version; self.optionHeld = optionHeld
+    self.permissions = permissions
   }
 }
 
@@ -67,6 +72,7 @@ public enum MenuModel {
 
   public static func items(_ i: MenuInput) -> [MenuItem] {
     var out: [MenuItem] = [.info(statusLine(i), tooltip: i.hostname ?? (i.remoteAccessOn ? nil : "Remote access is off"))]
+    if let p = i.permissions, !p.allGranted { out += RemoteDesktopPermissions.menuItems(p) + [.separator] }
     let signedIn = i.signInVisible && i.signedIn
     if i.signInVisible {
       if signedIn {
