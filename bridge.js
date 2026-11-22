@@ -3227,7 +3227,8 @@ const server = http.createServer((req, res) => {
 });
 // p41 A18: SIGTERM -> `event: restarting` on every open SSE stream, short drain, exit.
 const graceful = require('./lib/graceful').createGraceful(server);
-graceful.install();
+// p43: no stream helper outlives the bridge (each is SIGKILLed; its stdin EOF alone is not trusted).
+graceful.install(() => screenStream.stopAll());
 // What both listen paths print and do once the bridge is reachable.
 function afterListen() {
   graceful.markReady();
