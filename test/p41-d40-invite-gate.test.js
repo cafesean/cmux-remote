@@ -80,7 +80,7 @@ test('invite gate: a local (canInvite) key → code; success shape unchanged', a
     const r = await start(m, KEY_LOCAL);
     assert.strictEqual(r.status, 200, r.text);
     assert.deepStrictEqual(Object.keys(r.json).sort(), ['code', 'expiresAt', 'qr']);
-    assert.strictEqual(r.json.qr, `cmuxremote://pair?u=${encodeURIComponent(PUB)}&c=${r.json.code}`);
+    assert.strictEqual(r.json.qr, `hyprmux://pair?u=${encodeURIComponent(PUB)}&c=${r.json.code}`);
   } finally { await m.close(); }
 });
 
@@ -142,7 +142,7 @@ test('invite gate: loopback Host + no PUBLIC_URL → 409 no_public_address (toke
     // A Host the phone can reach (LAN name, tunnel) still mints, and the link carries it.
     const ok = await req(m.base, 'POST', '/api/pair/start', bearer(TOKEN, { host: 'mac.example.test:8080' }));
     assert.strictEqual(ok.status, 200, ok.text);
-    assert.ok(ok.json.qr.startsWith(`cmuxremote://pair?u=${encodeURIComponent('http://mac.example.test:8080')}&c=`));
+    assert.ok(ok.json.qr.startsWith(`hyprmux://pair?u=${encodeURIComponent('http://mac.example.test:8080')}&c=`));
     // The not_allowed answer comes first: a QR key learns nothing about the address.
     assert.strictEqual((await req(m.base, 'POST', '/api/pair/start', bearer(KEY_QR, { host: `127.0.0.1:${m.port}` }))).status, 403);
   } finally { await m.close(); }

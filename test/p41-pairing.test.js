@@ -47,14 +47,14 @@ async function mount(opts) {
   return { pairing, clock, file, dir, base: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((r) => server.close(r)) };
 }
 
-test('start mints an 8-char code from an unambiguous alphabet and a cmuxremote:// link', async () => {
+test('start mints an 8-char code from an unambiguous alphabet and a hyprmux:// link', async () => {
   const m = await mount({ publicUrl: 'https://mux.example.test/' });
   try {
     const r = await call(m.base, 'POST', '/api/pair/start', { token: TOKEN });
     assert.strictEqual(r.status, 200);
     assert.match(r.json.code, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/);
     assert.strictEqual(r.json.expiresAt, m.clock.t + TEN_MIN);
-    assert.strictEqual(r.json.qr, `cmuxremote://pair?u=${encodeURIComponent('https://mux.example.test')}&c=${r.json.code}`);
+    assert.strictEqual(r.json.qr, `hyprmux://pair?u=${encodeURIComponent('https://mux.example.test')}&c=${r.json.code}`);
   } finally { await m.close(); }
 });
 
@@ -62,7 +62,7 @@ test('without PUBLIC_URL the link uses the request Host (a loopback Host is 409,
   const m = await mount({ publicUrl: '' });
   try {
     const r = await raw(m.base, 'POST', '/api/pair/start', { authorization: `Bearer ${TOKEN}`, host: 'mac.example.test:8080' });
-    assert.strictEqual(r.json.qr, `cmuxremote://pair?u=${encodeURIComponent('http://mac.example.test:8080')}&c=${r.json.code}`);
+    assert.strictEqual(r.json.qr, `hyprmux://pair?u=${encodeURIComponent('http://mac.example.test:8080')}&c=${r.json.code}`);
     assert.strictEqual((await call(m.base, 'POST', '/api/pair/start', { token: TOKEN })).status, 409);
   } finally { await m.close(); }
 });
@@ -309,7 +309,7 @@ test('real server: start needs the token even from loopback; claim is open', asy
     assert.strictEqual((await raw(s.base, 'POST', '/api/pair/start', { host: 'evil.example' })).status, 401);
     const ok = await call(s.base, 'POST', '/api/pair/start', { token: TOKEN });
     assert.strictEqual(ok.status, 200);
-    assert.ok(ok.json.qr.startsWith('cmuxremote://pair?u=https%3A%2F%2Fmux.example.test&c='));
+    assert.ok(ok.json.qr.startsWith('hyprmux://pair?u=https%3A%2F%2Fmux.example.test&c='));
     const claim = await call(s.base, 'POST', '/api/pair/claim', { body: { code: ok.json.code, deviceName: 'phone' }, headers: { 'x-forwarded-for': '203.0.113.9' } });
     assert.strictEqual(claim.status, 200, 'the app claims through the tunnel without any credential');
   } finally { await s.stop(); }
@@ -398,12 +398,12 @@ test('CLI sends SERVER_TOKEN', async () => {
     });
     const full = await run([], { SERVER_TOKEN: TOKEN });
     assert.strictEqual(full.code, 0, full.stderr);
-    const link = full.stdout.split('\n').find((l) => l.startsWith('cmuxremote://pair?'));
+    const link = full.stdout.split('\n').find((l) => l.startsWith('hyprmux://pair?'));
     assert.ok(link && link.includes('u=https%3A%2F%2Fmux.example.test&c='), 'the raw link sits on its own line');
     assert.ok(/[█▀▄]/.test(full.stdout), 'a QR is drawn');
     assert.ok(!full.stdout.includes(TOKEN) && !full.stderr.includes(TOKEN), 'the token is never printed');
     const only = await run(['--link'], { SERVER_TOKEN: TOKEN });
-    assert.match(only.stdout, /^cmuxremote:\/\/pair\?u=[^\n]+&c=[A-Z2-9]{8}\n$/);
+    assert.match(only.stdout, /^hyprmux:\/\/pair\?u=[^\n]+&c=[A-Z2-9]{8}\n$/);
 
     // No token anywhere: the server says 401 and the CLI says what to do, without a stack or the token.
     const bare = await run([], {});
@@ -420,7 +420,7 @@ test('CLI sends SERVER_TOKEN', async () => {
     const out = []; const errs = [];
     const code = await main(['--link'], { PORT: String(s.port) }, (l) => out.push(l), (l) => errs.push(l), serverDir);
     assert.strictEqual(code, 0, errs.join('\n'));
-    assert.match(out[0], /^cmuxremote:\/\/pair\?/);
+    assert.match(out[0], /^hyprmux:\/\/pair\?/);
 
     const dead = spawnSync(process.execPath, [cli], { env: { PATH: process.env.PATH, PORT: '1', SERVER_TOKEN: TOKEN }, cwd: s.cwd, encoding: 'utf8' });
     assert.strictEqual(dead.status, 1);

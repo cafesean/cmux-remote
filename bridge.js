@@ -2477,6 +2477,31 @@ const browserShotLimiter = require('./lib/shot-limiter').createShotLimiter({ min
 // p41 D97: Mac screen — lib/mac-screen.js owns flags, TCC errors, limits; text rides osascript stdin.
 const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => secretsIn.childEnv(),
   secret: SECRET, host: HOST, socket: SOCKET, captureGranted: () => screenRecordingTruth() });
+// p43: video Remote Desktop helper owner. Same flags (insecure-LAN force-off included) and D253 guard as the
+// JPEG routes; while a video viewer owns control the JPEG input routes answer 409 control_busy.
+const screenStream = require('./lib/screen-stream').createScreenStream({ flags: macScreen.flags,
+  captureBlocked: () => screenRecordingTruth() === false, jxaRelease: () => macScreen.jxaRelease(),
+  jpegIdle: () => macScreen.jpegIdle(), focusSecure: (o) => macScreen.focusSecure(o) });
+macScreen.setInputGate(() => screenStream.jpegInputAllowed());
+// GET /cmux/screen/video?displayId=&gen=&epoch= -> chunked body of framed helper packets until the client goes.
+function cmuxScreenVideo(req, res, u) {
+  if (!macScreen.flags.view) return send(res, 403, { error: 'screen_disabled', flag: 'SCREEN_VIEW' });
+  const displayId = Number(u.searchParams.get('displayId'));
+  const gen = Number(u.searchParams.get('gen') || 0), epoch = Number(u.searchParams.get('epoch') || 0);
+  if (!Number.isInteger(displayId) || displayId < 1 || displayId > 0xffffffff) return send(res, 400, { error: 'bad_display' });
+  if (!Number.isInteger(gen) || gen < 0 || gen > 0xffffffff || !Number.isInteger(epoch) || epoch < 0) return send(res, 400, { error: 'bad_gen' });
+  const sink = { write: (b) => { if (!res.writableEnded && !res.destroyed) res.write(b); } };
+  const a = screenStream.attach(displayId, gen, sink);
+  if (!a.ok) return send(res, a.status || 503, { error: a.error, ...(a.flag ? { flag: a.flag } : {}), ...(a.need ? { need: a.need } : {}), ...(a.fallback ? { fallback: true } : {}) });
+  res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  macScreen.wake();   // p41 D103: hold the display awake while the stream runs
+  const wakeT = setInterval(() => macScreen.wake(), require('./lib/mac-screen').LIMITS.SCREEN_WAKE_EVERY_MS || 15000);
+  if (macScreen.flags.control) screenStream.openControl(displayId, gen, epoch).catch(() => {});
+  let done = false;
+  const end = () => { if (done) return; done = true; clearInterval(wakeT); a.detach(); };
+  req.on('close', end); res.on('close', end);
+}
 // p41 D253: Screen Recording per the rd-setup GROUND TRUTH only (window-name check, D189b) -> true | false | null.
 // The preflight alone lies, so a 'probe' answer is null (unknown): capture still runs then.
 function screenRecordingTruth() {
@@ -3150,9 +3175,19 @@ function dispatchCmux(req, res, u) {
   if (req.method === 'POST' && p === '/cmux/rd-setup/remind') {
     return cmuxReadBody(req, (b) => send(res, 200, rdSetup.setRemind(!!(b && b.clear))), 1024);
   }
+  if (req.method === 'GET' && p === '/cmux/screen/video') return cmuxScreenVideo(req, res, u);   // p43
+  if (req.method === 'POST' && p === '/cmux/screen/video/in') {   // p43: items pass today's allow-list + clamps
+    if (!macScreen.flags.control) return send(res, 403, { error: 'screen_disabled', flag: 'SCREEN_CONTROL' });
+    return cmuxReadBody(req, (b) => {
+      if (!b) return send(res, 400, { error: 'bad_json' });
+      const { videoItem } = require('./lib/mac-screen');
+      const items = Array.isArray(b.items) ? b.items.map(videoItem).filter(Boolean) : b.items;
+      screenStream.input({ ...b, items }).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+    }, 64 * 1024);
+  }
   if (req.method === 'GET' && p === '/cmux/screen/info') return macScreen.info().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
   if (req.method === 'GET' && p === '/cmux/screen/dialogs') return macScreen.dialogs().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));   // p41 D135
-  if (req.method === 'GET' && p === '/cmux/screen/shot') return macScreen.shot(u.searchParams.get('display')).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+  if (req.method === 'GET' && p === '/cmux/screen/shot') return macScreen.shot(u.searchParams.get('display'), u.searchParams.get('displayId')).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
   if (req.method === 'POST' && (p === '/cmux/screen/dialogs/press' || p === '/cmux/screen/dialogs/type')) {   // p41 D136 (body never logged)
     const fn = p.endsWith('/press') ? macScreen.dialogPress : macScreen.dialogType;
     return cmuxReadBody(req, (b) => {
@@ -3192,7 +3227,8 @@ const server = http.createServer((req, res) => {
 });
 // p41 A18: SIGTERM -> `event: restarting` on every open SSE stream, short drain, exit.
 const graceful = require('./lib/graceful').createGraceful(server);
-graceful.install();
+// p43: no stream helper outlives the bridge (each is SIGKILLed; its stdin EOF alone is not trusted).
+graceful.install(() => screenStream.stopAll());
 // What both listen paths print and do once the bridge is reachable.
 function afterListen() {
   graceful.markReady();

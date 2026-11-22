@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Assemble HyprMux Bridge.app (unsigned; signing + notarization is a separate step).
 #   Contents/MacOS/HyprMuxBridge                    menu bar app + `--core` agent (swift build -c release)
+#   Contents/MacOS/hm-screen-stream                 screen video helper, spawned by the runtime (swift build -c release)
 #   Contents/MacOS/hyprmux-runtime                  bun-compiled server|bridge|tunnel (build-runtime.sh)
 #   Contents/MacOS/cloudflared                      pinned + verified (cloudflared.ref), Cloudflare's signature kept
 #   Contents/Resources/server/                      files the server reads at run time
@@ -8,7 +9,7 @@
 #   Contents/Library/LaunchAgents/*.plist           registered by the Bridge with SMAppService.agent
 #   Contents/Info.plist                             version = package.json version
 # Usage: scripts/bridge-app/package-bridge.sh <out-dir> [work-dir]   -> <out-dir>/HyprMux Bridge.app
-# Test seams (local builds only): BRIDGE_MENU_BIN, BRIDGE_RUNTIME_DIR, BRIDGE_CLOUDFLARED_BIN use prebuilt pieces.
+# Test seams (local builds only): BRIDGE_MENU_BIN, BRIDGE_SCREEN_STREAM_BIN, BRIDGE_RUNTIME_DIR, BRIDGE_CLOUDFLARED_BIN use prebuilt pieces.
 set -euo pipefail
 HERE=${0:A:h}
 REPO=${HERE:h:h}
@@ -25,6 +26,14 @@ if [ -n "${BRIDGE_MENU_BIN:-}" ]; then MENU=$BRIDGE_MENU_BIN; else
   MENU=$(swift build -c release --package-path $REPO/native/hyprmux-bridge --show-bin-path)/HyprMuxBridge
 fi
 install -m 755 "$MENU" "$C/MacOS/HyprMuxBridge"
+
+# 1b. screen video helper: next to hyprmux-runtime, which finds it at dirname(execPath)/hm-screen-stream
+# (lib/screen-stream.js). Spawned by the runtime, so the Screen Recording grant stays on the Bridge.
+if [ -n "${BRIDGE_SCREEN_STREAM_BIN:-}" ]; then SS=$BRIDGE_SCREEN_STREAM_BIN; else
+  swift build -c release --package-path $REPO/native/hyprmux-bridge --product hm-screen-stream >&2
+  SS=$(swift build -c release --package-path $REPO/native/hyprmux-bridge --show-bin-path)/hm-screen-stream
+fi
+install -m 755 "$SS" "$C/MacOS/hm-screen-stream"
 
 # 2. runtime
 RT=${BRIDGE_RUNTIME_DIR:-}
