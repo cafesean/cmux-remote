@@ -495,3 +495,27 @@ test('stall: emergency IDR and idle grants never stall; only sent, unprocessed c
   await wait(80);
   assert.strictEqual(ws.texts('fallback').length, 0, 'acked: no stall');
 });
+
+test('p43 drain: a fast link that empties between frames gives no drain sample, so a big frame is admitted (0.3.3 blur/black spiral)', async () => {
+  const { createDrain } = require('../lib/screen-ws');
+  let t = 0; const d = createDrain(() => t);
+  for (let i = 0; i < 30; i++) { d.tick(0, 0); d.tick(2048, 2048); t += 66; }   // 2 KB frames at 15 fps, socket empty again before each frame
+  d.tick(0, 0);
+  assert.strictEqual(d.kbps(), null, 'the gap between frames is idle time, not drain time');
+
+  const b = stubBridge();
+  const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: () => ({ id: 'm1' }), accept: () => null, refuse: () => {}, policy: null, bridge: b.api, now: () => t });
+  const ws = fakeWs();
+  ws.send = (x) => { ws.sent.push(typeof x === 'string' ? JSON.parse(x) : { bin: x }); if (typeof x !== 'string') ws.bufferedAmount += x.length; return true; };
+  const { s } = await open(sw, ws);
+  ws.msg({ t: 'ready', gen: 1 });
+  const gr = () => b.ops.filter((o) => o.op === 'grant').at(-1).grantId;
+  for (let seq = 1; seq <= 20; seq++) {
+    b.push(pkt({ type: 1, flags: 0, gen: 1, seq, grantId: gr() }, 'x'.repeat(2048)));
+    t += 66; ws.bufferedAmount = 0;                                  // fast link: written out long before the next frame
+    ws.msg({ t: 'ack', gen: 1, seq });
+  }
+  b.push(pkt({ type: 1, flags: 0, gen: 1, seq: 21, grantId: gr() }, 'x'.repeat(60000)));                   // motion burst after a static screen
+  assert.strictEqual(ws.sent.filter((x) => x.bin).length, 21, 'the 60 KB frame goes out; no server drop');
+  assert.ok(!b.ops.some((o) => o.op === 'keyframe'), 'no drop-triggered keyframe');
+});

@@ -138,3 +138,12 @@ test('latency jitter within 20 ms of the minimum is clean (a fast link never loo
   for (let i = 0; i < 6; i++) { rc.onStats({ fps: 30, dropped: 0, rttMs: 24 }); adv(RATE.TICK_MS); const st = rc.tick(); assert.ok(!st || st.reason === 'clean', '3x but +16 ms: clean'); }
   assert.strictEqual(rc.rate().kbps, 4400, 'stepped up after 3 s');
 });
+
+test('p43 floor: congestion and oversize IDRs never shrink the picture below RATE.MIN_W (640) wide', () => {
+  assert.ok(RATE.MIN_W >= 640);
+  const f = ctl();
+  for (let i = 0; i < 200; i++) { f.adv(RATE.TICK_MS); f.rc.onStats({ fps: 1, dropped: 9 }); f.rc.tick(); }
+  assert.ok(f.rc.rate().w >= 640, 'congested floor ' + f.rc.rate().w);
+  for (let i = 0; i < 5; i++) f.rc.downscale();
+  assert.ok(f.rc.rate().w >= 640, 'oversize floor ' + f.rc.rate().w);
+});
