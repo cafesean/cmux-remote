@@ -39,7 +39,7 @@ if CommandLine.arguments.contains("--core") {
   prepareState()
   let guardian = VersionGuard(coordinator: coordinator, state: state, launchctl: launchctl,
                               probe: LocalServerProbe(port: serverPort()), clock: SystemClock(),
-                              bundleVersion: bundleVersion, bundlePath: Bundle.main.bundlePath)
+                              bundleVersion: bundleVersion, bundlePath: Bundle.main.bundlePath, selfAgent: .core)
   let outcome = guardian.runAtLaunch()
   let manifest = outcome == .updateDidNotStart ? UpdateCheck.fetch() : nil
   try? CoreStatus.from(outcome, version: bundleVersion, manifest: manifest, at: Date().timeIntervalSince1970)
@@ -47,6 +47,9 @@ if CommandLine.arguments.contains("--core") {
   // Core loop: delete queue, token refresh 60 s before expiry, plan re-check (300 s), checkout poll (10 s).
   if let session = makeSession() {
     let tokenEndpoint = session.discover()?.token
+    // An owner from an earlier version never created the hub app session (team gate): do it once now.
+    session.refreshIfNeeded(tokenEndpoint: tokenEndpoint)
+    session.ensureHubSession()
     let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "core"))
     timer.schedule(deadline: .now(), repeating: CheckoutPoller.interval)
     timer.setEventHandler { session.coreTick(port: serverPort(), tokenEndpoint: tokenEndpoint) }
@@ -56,10 +59,17 @@ if CommandLine.arguments.contains("--core") {
   dispatchMain()
 }
 
-final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresentationContextProviding {
+/// The HyprMux logo as a template image (Contents/Resources); nil under a bare `swift run`.
+let statusIcon: NSImage? = {
+  guard let img = Bundle.main.image(forResource: MenuBarStatus.iconName) else { return nil }
+  img.isTemplate = true
+  img.size = NSSize(width: 18, height: 18)
+  return img
+}()
+
+final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, ASWebAuthenticationPresentationContextProviding {
   let session = makeSession()
   var authSession: ASWebAuthenticationSession?
-  var qrWindow: NSWindow?
   var accountText: String?
 
   func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor { NSApp.windows.first ?? NSWindow() }
@@ -68,13 +78,17 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
   let menu = NSMenu()
   var statusText = "Starting"
   var noticeText: String?
-  var updateText: String?
   var coreNoticeURL: URL?
+  var updateText: String?
   var timer: Timer?
 
   override init() {
     super.init()
-    item.button?.title = "HyprMux"
+    if let icon = statusIcon {
+      item.button?.image = icon
+      item.button?.imagePosition = .imageOnly
+    }
+    updateButton()
     menu.delegate = self
     item.menu = menu
     prepareState()
@@ -94,7 +108,33 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
       statusText = "Stopped"
       noticeText = why
     }
-    item.button?.title = statusText == "Online" ? "HyprMux" : "HyprMux (\(statusText))"
+    updateButton()
+  }
+
+  /// Logo only; the status goes to the tooltip (and the first menu line). Not Online draws the logo dimmed.
+  func updateButton() {
+    guard let b = item.button else { return }
+    b.toolTip = MenuBarStatus.toolTip(statusText)
+    b.appearsDisabled = MenuBarStatus.dimmed(statusText)
+    if statusIcon == nil { b.title = MenuBarStatus.fallbackTitle(statusText) }
+  }
+
+  /// Launching the app again while it runs (Finder, Spotlight, `open`) opens the menu, so it is reachable even
+  /// when a full menu bar has pushed the item under the notch.
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    DispatchQueue.main.async { [weak self] in self?.showMenu() }
+    return false
+  }
+
+  func showMenu() {
+    if let b = item.button, let w = b.window, let screen = w.screen,
+       MenuBarStatus.isReachable(item: w.frame, screen: screen.frame,
+                                 notchLeft: screen.auxiliaryTopLeftArea, notchRight: screen.auxiliaryTopRightArea) {
+      b.performClick(nil)
+    } else {
+      NSApp.activate(ignoringOtherApps: true)
+      menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
   }
 
   func healthOK() -> Bool {
@@ -110,55 +150,96 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
     return ok
   }
 
-  func add(_ title: String, _ action: Selector?, enabled: Bool = true) {
-    let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
-    mi.target = self
-    mi.isEnabled = enabled && action != nil
-    menu.addItem(mi)
+  var menuActions: [MenuAction] = []
+
+  func render(_ items: [MenuItem], into menu: NSMenu) {
+    for it in items {
+      switch it {
+      case .separator: menu.addItem(.separator())
+      case .info(let t, let tip):
+        let mi = NSMenuItem(title: t, action: nil, keyEquivalent: "")
+        mi.isEnabled = false
+        mi.toolTip = tip
+        menu.addItem(mi)
+      case .prominent(let t, let a):
+        let mi = NSMenuItem(title: t, action: #selector(performMenuAction(_:)), keyEquivalent: "")
+        mi.target = self
+        mi.tag = menuActions.count
+        menuActions.append(a)
+        mi.attributedTitle = NSAttributedString(string: t, attributes: [
+          .font: NSFont.menuFont(ofSize: 0).withTraits(.bold), .foregroundColor: NSColor.controlAccentColor])
+        if let img = NSImage(systemSymbolName: MenuModel.upgradeSymbol, accessibilityDescription: nil) {
+          mi.image = img.withSymbolConfiguration(.init(paletteColors: [.white, .controlAccentColor]))
+        }
+        menu.addItem(mi)
+      case .action(let t, let a, let checked):
+        let mi = NSMenuItem(title: t, action: #selector(performMenuAction(_:)), keyEquivalent: "")
+        mi.target = self
+        mi.tag = menuActions.count
+        menuActions.append(a)
+        mi.state = checked ? .on : .off
+        menu.addItem(mi)
+      case .submenu(let t, let sub):
+        let mi = NSMenuItem(title: t, action: nil, keyEquivalent: "")
+        let m = NSMenu(title: t)
+        render(sub, into: m)
+        mi.submenu = m
+        menu.addItem(mi)
+      }
+    }
+  }
+
+  func menuInput() -> MenuInput {
+    var problems: [String] = []
+    if let n = noticeText { problems.append(n) }
+    let s = session
+    let signedIn = s?.ownerSub != nil
+    if let s, s.config.signInVisible {
+      if !signedIn, let why = accountText { problems.append(why) }
+      switch s.tunnelState {
+      case .fairUse?: problems.append(TunnelState.fairUseText)
+      case .unreachable?: problems.append(TunnelState.unreachableText)
+      case .limit?: problems.append("Free plan: 1 machine")
+      default: break
+      }
+      if s.queue.hasPending { problems.append(TunnelDeleteQueue.pendingText) }
+    }
+    if let u = updateText { problems.append(u) }
+    let core = MenuNotice.from(CoreStatus.read(from: paths.coreStatusPath), bundleVersion: bundleVersion)
+    coreNoticeURL = core?.url
+    return MenuInput(status: statusText, hostname: state.phoneAccessOn ? state.readLastTunnel()?.hostname : nil,
+                     signInVisible: s?.config.signInVisible ?? false, signedIn: signedIn, email: s?.accountEmail, plan: s?.plan,
+                     canManagePlan: s?.manageURL != nil, problems: problems, notice: core?.text, noticeOpens: core?.url != nil,
+                     remoteAccessOn: state.phoneAccessOn, version: bundleVersion,
+                     optionHeld: NSEvent.modifierFlags.contains(.option))
   }
 
   func menuNeedsUpdate(_ menu: NSMenu) {
     menu.removeAllItems()
-    add("Status: \(statusText)", nil, enabled: false)
-    if let n = noticeText { add(n, nil, enabled: false) }
-    if let core = MenuNotice.from(CoreStatus.read(from: paths.coreStatusPath), bundleVersion: bundleVersion) {
-      coreNoticeURL = core.url
-      add(core.text, core.url == nil ? nil : #selector(openCoreNotice))
-    }
-    add("Version \(bundleVersion)", nil, enabled: false)
-    menu.addItem(.separator())
-    if let s = session, s.config.signInVisible {
-      if let sub = s.ownerSub {
-        add("Account: \(sub)\(s.plan.map { " (\($0))" } ?? "")", nil, enabled: false)
-        add("Devices…", #selector(showDevices))
-        if s.plan != "pro" { add("Upgrade", #selector(upgrade)) }
-        add("Sign Out", #selector(signOut))
-      } else {
-        add(accountText ?? "Sign In…", #selector(signIn))
-      }
-      if let t = s.tunnelState {
-        switch t {
-        case .fairUse: add(TunnelState.fairUseText, nil, enabled: false)
-        case .unreachable: add(TunnelState.unreachableText, nil, enabled: false)
-        case .limit: add("Free plan: 1 machine", nil, enabled: false)
-        default: break
-        }
-      }
-      if s.queue.hasPending { add(TunnelDeleteQueue.pendingText, nil, enabled: false) }
-    }
-    add("Pair a Phone…", #selector(showQR))
-    let phone = NSMenuItem(title: "Phone access", action: #selector(togglePhone), keyEquivalent: "")
-    phone.target = self
-    phone.state = state.phoneAccessOn ? .on : .off
-    menu.addItem(phone)
-    add(updateText ?? "Check for Update", #selector(checkUpdate))
-    add("Restart", #selector(restart))
-    add("Open Logs", #selector(openLogs))
-    add("Stop Bridge", #selector(stopBridge))
-    menu.addItem(.separator())
-    add("Quit", #selector(quit))
+    menuActions = []
+    render(MenuModel.items(menuInput()), into: menu)
   }
 
+  @objc func performMenuAction(_ sender: NSMenuItem) {
+    guard sender.tag >= 0, sender.tag < menuActions.count else { return }
+    switch menuActions[sender.tag] {
+    case .signIn: signIn()
+    case .connectDevice: connectDevice()
+    case .devices: showDevices()
+    case .toggleRemoteAccess: togglePhone()
+    case .upgrade: upgrade()
+    case .restart: restart()
+    case .openLogs: openLogs()
+    case .signOut: signOut()
+    case .quit: quit()
+    case .openNotice: openCoreNotice()
+    case .managePlan: if let u = session?.manageURL { NSWorkspace.shared.open(u) }
+    case .stopBridge: stopBridge()
+    case .checkUpdate: checkUpdate()
+    }
+  }
+
+  /// Allow Remote Access: off stops the tunnel agent only (the tunnel and its hostname are kept, never deleted).
   @objc func togglePhone() {
     let on = !state.phoneAccessOn
     let port = serverPort()
@@ -171,13 +252,23 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
   @objc func signIn() {
     guard let s = session else { return }
     DispatchQueue.global().async { [weak self] in
-      let pending = s.beginSignIn()
+      let begun = s.beginSignInResult()
       DispatchQueue.main.async {
         guard let self else { return }
-        guard let pending else { self.accountText = SignInState.unavailableText; return }
-        let a = ASWebAuthenticationSession(url: pending.url, callbackURLScheme: "hyprmux-bridge") { url, _ in
+        self.accountText = nil
+        let pending: BridgeSession.PendingSignIn
+        switch begun {
+        case .failure(let f): self.accountText = f.text; return
+        case .success(let p): pending = p
+        }
+        let a = ASWebAuthenticationSession(url: pending.url, callbackURLScheme: "hyprmux-bridge") { url, error in
           DispatchQueue.global().async {
-            if case .signedOut(let m) = s.completeSignIn(pending, callback: url) {
+            if url == nil, let error {
+              let f: SignInFailure = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+                ? .cancelled : .browserError(code: (error as NSError).code)
+              let m = s.signInFailed(f, step: "browser")
+              DispatchQueue.main.async { self.accountText = m }
+            } else if case .signedOut(let m) = s.completeSignIn(pending, callback: url) {
               DispatchQueue.main.async { self.accountText = m }
             } else { _ = s.readEntitlement() }
           }
@@ -185,7 +276,11 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
         a.presentationContextProvider = self
         a.prefersEphemeralWebBrowserSession = false
         self.authSession = a
-        if !a.start() { self.accountText = SignInState.unavailableText }
+        if a.start() {
+          s.logSignIn("window")
+        } else {
+          self.accountText = s.signInFailed(.windowNotOpened, step: "window")
+        }
       }
     }
   }
@@ -221,35 +316,140 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
     }
   }
 
-  @objc func showQR() {
+  // MARK: Connect a Device (one window: QR, code, address, Copy Link)
+
+  var connectWindow: NSWindow?
+  var connectQR: NSImageView?
+  var connectStatus: NSTextField?
+  var connectCode: NSTextField?
+  var connectAddress: NSTextField?
+  var connectCopy: NSButton?
+  var connectLink: String?
+  var connectRun = 0
+
+  /// Turns Remote Access on first when it is off (or the server's PUBLIC_URL is not the ensured host), shows
+  /// "Starting…" until the remote address answers, then starts pairing. A second click refreshes the same window.
+  @objc func connectDevice() {
+    connectRun += 1
+    let run = connectRun
+    presentConnect(nil, status: "Starting…")
+    let port = serverPort()
     DispatchQueue.global().async { [weak self] in
-      let link = self?.loopback()?.pairingLink()
-      DispatchQueue.main.async { self?.presentQR(link) }
+      guard let self else { return }
+      let host = state.readLastTunnel()?.hostname
+      let published = host.map { state.readEnv()["PUBLIC_URL"] == "https://\($0)" } ?? false
+      var ensured = host
+      if !state.phoneAccessOn || !state.hasOwnTunnelToken() || !published {
+        guard let s = self.session else { return self.connectDone(run, nil, status: "Sign in to connect a device.") }
+        let t = s.setPhoneAccess(true, port: port)
+        DispatchQueue.main.async { self.poll() }
+        guard case .ready(_, let h) = t else { return self.connectDone(run, nil, status: Self.connectFailure(t)) }
+        ensured = h
+      }
+      if let h = ensured { _ = Self.waitUntilUp(URL(string: "https://\(h)/healthz")) }
+      _ = Self.waitUntilUp(URL(string: "http://127.0.0.1:\(serverPort())/healthz"))
+      let result = self.loopback()?.startPairing() ?? .notRunning
+      CoreLog.append("pairing-start", [("result", result.logResult)], logsDir: paths.logsDir)
+      self.connectDone(run, result, status: result.text)
     }
   }
 
-  func presentQR(_ link: String?) {
-    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 340), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-    w.title = "Pair a Phone"
-    w.isReleasedWhenClosed = false
-    let view = NSImageView(frame: NSRect(x: 20, y: 40, width: 280, height: 280))
-    if let link, let f = CIFilter(name: "CIQRCodeGenerator") {
-      f.setValue(Data(link.utf8), forKey: "inputMessage")
-      if let img = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)) {
-        let rep = NSCIImageRep(ciImage: img)
-        let ns = NSImage(size: rep.size)
-        ns.addRepresentation(rep)
-        view.image = ns
-      }
+  static func connectFailure(_ t: TunnelState?) -> String {
+    switch t {
+    case .signInRequired?: return "Sign in to connect a device."
+    case .limit?: return "Free plan: 1 machine. Upgrade to connect this Mac."
+    case .fairUse?: return TunnelState.fairUseText
+    case .unreachable?: return TunnelState.unreachableText
+    default: return "Couldn't turn on Remote Access."
     }
-    let label = NSTextField(labelWithString: link == nil ? "Turn on Phone access first." : "Scan with the HyprMux app")
-    label.frame = NSRect(x: 20, y: 10, width: 280, height: 20)
-    w.contentView?.addSubview(view)
-    w.contentView?.addSubview(label)
-    w.center()
+  }
+
+  /// Polls url (1 s apart, up to 20 s) until it answers 200.
+  static func waitUntilUp(_ url: URL?) -> Bool {
+    guard let url else { return false }
+    for _ in 0..<20 {
+      var ok = false
+      let sem = DispatchSemaphore(value: 0)
+      URLSession.shared.dataTask(with: URLRequest(url: url, timeoutInterval: 2)) { _, r, _ in
+        ok = (r as? HTTPURLResponse)?.statusCode == 200
+        sem.signal()
+      }.resume()
+      _ = sem.wait(timeout: .now() + 3)
+      if ok { return true }
+      Thread.sleep(forTimeInterval: 1)
+    }
+    return false
+  }
+
+  func connectDone(_ run: Int, _ result: PairingStart?, status: String) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self, run == self.connectRun, self.connectWindow != nil else { return }
+      self.presentConnect(result, status: status)
+    }
+  }
+
+  func label(_ s: String, _ frame: NSRect, size: CGFloat, mono: Bool = false) -> NSTextField {
+    let l = NSTextField(labelWithString: s)
+    l.frame = frame
+    l.alignment = .center
+    l.font = mono ? .monospacedSystemFont(ofSize: size, weight: .semibold) : .systemFont(ofSize: size)
+    l.isSelectable = true
+    return l
+  }
+
+  func presentConnect(_ result: PairingStart?, status: String) {
+    let w: NSWindow
+    if let existing = connectWindow {
+      w = existing
+    } else {
+      w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 440), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+      w.title = "Connect a Device"
+      w.isReleasedWhenClosed = false
+      w.delegate = self
+      let v = w.contentView!
+      let qr = NSImageView(frame: NSRect(x: 40, y: 160, width: 260, height: 260))
+      let st = label("", NSRect(x: 20, y: 128, width: 300, height: 20), size: 13)
+      let code = label("", NSRect(x: 20, y: 92, width: 300, height: 30), size: 24, mono: true)
+      let addr = label("", NSRect(x: 20, y: 66, width: 300, height: 20), size: 12)
+      let copy = NSButton(title: "Copy Link", target: self, action: #selector(copyConnectLink))
+      copy.frame = NSRect(x: 110, y: 20, width: 120, height: 32)
+      for x in [qr, st, code, addr, copy] as [NSView] { v.addSubview(x) }
+      w.center()
+      connectWindow = w; connectQR = qr; connectStatus = st; connectCode = code; connectAddress = addr; connectCopy = copy
+    }
+    var parts: PairingLink?
+    if case .link(let l)? = result { parts = PairingLink.parse(l) ?? PairingLink(link: l, address: "", code: "") }
+    connectLink = parts?.link
+    connectQR?.image = parts.flatMap { Self.qrImage($0.link) }
+    connectStatus?.stringValue = status
+    connectCode?.stringValue = parts?.code ?? ""
+    connectAddress?.stringValue = parts?.address ?? ""
+    connectCopy?.isEnabled = parts != nil
     NSApp.activate(ignoringOtherApps: true)
     w.makeKeyAndOrderFront(nil)
-    qrWindow = w
+  }
+
+  static func qrImage(_ link: String) -> NSImage? {
+    guard let f = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+    f.setValue(Data(link.utf8), forKey: "inputMessage")
+    guard let img = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)) else { return nil }
+    let rep = NSCIImageRep(ciImage: img)
+    let ns = NSImage(size: rep.size)
+    ns.addRepresentation(rep)
+    return ns
+  }
+
+  @objc func copyConnectLink() {
+    guard let l = connectLink else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(l, forType: .string)
+    connectStatus?.stringValue = "Link copied"
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    guard (notification.object as? NSWindow) === connectWindow else { return }
+    connectWindow = nil; connectQR = nil; connectStatus = nil; connectCode = nil; connectAddress = nil; connectCopy = nil
+    connectLink = nil
   }
 
   @objc func handleURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
@@ -257,6 +457,12 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
     DispatchQueue.global().async { [weak self] in self?.session?.handleURL(url) }
   }
 
+  @objc func openCoreNotice() { if let u = coreNoticeURL { NSWorkspace.shared.open(u) } }
+  @objc func restart() { _ = coordinator.reregisterRequired(); poll() }
+  @objc func openLogs() { NSWorkspace.shared.open(URL(fileURLWithPath: paths.logsDir)) }
+  @objc func quit() { NSApp.terminate(nil) }
+
+  /// Troubleshooting (Option held): manual update check; the result shows as one line until the next check.
   @objc func checkUpdate() {
     switch UpdateCheck.evaluate(UpdateCheck.fetch(), current: bundleVersion) {
     case .available(_, let url): NSWorkspace.shared.open(url); updateText = nil
@@ -264,17 +470,20 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
     case .couldNotCheck: updateText = UpdateCheck.couldNotCheckText
     }
   }
+  /// Troubleshooting (Option held): unregister every agent until the next launch or Restart.
+  @objc func stopBridge() { timer?.invalidate(); coordinator.unregisterAll(); statusText = "Stopped"; updateButton() }
+}
 
-  @objc func openCoreNotice() { if let u = coreNoticeURL { NSWorkspace.shared.open(u) } }
-  @objc func restart() { _ = coordinator.reregisterRequired(); poll() }
-  @objc func openLogs() { NSWorkspace.shared.open(URL(fileURLWithPath: paths.logsDir)) }
-  @objc func stopBridge() { timer?.invalidate(); coordinator.unregisterAll(); statusText = "Stopped" }
-  @objc func quit() { NSApp.terminate(nil) }
+extension NSFont {
+  func withTraits(_ t: NSFontDescriptor.SymbolicTraits) -> NSFont {
+    NSFont(descriptor: fontDescriptor.withSymbolicTraits(t), size: pointSize) ?? self
+  }
 }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let controller = MenuController()
+app.delegate = controller
 NSAppleEventManager.shared().setEventHandler(controller, andSelector: #selector(MenuController.handleURLEvent(_:withReplyEvent:)),
                                              forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
 app.run()

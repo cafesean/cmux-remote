@@ -27,6 +27,11 @@ public struct BridgePaths: Sendable {
   public var lastRunVersionPath: String { stateDir + "/last-run-version" }
   public var phoneAccessPath: String { stateDir + "/phone-access" }
   public var coreStatusPath: String { stateDir + "/core-status.json" }
+  /// The owner sub whose hub app session (POST /apps/hyprmux/session) succeeded.
+  public var hubSessionPath: String { stateDir + "/hub-session" }
+  public var tunnelLogPath: String { logsDir + "/tunnel.log" }
+  public var ensureLockPath: String { stateDir + "/ensure.lock" }
+  public var ensureGenPath: String { stateDir + "/ensure-gen" }
 }
 
 public struct BridgeState: Sendable {
@@ -98,6 +103,8 @@ public struct BridgeState: Sendable {
     try Self.writePrivate(paths.tunnelTokenPath, token)
   }
 
+  public func readTunnelToken() -> String? { try? String(contentsOfFile: paths.tunnelTokenPath, encoding: .utf8) }
+
   public var phoneAccessOn: Bool { fm.fileExists(atPath: paths.phoneAccessPath) }
 
   public func setPhoneAccess(_ on: Bool) throws {
@@ -109,6 +116,32 @@ public struct BridgeState: Sendable {
   }
 
   public func writeLastRunVersion(_ v: String) throws { try Self.writePrivate(paths.lastRunVersionPath, v + "\n") }
+
+  /// Set one key in the env file: the existing `KEY=` line is replaced in place (later duplicates dropped), else the
+  /// line is appended. Every other line stays as written; atomic write, 0600. Returns true when the file changed.
+  @discardableResult
+  public func setEnvValue(_ key: String, _ value: String) throws -> Bool {
+    guard !key.contains("="), !key.contains("\n"), !value.contains("\n") else { throw BridgeError.io("env value") }
+    let text = (try? String(contentsOfFile: paths.envPath, encoding: .utf8)) ?? ""
+    var lines = text.components(separatedBy: "\n")
+    if lines.last == "" { lines.removeLast() }
+    let want = "\(key)=\(value)"
+    var found = false
+    var out: [String] = []
+    for l in lines {
+      let k = l.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) }
+      if k == key, !l.trimmingCharacters(in: .whitespaces).hasPrefix("#") {
+        if found { continue }
+        found = true
+        out.append(want)
+      } else { out.append(l) }
+    }
+    if !found { out.append(want) }
+    let next = out.joined(separator: "\n") + "\n"
+    if next == text { return false }
+    try Self.writePrivate(paths.envPath, next)
+    return true
+  }
 
   public func readEnv() -> [String: String] {
     guard let text = try? String(contentsOfFile: paths.envPath, encoding: .utf8) else { return [:] }

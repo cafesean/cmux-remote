@@ -56,6 +56,9 @@ test('package-bridge.sh assembles HyprMux Bridge.app (stub binaries)', { skip: !
     assert.strictEqual(info.LSUIElement, true);
     assert.strictEqual(info.CFBundleShortVersionString, require('../package.json').version);
     assert.strictEqual(fs.readdirSync(path.join(c, 'Library', 'LaunchAgents')).length, 4);
+    for (const png of ['StatusBarIconTemplate.png', 'StatusBarIconTemplate@2x.png']) {
+      assert.ok(fs.statSync(path.join(c, 'Resources', png)).size > 0, png);
+    }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -77,10 +80,23 @@ test('Bridge has no auto-install code (no Sparkle, no installer launch, no write
     assert.doesNotMatch(src, /Sparkle|SPUUpdater/, f);
     assert.doesNotMatch(src, /\/usr\/sbin\/installer|hdiutil|ditto|\.pkg"/, f);
     assert.doesNotMatch(src, /"\/Applications/, f);
-    // the only Process launched is launchctl
+    // the only Processes launched: launchctl, and ps -o comm= (read-only: a BundleProgram job's executable path)
     for (const m of src.matchAll(/URL\(fileURLWithPath: "([^"]+)"\)|run\("([^"]+)"/g)) {
-      assert.strictEqual(m[1] || m[2], '/bin/launchctl', f);
+      assert.ok(['/bin/launchctl', '/bin/ps'].includes(m[1] || m[2]), f + ': ' + (m[1] || m[2]));
     }
+  }
+});
+
+test('menu bar shows the logo (template image), status in the tooltip, reopen opens the menu', () => {
+  const main = fs.readFileSync(path.join(ROOT, 'native', 'hyprmux-bridge', 'Sources', 'HyprMuxBridge', 'main.swift'), 'utf8');
+  assert.match(main, /Bundle\.main\.image\(forResource: MenuBarStatus\.iconName\)/);
+  assert.match(main, /isTemplate = true/);
+  assert.match(main, /toolTip = MenuBarStatus\.toolTip\(statusText\)/);
+  assert.doesNotMatch(main, /button\?\.title = "HyprMux/);
+  assert.match(main, /func applicationShouldHandleReopen\(/);
+  assert.match(main, /app\.delegate = controller/);
+  for (const png of ['StatusBarIconTemplate.png', 'StatusBarIconTemplate@2x.png']) {
+    assert.ok(fs.existsSync(path.join(APPDIR, 'Resources', png)), png);
   }
 });
 

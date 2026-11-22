@@ -62,6 +62,15 @@ enum HubEnvelope {
     return "http_\(status)"
   }
 
+  /// Seconds the hub asked to wait (503 BUSY): top-level retryAfter (HTTPHubTransport folds the Retry-After header in)
+  /// or error.details.retryAfter.
+  static func retryAfter(_ body: Data) -> TimeInterval? {
+    let b = json(body)
+    if let n = b?["retryAfter"] as? Double { return n }
+    if let n = details(body)?["retryAfter"] as? Double { return n }
+    return nil
+  }
+
   static func details(_ body: Data) -> [String: Any]? { ((json(body)?["error"] as? [String: Any])?["details"]) as? [String: Any] }
   static func data(_ body: Data) -> [String: Any]? {
     guard let b = json(body), b["success"] as? Bool == true else { return nil }
@@ -96,6 +105,7 @@ public final class HubTunnelClient {
   public static let tunnelsPath = "/api/v1/apps/hyprmux/tunnels"
   public static let attemptTimeout: TimeInterval = 4
   public static let retryBackoff: TimeInterval = 2
+  public static let totalBudget: TimeInterval = 10
 
   let transport: HubTransport
   let clock: BridgeClock
@@ -109,18 +119,21 @@ public final class HubTunnelClient {
 
   func nowMs() -> Int64 { Int64(clock.now() * 1000) }
 
-  enum Attempt { case done(TunnelState, EnsuredTunnel?), retry(TunnelState) }
+  enum Attempt { case done(TunnelState, EnsuredTunnel?), retry(TunnelState, after: TimeInterval?) }
 
   /// POST /tunnels {port}: Connect bearer + install-key signature; one retry (tunnels_revoked, 503 BUSY,
-  /// timeout/network) inside 10 s total (4 s + 2 s + 4 s).
+  /// timeout/network) inside 10 s total (4 s + 2 s + 4 s). A 503 BUSY with Retry-After waits what the hub asked,
+  /// at least 2 s and no longer than the 10 s budget leaves for the second attempt.
   public func ensure(port: Int, bearer: String) -> (TunnelState, EnsuredTunnel?) {
+    let t0 = clock.now()
     switch attempt(port: port, bearer: bearer) {
     case .done(let s, let t): return (s, t)
-    case .retry:
-      clock.sleep(Self.retryBackoff)
+    case .retry(_, let after):
+      let room = Self.totalBudget - Self.attemptTimeout - (clock.now() - t0)
+      clock.sleep(max(Self.retryBackoff, min(after ?? Self.retryBackoff, room)))
       switch attempt(port: port, bearer: bearer) {
       case .done(let s, let t): return (s, t)
-      case .retry(let s): return (s, nil)
+      case .retry(let s, _): return (s, nil)
       }
     }
   }
@@ -136,7 +149,7 @@ public final class HubTunnelClient {
                                timeout: Self.attemptTimeout)
     switch reply {
     case .timeout, .network:
-      return .retry(.unreachable)
+      return .retry(.unreachable, after: nil)
     case .response(let status, let data):
       if (200..<300).contains(status) {
         guard let d = HubEnvelope.data(data), let host = d["hostname"] as? String, let tok = d["tunnelToken"] as? String,
@@ -148,7 +161,7 @@ public final class HubTunnelClient {
       }
       let code = HubEnvelope.errorCode(status, data)
       if status == 401 { return .done(.signInRequired, nil) }
-      if code == "tunnels_revoked" || (status == 503 && code == "BUSY") || status == 503 { return .retry(.unreachable) }
+      if code == "tunnels_revoked" || status == 503 { return .retry(.unreachable, after: HubEnvelope.retryAfter(data)) }
       if status == 402 && code == "PLAN_LIMIT" || status == 409 && code == "mac_limit" {
         return .done(.limit(upgradeUrl: HubEnvelope.details(data)?["upgradeUrl"] as? String), nil)
       }
@@ -159,6 +172,9 @@ public final class HubTunnelClient {
 }
 
 /// Phone access on: ensure, then write tunnel-token (0600, no newline) and register the tunnel agent.
+/// Ensures from this Mac run one at a time (flock on ensure.lock, menu + core processes alike): a caller that waited
+/// while another ensure succeeded takes that result instead of POSTing again (the hub created two tunnels otherwise).
+/// A changed tunnel token restarts the tunnel agent (a running cloudflared keeps the token it started with).
 public final class PhoneAccess {
   let state: BridgeState
   let coordinator: AgentCoordinator
@@ -170,12 +186,58 @@ public final class PhoneAccess {
   @discardableResult
   public func turnOn(client: HubTunnelClient, port: Int, bearer: String) throws -> TunnelState {
     try state.setPhoneAccess(true)
-    let (s, t) = client.ensure(port: port, bearer: bearer)
-    guard let t else { return s }
-    try state.writeTunnelToken(t.tunnelToken)
-    try state.writeLastTunnel(LastTunnel(id: t.id, hostname: t.hostname))
-    _ = coordinator.registerRequired()
-    return s
+    let gen = state.ensureGeneration()
+    return try state.withEnsureLock {
+      let logs = state.paths.logsDir
+      if state.ensureGeneration() != gen, state.hasOwnTunnelToken(), let last = state.readLastTunnel() {
+        CoreLog.append("tunnel-ensure", [("status", "joined"), ("host", last.hostname), ("id", CoreLog.idPrefix(last.id))], logsDir: logs)
+        _ = coordinator.registerRequired()
+        publishURL(last.hostname)
+        return .ready(id: last.id, hostname: last.hostname)
+      }
+      let (s, t) = client.ensure(port: port, bearer: bearer)
+      guard let t else {
+        CoreLog.append("tunnel-ensure", [("status", Self.code(s))], logsDir: logs)
+        return s
+      }
+      CoreLog.append("tunnel-ensure", [("status", "ready"), ("host", t.hostname), ("id", CoreLog.idPrefix(t.id))], logsDir: logs)
+      let old = state.readTunnelToken()
+      try state.writeTunnelToken(t.tunnelToken)
+      try state.writeLastTunnel(LastTunnel(id: t.id, hostname: t.hostname))
+      try state.bumpEnsureGeneration()
+      _ = coordinator.registerRequired()
+      if let old, old != t.tunnelToken, coordinator.wantsTunnel {
+        let r = (try? coordinator.agents.restart(.tunnel)) != nil
+        CoreLog.append("agent-restart", [("agent", "tunnel"), ("reason", "token_changed"), ("result", r ? "ok" : "failed")], logsDir: logs)
+      }
+      publishURL(t.hostname)
+      return s
+    }
+  }
+
+  /// server.js reads PUBLIC_URL (the pairing QR's u=) from the env file only at start: write the ensured hostname
+  /// and restart the server agent when it changed, so a pairing never points at a dead host.
+  func publishURL(_ hostname: String) {
+    let logs = state.paths.logsDir
+    guard let changed = try? state.setEnvValue("PUBLIC_URL", "https://\(hostname)") else {
+      CoreLog.append("public-url", [("result", "write_failed")], logsDir: logs)
+      return
+    }
+    guard changed else { return }
+    let agents = coordinator.agents
+    let r = agents.isRegistered(.server) ? ((try? agents.restart(.server)) != nil ? "ok" : "failed") : "not_registered"
+    CoreLog.append("agent-restart", [("agent", "server"), ("reason", "public_url_changed"), ("host", hostname), ("result", r)], logsDir: logs)
+  }
+
+  static func code(_ s: TunnelState) -> String {
+    switch s {
+    case .ready: return "ready"
+    case .limit: return "limit"
+    case .fairUse: return "fair_use"
+    case .unreachable: return "unreachable"
+    case .signInRequired: return "sign_in_required"
+    case .failed(let c): return "failed_" + c
+    }
   }
 }
 
@@ -185,6 +247,21 @@ public struct LastTunnel: Codable, Equatable, Sendable {
 }
 
 extension BridgeState {
+  public func ensureGeneration() -> Int {
+    Int((try? String(contentsOfFile: paths.ensureGenPath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+  }
+  func bumpEnsureGeneration() throws { try Self.writePrivate(paths.ensureGenPath, "\(ensureGeneration() + 1)\n") }
+
+  /// Exclusive flock on ensure.lock for the whole ensure (blocks; separate opens contend even in one process).
+  func withEnsureLock<T>(_ body: () throws -> T) throws -> T {
+    try Self.mkdirPrivate(paths.stateDir)
+    let fd = open(paths.ensureLockPath, O_RDWR | O_CREAT, 0o600)
+    guard fd >= 0 else { throw BridgeError.io("ensure lock") }
+    defer { flock(fd, LOCK_UN); close(fd) }
+    guard flock(fd, LOCK_EX) == 0 else { throw BridgeError.io("ensure lock") }
+    return try body()
+  }
+
   public var lastTunnelPath: String { paths.stateDir + "/last-tunnel.json" }
   public func writeLastTunnel(_ t: LastTunnel) throws {
     try Self.writePrivate(lastTunnelPath, String(decoding: try JSONEncoder().encode(t), as: UTF8.self))

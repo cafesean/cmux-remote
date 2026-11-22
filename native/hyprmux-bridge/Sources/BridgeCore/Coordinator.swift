@@ -49,13 +49,15 @@ public final class AgentCoordinator {
     return .registered(want)
   }
 
-  /// Restart (unregister + register) each required agent exactly once.
-  public func reregisterRequired() -> Phase {
+  /// Restart (unregister + register) each required agent exactly once. `skipping` = the agent the caller runs
+  /// as (core): unregistering it would kill the caller before it can record health, and launchd relaunches it
+  /// (KeepAlive) into the same re-register: a restart loop. The running caller is already this bundle's copy.
+  public func reregisterRequired(skipping: Set<BridgeAgent> = []) -> Phase {
     let want = required
     do {
-      for a in want { try agents.restart(a) }
+      for a in want where !skipping.contains(a) { try agents.restart(a) }
     } catch {
-      for a in want { try? agents.unregister(a) }
+      for a in want where !skipping.contains(a) { try? agents.unregister(a) }
       return .failed("\(error)")
     }
     return .registered(want)

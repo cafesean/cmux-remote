@@ -132,9 +132,14 @@ final class HubTests: XCTestCase {
     let url = ConnectAuth.authorizeURL(c, verifier: v, state: "s1")!.absoluteString
     XCTAssertTrue(url.contains("redirect_uri=hyprmux-bridge://oidc-callback"))
     XCTAssertTrue(url.contains("code_challenge_method=S256"))
+    XCTAssertTrue(url.contains("scope=openid%20email%20offline_access%20hub:app"), url)
+    XCTAssertTrue(url.contains("prompt=consent"), url)
+    XCTAssertTrue(url.contains("resource=https://hub.appmatic.io/api"), url)
     let r = ConnectAuth.code(fromCallback: URL(string: "hyprmux-bridge://oidc-callback?error=redirect_uri_mismatch&state=s1"), expectedState: "s1")
-    XCTAssertEqual(ConnectAuth.stateAfter(r, ownerSub: nil), .signedOut(message: "Sign-in isn't available yet"))
-    XCTAssertEqual(ConnectAuth.code(fromCallback: nil, expectedState: "s1"), .failure(.unavailable))
+    XCTAssertEqual(ConnectAuth.stateAfter(r, ownerSub: nil), .signedOut(message: "Sign-in failed: redirect_uri_mismatch"))
+    XCTAssertEqual(ConnectAuth.code(fromCallback: nil, expectedState: "s1"), .failure(.badCallback))
+    XCTAssertEqual(ConnectAuth.code(fromCallback: URL(string: "hyprmux-bridge://oidc-callback?code=x&state=other"), expectedState: "s1"),
+                   .failure(.badCallback))
     XCTAssertEqual(ConnectAuth.code(fromCallback: URL(string: "hyprmux-bridge://oidc-callback?code=x&state=s1"), expectedState: "s1"), .success("x"))
     // local pairing still works: the base set registers without any sign-in
     XCTAssertEqual(coord.tick(), .registered([.daemon, .server, .core]))

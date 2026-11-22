@@ -4,6 +4,7 @@
 #   Contents/MacOS/hyprmux-runtime                  bun-compiled server|bridge|tunnel (build-runtime.sh)
 #   Contents/MacOS/cloudflared                      pinned + verified (cloudflared.ref), Cloudflare's signature kept
 #   Contents/Resources/server/                      files the server reads at run time
+#   Contents/Resources/StatusBarIconTemplate*.png   menu bar logo (template image, 18 pt @1x/@2x)
 #   Contents/Library/LaunchAgents/*.plist           registered by the Bridge with SMAppService.agent
 #   Contents/Info.plist                             version = package.json version
 # Usage: scripts/bridge-app/package-bridge.sh <out-dir> [work-dir]   -> <out-dir>/HyprMux Bridge.app
@@ -45,7 +46,10 @@ if [ -n "${BRIDGE_CLOUDFLARED_BIN:-}" ]; then CF=$BRIDGE_CLOUDFLARED_BIN; else
 fi
 install -m 755 "$CF" "$C/MacOS/cloudflared"
 
-# 4. LaunchAgents + Info.plist
+# 4. menu bar logo
+cp $HERE/Resources/StatusBarIconTemplate.png $HERE/Resources/StatusBarIconTemplate@2x.png "$C/Resources/"
+
+# 5. LaunchAgents + Info.plist
 cp $HERE/LaunchAgents/*.plist "$C/Library/LaunchAgents/"
 for p in "$C"/Library/LaunchAgents/*.plist; do plutil -lint -s "$p"; done
 # Public PKCE client (no secret); HYPRMUX_HUB_CLIENT_ID='' builds with sign-in hidden.

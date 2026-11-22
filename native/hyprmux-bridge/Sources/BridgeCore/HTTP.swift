@@ -17,6 +17,14 @@ public final class HTTPHubTransport: HubTransport {
     return URL(string: s)
   }
 
+  /// HubReply carries no headers: a 503's numeric Retry-After goes into the JSON body as top-level retryAfter.
+  static func foldRetryAfter(status: Int, header: String?, body: Data) -> Data {
+    guard status == 503, let h = header, let n = Double(h.trimmingCharacters(in: .whitespaces)),
+          var j = HubEnvelope.json(body), j["retryAfter"] == nil else { return body }
+    j["retryAfter"] = n
+    return (try? JSONSerialization.data(withJSONObject: j)) ?? body
+  }
+
   public func send(_ r: HubRequest, timeout: TimeInterval) -> HubReply {
     guard let u = url(r) else { return .network }
     var req = URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
@@ -28,7 +36,8 @@ public final class HTTPHubTransport: HubTransport {
     let sem = DispatchSemaphore(value: 0)
     session.dataTask(with: req) { data, resp, err in
       if let h = resp as? HTTPURLResponse {
-        box.reply = .response(status: h.statusCode, body: data ?? Data())
+        box.reply = .response(status: h.statusCode, body: Self.foldRetryAfter(status: h.statusCode, header: h.value(forHTTPHeaderField: "Retry-After"),
+                                                                              body: data ?? Data()))
       } else if let e = err as? URLError, e.code == .timedOut {
         box.reply = .timeout
       } else {
@@ -65,11 +74,54 @@ public final class LoopbackServer: LocalServer {
   }
 
   /// The pairing link for the QR window (server.js /api/pair/start), nil when the server refuses.
-  public func pairingLink() -> String? {
+  public func pairingLink() -> String? { if case .link(let l) = startPairing() { return l } else { return nil } }
+
+  /// /api/pair/start: a link, the server not answering (Bridge not running), or the server's refusal code.
+  public func startPairing() -> PairingStart {
     let r = transport.send(HubRequest(method: "POST", path: "/api/pair/start", query: nil,
                                       headers: ["authorization": "Bearer \(token)", "content-type": "application/json"], body: "{}"),
                            timeout: 5)
-    guard case .response(200, let d) = r else { return nil }
-    return HubEnvelope.json(d)?["qr"] as? String
+    guard case .response(let s, let d) = r else { return .notRunning }
+    if s == 200, let qr = HubEnvelope.json(d)?["qr"] as? String { return .link(qr) }
+    return .refused(HubEnvelope.errorCode(s, d))
+  }
+}
+
+/// What the Pair a Phone window shows.
+/// The pieces of a pairing link (scheme://pair?u=<address>&c=<code>) the Connect a Device window shows as text.
+public struct PairingLink: Equatable, Sendable {
+  public let link: String
+  public let address: String
+  public let code: String
+  public init(link: String, address: String, code: String) { self.link = link; self.address = address; self.code = code }
+  public static func parse(_ link: String) -> PairingLink? {
+    guard let q = URLComponents(string: link)?.queryItems,
+          let u = q.first(where: { $0.name == "u" })?.value, let c = q.first(where: { $0.name == "c" })?.value,
+          !u.isEmpty, !c.isEmpty else { return nil }
+    return PairingLink(link: link, address: u, code: c)
+  }
+}
+
+public enum PairingStart: Equatable, Sendable {
+  case link(String)
+  case notRunning
+  case refused(String)
+
+  public var text: String {
+    switch self {
+    case .link: return "Scan with the HyprMux app"
+    case .notRunning: return "Bridge isn't running"
+    case .refused(let c) where c == "no_public_address": return "Turn on Remote Access first."
+    case .refused(let c): return "Couldn't start pairing (\(SignInFailure.safeCode(c) ?? "unknown"))"
+    }
+  }
+
+  /// core.log result for "pairing-start" (never the code or link).
+  public var logResult: String {
+    switch self {
+    case .link: return "ok"
+    case .notRunning: return "not_running"
+    case .refused(let c): return c
+    }
   }
 }
