@@ -19,6 +19,8 @@ func serverPort() -> Int { Int(state.readEnv()["PORT"] ?? "") ?? 0 }
 /// Build setting HYPRMUX_HUB_CLIENT_ID (Info.plist key); empty hides sign-in.
 let hubClientId = Bundle.main.object(forInfoDictionaryKey: "HyprMuxHubClientID") as? String ?? ""
 let clock = SystemClock()
+let permissionProbe = SystemPermissionProbe()
+let permissionMarker = SetupMarker(path: paths.stateDir + "/remote-desktop-setup-asked")
 
 func makeSession() -> BridgeSession? {
   guard let key = try? InstallKeyStore(store: LoginKeychain()).loadOrCreate() else { return nil }
@@ -81,6 +83,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
   var coreNoticeURL: URL?
   var updateText: String?
   var timer: Timer?
+  var permissions: PermissionStatus?
+  var permissionWatcher = PermissionWatcher()
 
   override init() {
     super.init()
@@ -100,7 +104,42 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
       if case .restart = d { DispatchQueue.main.async { self?.poll() } }
     }
     timer = Timer.scheduledTimer(withTimeInterval: LegacyGuard.pollInterval, repeats: true) { [weak self] _ in self?.poll() }
+    checkPermissions()
+    runPermissionSetup(.firstRun)
   }
+
+  // MARK: Remote Desktop permissions (Screen Recording + Accessibility)
+  //
+  // TCC charges capture and input to the responsible process. hyprmux-runtime (which spawns hm-screen-stream and
+  // posts input) runs as an SMAppService BundleProgram agent inside this bundle, so macOS lists the grant under
+  // HyprMux Bridge (com.hyprmux.bridge), the same identity as this menu app: asking here grants the Bridge.
+
+  /// Re-reads both grants (menu open; no polling). A grant that just appeared restarts server + bridge once,
+  /// through the SMAppService path (never launchctl), so capture works without quitting anything.
+  func checkPermissions() {
+    let now = permissionProbe.status()
+    permissions = now
+    guard permissionWatcher.observe(now) else { return }
+    CoreLog.append("permission-granted-restart", [("screen", now.screenRecording ? "1" : "0"),
+                                                  ("ax", now.accessibility ? "1" : "0")], logsDir: paths.logsDir)
+    DispatchQueue.global().async { [weak self] in
+      guard legacy.loadedLabels().isEmpty else { return }
+      _ = coordinator.reregisterRequired(skipping: RemoteDesktopPermissions.restartSkipping)
+      DispatchQueue.main.async { self?.poll() }
+    }
+  }
+
+  /// Setup step: the system prompts for whatever is still missing (first run once; again after each sign-in).
+  func runPermissionSetup(_ trigger: PermissionSetupTrigger) {
+    let asks = RemoteDesktopPermissions.setupRequests(permissionProbe.status(), trigger: trigger,
+                                                      askedBefore: permissionMarker.exists)
+    if trigger == .firstRun { permissionMarker.markAsked() }
+    guard !asks.isEmpty else { return }
+    NSApp.activate(ignoringOtherApps: true)
+    for p in asks { permissionProbe.request(p) }
+  }
+
+  func openPermissionPane(_ p: RemoteDesktopPermission) { NSWorkspace.shared.open(RemoteDesktopPermissions.settingsURL(p)) }
 
   func poll() {
     switch coordinator.tick() {
@@ -217,12 +256,13 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
                      signInVisible: s?.config.signInVisible ?? false, signedIn: signedIn, email: s?.accountEmail, plan: s?.plan,
                      canManagePlan: s?.canManagePlan ?? false, problems: problems, notice: core?.text, noticeOpens: core?.url != nil,
                      remoteAccessOn: state.phoneAccessOn, version: bundleVersion,
-                     optionHeld: NSEvent.modifierFlags.contains(.option))
+                     optionHeld: NSEvent.modifierFlags.contains(.option), permissions: permissions)
   }
 
   func menuNeedsUpdate(_ menu: NSMenu) {
     menu.removeAllItems()
     menuActions = []
+    checkPermissions()
     render(MenuModel.items(menuInput()), into: menu)
   }
 
@@ -242,6 +282,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     case .managePlan: managePlan()
     case .stopBridge: stopBridge()
     case .checkUpdate: checkUpdate()
+    case .allowScreenRecording: openPermissionPane(.screenRecording)
+    case .allowAccessibility: openPermissionPane(.accessibility)
     }
   }
 
@@ -276,7 +318,10 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
               DispatchQueue.main.async { self.accountText = m }
             } else if case .signedOut(let m) = s.completeSignIn(pending, callback: url) {
               DispatchQueue.main.async { self.accountText = m }
-            } else { _ = s.readEntitlement() }
+            } else {
+              _ = s.readEntitlement()
+              DispatchQueue.main.async { self.runPermissionSetup(.signIn) }
+            }
           }
         }
         a.presentationContextProvider = self
