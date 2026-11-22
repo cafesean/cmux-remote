@@ -56,7 +56,15 @@ if CommandLine.arguments.contains("--core") {
   dispatchMain()
 }
 
-final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresentationContextProviding {
+/// The HyprMux logo as a template image (Contents/Resources); nil under a bare `swift run`.
+let statusIcon: NSImage? = {
+  guard let img = Bundle.main.image(forResource: MenuBarStatus.iconName) else { return nil }
+  img.isTemplate = true
+  img.size = NSSize(width: 18, height: 18)
+  return img
+}()
+
+final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, ASWebAuthenticationPresentationContextProviding {
   let session = makeSession()
   var authSession: ASWebAuthenticationSession?
   var qrWindow: NSWindow?
@@ -74,7 +82,11 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
 
   override init() {
     super.init()
-    item.button?.title = "HyprMux"
+    if let icon = statusIcon {
+      item.button?.image = icon
+      item.button?.imagePosition = .imageOnly
+    }
+    updateButton()
     menu.delegate = self
     item.menu = menu
     prepareState()
@@ -94,7 +106,33 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
       statusText = "Stopped"
       noticeText = why
     }
-    item.button?.title = statusText == "Online" ? "HyprMux" : "HyprMux (\(statusText))"
+    updateButton()
+  }
+
+  /// Logo only; the status goes to the tooltip (and the first menu line). Not Online draws the logo dimmed.
+  func updateButton() {
+    guard let b = item.button else { return }
+    b.toolTip = MenuBarStatus.toolTip(statusText)
+    b.appearsDisabled = MenuBarStatus.dimmed(statusText)
+    if statusIcon == nil { b.title = MenuBarStatus.fallbackTitle(statusText) }
+  }
+
+  /// Launching the app again while it runs (Finder, Spotlight, `open`) opens the menu, so it is reachable even
+  /// when a full menu bar has pushed the item under the notch.
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    DispatchQueue.main.async { [weak self] in self?.showMenu() }
+    return false
+  }
+
+  func showMenu() {
+    if let b = item.button, let w = b.window, let screen = w.screen,
+       MenuBarStatus.isReachable(item: w.frame, screen: screen.frame,
+                                 notchLeft: screen.auxiliaryTopLeftArea, notchRight: screen.auxiliaryTopRightArea) {
+      b.performClick(nil)
+    } else {
+      NSApp.activate(ignoringOtherApps: true)
+      menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
   }
 
   func healthOK() -> Bool {
@@ -268,13 +306,14 @@ final class MenuController: NSObject, NSMenuDelegate, ASWebAuthenticationPresent
   @objc func openCoreNotice() { if let u = coreNoticeURL { NSWorkspace.shared.open(u) } }
   @objc func restart() { _ = coordinator.reregisterRequired(); poll() }
   @objc func openLogs() { NSWorkspace.shared.open(URL(fileURLWithPath: paths.logsDir)) }
-  @objc func stopBridge() { timer?.invalidate(); coordinator.unregisterAll(); statusText = "Stopped" }
+  @objc func stopBridge() { timer?.invalidate(); coordinator.unregisterAll(); statusText = "Stopped"; updateButton() }
   @objc func quit() { NSApp.terminate(nil) }
 }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let controller = MenuController()
+app.delegate = controller
 NSAppleEventManager.shared().setEventHandler(controller, andSelector: #selector(MenuController.handleURLEvent(_:withReplyEvent:)),
                                              forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
 app.run()
