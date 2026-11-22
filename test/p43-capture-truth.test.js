@@ -49,7 +49,7 @@ test('probe capture succeeds -> canCapture true; probe is one tiny 1x1 capture, 
   assert.equal(r.body.canCapture, true);
   const c = caps();
   assert.equal(c.length, 1);
-  assert.ok(c[0].includes('-R') && c[0].includes('0,0,1,1'), 'probe is a 1x1 rect');
+  assert.ok(c[0].includes('-D') && !c[0].includes('-R'), 'probe captures the whole main display (a tiny -R rect always fails on macOS)');
   assert.equal((await ms.info()).body.canCapture, true);
   assert.equal(caps().length, 1, 'no second probe once known');
   assert.ok(ms.observed().capture > 0, 'D189 ground truth stamped');

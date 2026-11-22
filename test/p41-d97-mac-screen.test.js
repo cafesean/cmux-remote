@@ -82,7 +82,7 @@ test('shot: JPEG frame, -x -C (cursor) -t jpg -D 1, 0600 file in 0700 dir, temp 
   const r = await get(on, '/cmux/screen/shot');
   assert.equal(r.status, 200); assert.equal(r.json.mime, 'image/jpeg');
   assert.deepEqual(Buffer.from(r.json.image, 'base64'), JPEG);
-  const a = rd('cap.log').trim().split('\n').map((l) => JSON.parse(l)).find((x) => !x.includes('-R'));   // 0.3.1: skip the 1x1 capture probe
+  const a = rd('cap.log').trim().split('\n').map((l) => JSON.parse(l)).find((x) => x.includes('-C'));   // skip the capture probe (no cursor flag)
   assert.deepEqual(a.slice(0, 6), ['-x', '-C', '-t', 'jpg', '-D', '1']);
   assert.match(rd('mode.log'), /^600 700/);
   const r2 = await get(on, '/cmux/screen/shot');
