@@ -1,5 +1,7 @@
 // hm-screen-stream: screen capture + H.264 helper.
 //
+// default: long-lived helper (stdin JSON ops, stdout framed packets; see "helper mode" below).
+// --decode-check: decode a captured helper stdout stream (smoke tool).
 // --probe: one-shot feasibility check on this Mac. Prints exactly one JSON line on stdout:
 //   permissions (preflight only, never prompts), main-display identity, SCStream 420v capture,
 //   VTCompressionSession H.264 encode (low-latency rate control, else RealTime), decode back through
@@ -328,6 +330,333 @@ func runProbe() async -> [String: Any] {
   return r
 }
 
+
+// MARK: helper mode (long-lived)
+//
+// stdin: JSON lines, ops exactly start|rate|grant|keyframe|time|input|release|stop.
+// stdout: outer u32 BE length + one packet (42-byte header, ScreenStreamCore.Packet). stderr: log lines.
+// The rate controller lives in the server; this process only applies what it is told.
+
+func nowUs() -> UInt64 { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000 }
+func log(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
+
+final class Out {
+  private let q = DispatchQueue(label: "stdout")
+  func send(_ p: Packet) {
+    let bytes = Framing.frame(p.encode())
+    q.sync { FileHandle.standardOutput.write(Data(bytes)) }
+  }
+}
+
+struct Pending { var gen: UInt32; var grantId: UInt32; var flags: PacketFlags; var rev: UInt32; var captureTs: UInt64; var charged: Bool }
+
+final class LiveEncoder {
+  let session: VTCompressionSession
+  let w: Int, h: Int
+  init?(w: Int, h: Int, kbps: Int, fps: Int) {
+    var s: VTCompressionSession?
+    let spec = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true] as CFDictionary
+    var st = VTCompressionSessionCreate(allocator: nil, width: Int32(w), height: Int32(h), codecType: kCMVideoCodecType_H264,
+                                        encoderSpecification: spec, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                        outputCallback: nil, refcon: nil, compressionSessionOut: &s)
+    var lowLatency = true
+    if st != noErr || s == nil {
+      lowLatency = false
+      st = VTCompressionSessionCreate(allocator: nil, width: Int32(w), height: Int32(h), codecType: kCMVideoCodecType_H264,
+                                      encoderSpecification: nil, imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                      outputCallback: nil, refcon: nil, compressionSessionOut: &s)
+    }
+    guard st == noErr, let sess = s else { return nil }
+    session = sess; self.w = w; self.h = h
+    VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+    VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+    VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel,
+                         value: lowLatency ? kVTProfileLevel_H264_ConstrainedHigh_AutoLevel : kVTProfileLevel_H264_High_AutoLevel)
+    VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 60 as CFNumber)
+    setRate(kbps: kbps, fps: fps)
+    VTCompressionSessionPrepareToEncodeFrames(sess)
+  }
+  func setRate(kbps: Int, fps: Int) {
+    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (kbps * 1000) as CFNumber)
+    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
+  }
+  func encode(_ pb: CVPixelBuffer, ts: UInt64, idr: Bool, done: @escaping (OSStatus, CMSampleBuffer?) -> Void) {
+    let fp: CFDictionary? = idr ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
+    let st = VTCompressionSessionEncodeFrame(session, imageBuffer: pb, presentationTimeStamp: CMTime(value: CMTimeValue(ts), timescale: 1_000_000),
+                                             duration: .invalid, frameProperties: fp, infoFlagsOut: nil) { status, _, sb in done(status, sb) }
+    if st != noErr { done(st, nil) }
+  }
+  deinit { VTCompressionSessionInvalidate(session) }
+}
+
+final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
+  let q = DispatchQueue(label: "streamer")
+  let out = Out()
+  var gen: UInt32 = 0
+  var geometry: DisplayGeometry?
+  var encW = 0, encH = 0, kbps = 4000, fps = 30
+  var ledger = GrantLedger()
+  var revs = RevCounter()
+  var seqs: [PacketType: UInt32] = [:]
+  var retained: CVPixelBuffer?
+  var retainedRev: UInt32 = 0, retainedTs: UInt64 = 0
+  var lastCaptureTs: UInt64 = 0, lastChangeAt: UInt64 = 0
+  var refineDone = true, needsIDR = true
+  var droppedNoGrant = 0
+  var encoder: LiveEncoder?
+  var stream: SCStream?
+  var timer: DispatchSourceTimer?
+  var lastHeartbeat: UInt64 = 0
+  let synthetic: Bool
+  var synthIndex = 0
+  init(synthetic: Bool) { self.synthetic = synthetic }
+
+  func nextSeq(_ t: PacketType) -> UInt32 { let s = seqs[t, default: 0]; seqs[t] = s &+ 1; return s }
+
+  func meta(_ o: [String: Any], grantId: UInt32 = 0) {
+    let d = (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data()
+    out.send(Packet(type: .meta, gen: gen, seq: nextSeq(.meta), captureTs: nowUs(), rev: revs.rev, grantId: grantId, payload: [UInt8](d)))
+  }
+
+  func handle(_ line: String) {
+    guard let c = ControlOp.parse(line) else { log("ignored line"); return }
+    q.async { [self] in
+      switch c.op {
+      case "start": start(c)
+      case "rate": rate(c)
+      case "grant":
+        guard let g = c.uint("gen"), let id = c.uint("grantId") else { return }
+        ledger.grant(gen: g, grantId: id, now: nowUs())
+        maybeRefine()
+      case "keyframe": keyframe(c)
+      case "time":
+        let recv = nowUs()
+        out.send(Packet(type: .heartbeat, gen: gen, seq: nextSeq(.heartbeat), captureTs: lastCaptureTs, rev: revs.rev,
+                        payload: TimeReply.encode(frameCaptureTs: lastCaptureTs, helperRecvTs: recv, helperSendTs: nowUs(),
+                                                  timeId: c.uint("id") ?? 0)))
+      case "input", "release": break // input posting is a separate story; accepted and ignored here
+      case "stop": stopAll(); exit(0)
+      default: break
+      }
+    }
+  }
+
+  func newGen(_ g: UInt32) {
+    gen = g; ledger.reset(gen: g); seqs = [:]; needsIDR = true
+  }
+
+  func start(_ c: ControlOp) {
+    stopCapture()
+    newGen(c.uint("gen") ?? gen &+ 1)
+    kbps = c.int("kbps") ?? kbps; fps = c.int("fps") ?? fps
+    let descs = screenDescs()
+    let want = c.uint("displayId")
+    let n = want.flatMap { id in descs.firstIndex { $0.displayId == id }.map { $0 + 1 } } ?? (want == nil ? 1 : nil)
+    guard let n, let g = DisplayMap.geometry(n: n, screens: descs) else { meta(["kind": "display_gone", "gen": gen]); return }
+    geometry = g
+    let s = StreamSize.resolve(w: c.int("w"), h: c.int("h"), nativeW: g.nativeW, nativeH: g.nativeH)
+    encW = s.w; encH = s.h
+    encoder = LiveEncoder(w: encW, h: encH, kbps: kbps, fps: fps)
+    guard encoder != nil else { meta(["kind": "error", "code": "encoder_failed", "gen": gen]); return }
+    meta(["kind": "started", "gen": gen, "displayId": g.displayId, "encW": encW, "encH": encH, "nativeW": g.nativeW,
+          "nativeH": g.nativeH, "ptsW": g.ptsW, "ptsH": g.ptsH, "originX": g.originX, "originY": g.originY, "scale": g.scale,
+          "kbps": kbps, "fps": fps])
+    if timer == nil { startTimer() }
+    if synthetic { return }
+    let id = g.displayId, w = encW, h = encH, f = fps
+    Task {
+      do {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let idx = DisplayMap.captureIndex(displayId: id, candidates: content.displays.map { $0.displayID }) else {
+          q.async { self.meta(["kind": "display_gone", "gen": self.gen]) }; return
+        }
+        let cfg = SCStreamConfiguration()
+        cfg.width = w; cfg.height = h
+        cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(f, 1)))
+        cfg.queueDepth = 3
+        cfg.showsCursor = false
+        let st = SCStream(filter: SCContentFilter(display: content.displays[idx], excludingWindows: []), configuration: cfg, delegate: self)
+        try st.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
+        try await st.startCapture()
+        q.async { self.stream = st }
+      } catch {
+        q.async { self.meta(["kind": "error", "code": "capture_failed", "gen": self.gen, "detail": error.localizedDescription]) }
+      }
+    }
+  }
+
+  func rate(_ c: ControlOp) {
+    let g = c.uint("gen") ?? gen
+    if let k = c.int("kbps") { kbps = k }
+    if let f = c.int("fps") { fps = f }
+    if g != gen {
+      // A new gen may carry a new size: restart capture + encoder at it (never resize inside a gen).
+      var f = c.fields; f["op"] = "start"; f["gen"] = g
+      if f["displayId"] == nil, let id = geometry?.displayId { f["displayId"] = id }
+      start(ControlOp.parse(String(data: try! JSONSerialization.data(withJSONObject: f), encoding: .utf8)!)!)
+      return
+    }
+    if let w = c.int("w"), let h = c.int("h"), let geo = geometry {
+      let s = StreamSize.resolve(w: w, h: h, nativeW: geo.nativeW, nativeH: geo.nativeH)
+      if s.w != encW || s.h != encH { meta(["kind": "size_ignored", "gen": gen, "reason": "same_gen", "encW": encW, "encH": encH]) }
+    }
+    encoder?.setRate(kbps: kbps, fps: fps)
+  }
+
+  func keyframe(_ c: ControlOp) {
+    if let g = c.uint("gen"), g != gen { return }
+    if c.bool("emergency"), let id = c.uint("grantId") {
+      guard ledger.reserveEmergency(gen: gen, grantId: id) else { meta(["kind": "emergency_busy", "gen": gen, "grantId": id]); return }
+      if let pb = retained, let e = ledger.takeEmergency() {
+        encodeFrame(pb, Pending(gen: gen, grantId: e.grantId, flags: [.snapshot, .free], rev: retainedRev, captureTs: retainedTs, charged: false), idr: true)
+      } else { needsIDR = true }
+      return
+    }
+    needsIDR = true
+    if let pb = retained, let g = ledger.take(now: nowUs()) {
+      encodeFrame(pb, Pending(gen: gen, grantId: g.grantId, flags: [.snapshot], rev: retainedRev, captureTs: retainedTs, charged: true), idr: true)
+    }
+  }
+
+  func maybeRefine() {
+    guard !refineDone, let pb = retained, nowUs() &- lastChangeAt >= 500_000, ledger.available,
+          let g = ledger.take(now: nowUs()) else { return }
+    refineDone = true
+    encodeFrame(pb, Pending(gen: gen, grantId: g.grantId, flags: [.refine, .snapshot], rev: retainedRev, captureTs: retainedTs, charged: true), idr: true)
+  }
+
+  func startTimer() {
+    let t = DispatchSource.makeTimerSource(queue: q)
+    t.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
+    t.setEventHandler { [self] in
+      let now = nowUs()
+      for g in ledger.expire(now: now) { meta(["kind": "skipped", "gen": g.gen, "grantId": g.grantId], grantId: g.grantId) }
+      maybeRefine()
+      if synthetic && synthIndex == 0 { feedSynthetic() } // synthetic source: one change, then still
+      if now &- lastHeartbeat >= 1_000_000 {
+        lastHeartbeat = now
+        out.send(Packet(type: .heartbeat, gen: gen, seq: nextSeq(.heartbeat), captureTs: lastCaptureTs, rev: revs.rev,
+                        payload: Heartbeat.encode(lastCaptureTs: lastCaptureTs, latestRev: revs.rev)))
+      }
+    }
+    t.resume(); timer = t
+  }
+
+  func feedSynthetic() {
+    guard let pb = syntheticFrame(w: encW, h: encH, i: synthIndex) else { return }
+    synthIndex += 1
+    frame(pb, complete: true, dirty: 1)
+  }
+
+  // SCStream output (on q)
+  func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+    guard type == .screen,
+          let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+          let a = atts.first, let raw = a[.status] as? Int, let status = SCFrameStatus(rawValue: raw) else { return }
+    let dirty = (a[.dirtyRects] as? [NSDictionary])?.count ?? 0
+    guard status == .complete, let pb = CMSampleBufferGetImageBuffer(sb) else { _ = revs.observe(complete: false, dirtyRects: dirty); return }
+    frame(pb, complete: true, dirty: dirty)
+  }
+  func stream(_ stream: SCStream, didStopWithError error: Error) {
+    q.async { self.meta(["kind": "error", "code": "capture_stopped", "gen": self.gen, "detail": "\(error)"]) }
+  }
+
+  func frame(_ pb: CVPixelBuffer, complete: Bool, dirty: Int) {
+    guard revs.observe(complete: complete, dirtyRects: dirty) else { return } // idle / no dirty rects: encode nothing
+    let ts = nowUs()
+    retained = pb; retainedRev = revs.rev; retainedTs = ts
+    lastCaptureTs = ts; lastChangeAt = ts; refineDone = false
+    guard let g = ledger.take(now: ts) else { droppedNoGrant += 1; return } // no grant: dropped before encode
+    encodeFrame(pb, Pending(gen: gen, grantId: g.grantId, flags: [], rev: revs.rev, captureTs: ts, charged: true), idr: needsIDR)
+  }
+
+  func encodeFrame(_ pb: CVPixelBuffer, _ p: Pending, idr: Bool) {
+    guard let enc = encoder else { return }
+    if idr { needsIDR = false }
+    let k = kbps
+    enc.encode(pb, ts: p.captureTs, idr: idr) { [self] status, sb in
+      let done = nowUs()
+      q.async { [self] in
+        guard p.gen == gen else { return }
+        guard status == noErr, let sb, let bb = CMSampleBufferGetDataBuffer(sb) else {
+          if p.charged { meta(["kind": "skipped", "gen": p.gen, "grantId": p.grantId, "reason": "encoder_drop"], grantId: p.grantId) }
+          if idr { needsIDR = true }
+          return
+        }
+        var notSync = false
+        if let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[CFString: Any]],
+           let a = atts.first { notSync = (a[kCMSampleAttachmentKey_NotSync] as? Bool) ?? false }
+        let len = CMBlockBufferGetDataLength(bb)
+        var nals = [UInt8](repeating: 0, count: len)
+        CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: len, destination: &nals)
+        var flags = p.flags
+        var payload = nals
+        if !notSync, let fd = CMSampleBufferGetFormatDescription(sb) {
+          let sets = parameterSets(fd)
+          let avcC = AvcC.build(sps: sets.filter { ($0.first ?? 0) & 0x1F == 7 }, pps: sets.filter { ($0.first ?? 0) & 0x1F == 8 })
+          payload = VideoPayload.withConfig(avcC: avcC, nals: nals)
+          flags.insert([.keyframe, .config])
+          if IdrBudget.over(bytes: payload.count, kbps: k) {
+            meta(["kind": "idr_over_budget", "gen": p.gen, "grantId": p.grantId, "bytes": payload.count, "kbps": k,
+                  "encW": encW, "encH": encH], grantId: p.grantId)
+          }
+        } else {
+          flags.subtract([.snapshot, .refine, .free])
+        }
+        if PacketHeader.size + payload.count > PacketHeader.maxPacket { needsIDR = true; return }
+        out.send(Packet(type: .video, flags: flags, gen: p.gen, seq: nextSeq(.video), captureTs: p.captureTs, encodeDoneTs: done,
+                        postedInput: 0, rev: p.rev, grantId: p.grantId, payload: payload))
+      }
+    }
+  }
+
+  func stopCapture() {
+    if let s = stream { stream = nil; Task { try? await s.stopCapture() } }
+  }
+  func stopAll() { stopCapture(); encoder = nil; timer?.cancel(); timer = nil }
+}
+
+func runHelper(synthetic: Bool) -> Never {
+  _ = NSApplication.shared
+  let s = Streamer(synthetic: synthetic)
+  Thread.detachNewThread {
+    while let line = readLine(strippingNewline: true) { if !line.isEmpty { s.handle(line) } }
+    s.q.sync { s.stopAll() }
+    exit(0)
+  }
+  dispatchMain()
+}
+
+// MARK: --decode-check: framed packets on stdin -> decode every video packet with the probe's decoder path
+
+func runDecodeCheck() -> Never {
+  let data = FileHandle.standardInput.readDataToEndOfFile()
+  var d = Deframer()
+  var r: [String: Any] = [:]
+  do {
+    let bodies = try d.push([UInt8](data))
+    let pkts = try bodies.map { try Packet.decode($0) }
+    var sets: [[UInt8]] = [], frames: [Encoded] = [], videos: [[String: Any]] = []
+    var types: [String: Int] = [:]
+    for p in pkts {
+      types["\(p.type.rawValue)", default: 0] += 1
+      if p.type == .meta { videos.append(["meta": String(decoding: p.payload, as: UTF8.self)]) }
+      guard p.type == .video, let s = VideoPayload.split(p.payload, config: p.flags.contains(.config)) else { continue }
+      if let a = s.avcC, let ps = AvcC.parameterSets(a), sets.isEmpty { sets = ps.sps + ps.pps }
+      frames.append(Encoded(avcc: s.nals, key: p.flags.contains(.keyframe), encodeMs: 0))
+      videos.append(["seq": p.seq, "gen": p.gen, "grantId": p.grantId, "rev": p.rev, "flags": Int(p.flags.rawValue),
+                     "bytes": p.payload.count, "idrNal": AVCC.isIDR(AVCC.nalUnits(s.nals) ?? [])])
+    }
+    var dec: [String: Any] = [:]
+    let ok = decodeAll(frames, sets: sets, report: &dec)
+    r = ["packets": pkts.count, "types": types, "video": videos, "decodedOk": ok, "decodeIn": frames.count, "decode": dec,
+         "trailingBytes": d.buffered, "ok": ok == frames.count && ok > 0]
+  } catch { r = ["error": "\(error)", "ok": false] }
+  print(String(data: try! JSONSerialization.data(withJSONObject: r, options: [.sortedKeys]), encoding: .utf8)!)
+  exit((r["ok"] as? Bool) == true ? 0 : 1)
+}
+
 let args = CommandLine.arguments.dropFirst()
 if args.contains("--probe") {
   _ = NSApplication.shared // NSScreen + NSCursor need an app object; no Dock icon (no activation policy change)
@@ -335,7 +664,8 @@ if args.contains("--probe") {
   let data = try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
   print(String(data: data, encoding: .utf8)!)
   exit((result["ok"] as? Bool) == true ? 0 : 1)
+} else if args.contains("--decode-check") {
+  runDecodeCheck()
 } else {
-  FileHandle.standardError.write("usage: hm-screen-stream --probe\n".data(using: .utf8)!)
-  exit(2)
+  runHelper(synthetic: args.contains("--synthetic"))
 }
