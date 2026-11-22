@@ -77,9 +77,9 @@ test('Bridge has no auto-install code (no Sparkle, no installer launch, no write
     assert.doesNotMatch(src, /Sparkle|SPUUpdater/, f);
     assert.doesNotMatch(src, /\/usr\/sbin\/installer|hdiutil|ditto|\.pkg"/, f);
     assert.doesNotMatch(src, /"\/Applications/, f);
-    // the only Process launched is launchctl
+    // the only Processes launched: launchctl, and ps -o comm= (read-only: a BundleProgram job's executable path)
     for (const m of src.matchAll(/URL\(fileURLWithPath: "([^"]+)"\)|run\("([^"]+)"/g)) {
-      assert.strictEqual(m[1] || m[2], '/bin/launchctl', f);
+      assert.ok(['/bin/launchctl', '/bin/ps'].includes(m[1] || m[2]), f + ': ' + (m[1] || m[2]));
     }
   }
 });
