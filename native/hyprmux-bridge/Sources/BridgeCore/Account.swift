@@ -7,7 +7,9 @@ public struct ConnectConfig: Equatable, Sendable {
   public var clientId: String
   public var issuer = "https://auth.appmatic.io"
   public var redirectURI = "hyprmux-bridge://oidc-callback"
-  public var scope = "hub:app"
+  /// offline_access is what makes Connect (node-oidc-provider) issue the refresh token completeSignIn requires;
+  /// it survives only together with prompt=consent (authorizeURL).
+  public var scope = "openid offline_access hub:app"
   public var resource = "https://hub.appmatic.io/api"
   public init(clientId: String) { self.clientId = clientId }
 
@@ -109,6 +111,7 @@ public enum ConnectAuth {
       .init(name: "redirect_uri", value: c.redirectURI), .init(name: "scope", value: c.scope),
       .init(name: "resource", value: c.resource), .init(name: "state", value: state),
       .init(name: "code_challenge", value: challenge(verifier)), .init(name: "code_challenge_method", value: "S256"),
+      .init(name: "prompt", value: "consent"),
     ]
     return u?.url
   }
