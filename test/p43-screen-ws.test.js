@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const http = require('http');
 const net = require('net');
 const { EventEmitter } = require('events');
-const { createScreenWs } = require('../lib/screen-ws');
+const { createScreenWs, screenInfoFromBridge } = require('../lib/screen-ws');
 const S = require('../lib/screen-stream');
 const wsLib = require('../lib/ws');
 
@@ -47,7 +47,7 @@ function policy(state) {   // state.plan: 'free' | 'pro'; state.refuseOpen
 }
 function setup(o = {}) {
   const b = stubBridge(o);
-  const pol = o.policy === null ? null : policy(o.state || { plan: 'pro' });
+  const pol = o.policy === null ? null : (o.policy || policy(o.state || { plan: 'pro' }));
   const sw = createScreenWs({ serverToken: () => 'tok', authed: () => true, findMachine: (id) => (id === 'm1' ? { id: 'm1' } : null),
     accept: () => null, refuse: () => {}, policy: pol, bridge: b.api, kbps: () => o.kbps || 100000, limits: o.limits });
   return { b, sw };
@@ -290,4 +290,25 @@ test('send-queue admission: a P-frame over the byte budget is dropped, its grant
   assert.strictEqual(ws.sent.filter((x) => x.bin).length, 0);
   assert.ok(!s.state().grants.includes(g.grantId));
   assert.ok(b.ops.some((o) => o.op === 'keyframe'));
+});
+
+test('screenInfoFromBridge: real bridge info answer -> displayId, native px, points, AX from canControl', () => {
+  const b = { ok: true, view: true, control: true, canControl: true, focusSecure: false,
+    displays: [{ index: 1, id: 69733378, x: 0, y: 0, w: 1512, h: 982, scale: 2 }, { index: 2, id: 4128836, x: 1512, y: 0, w: 1920, h: 1080, scale: 1 }] };
+  const i = screenInfoFromBridge(b, 2);
+  assert.deepStrictEqual([i.displayId, i.w, i.h, i.displayW, i.displayH, i.ptsW, i.originX, i.axTrusted, i.control], [4128836, 1920, 1080, 1920, 1080, 1920, 1512, true, true]);
+  assert.deepStrictEqual([screenInfoFromBridge(b, 1).w, screenInfoFromBridge(b, 1).h], [3024, 1964]);
+  assert.strictEqual(screenInfoFromBridge({ ...b, canControl: false, control: false }, 1).axTrusted, false);
+  assert.throws(() => screenInfoFromBridge(b, 3), /display_gone/);
+});
+
+test('Welcome plan code comes from the policy decision; PLAN_LIMIT details carry it', async () => {
+  const mk = (plan, refuse) => ({ authorize: async (q, u, c) => (refuse && c.method === 'POST' ? { status: 402, body: { error: 'PLAN_LIMIT', code: 'PLAN_LIMIT', details: { limit: 'remoteDesktop' } } } : null),
+    ctx: () => ({}), plan: () => plan });
+  for (const [plan, refuse, want] of [['pro', false, { code: 'pro', remoteDesktop: 'full' }], ['free', true, { code: 'free', remoteDesktop: 'view' }], [null, false, null]]) {
+    const { sw } = setup({ policy: mk(plan, refuse) });
+    const { ws } = await open(sw);
+    assert.deepStrictEqual(ws.texts('welcome')[0].plan, want);
+    if (refuse) { ws.msg({ t: 'tap', seq: 1, fx: 0.5, fy: 0.5 }); await wait(20); assert.strictEqual(ws.texts('error')[0].details.plan, 'free'); }
+  }
 });
