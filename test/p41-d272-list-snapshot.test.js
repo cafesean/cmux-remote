@@ -53,13 +53,18 @@ test('D272: an aged snapshot answers at once; one rebuild runs behind it', async
   assert.equal((await get()).body.snapshotAt, 6000);
 });
 
-test('D272/D278: a snapshot older than listSnapshotMaxAgeMs (5 min) is never served', async () => {
+test('D272/D278 -> D296: a snapshot older than listSnapshotMaxAgeMs (5 min) answers at once, stale, while a rebuild runs', async () => {
   const { get, clock, builds } = routes();
   await get();
   clock.t += 301000;
   const a = await get();
+  assert.equal(a.body.snapshotAt, 1000);
+  assert.equal(a.body.stale, true);
+  await new Promise((res) => setTimeout(res, 10));
   assert.equal(builds.n, 2);
-  assert.equal(a.body.snapshotAt, 302000);
+  const b = await get();
+  assert.equal(b.body.snapshotAt, 302000);
+  assert.equal(b.body.stale, undefined);
 });
 
 test('D278: invalidateList starts a rebuild now; the old snapshot still answers meanwhile', async () => {
