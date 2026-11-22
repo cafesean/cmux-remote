@@ -2481,7 +2481,8 @@ const macScreen = require('./lib/mac-screen').createMacScreen({ childEnv: () => 
 // JPEG routes; while a video viewer owns control the JPEG input routes answer 409 control_busy.
 const screenStream = require('./lib/screen-stream').createScreenStream({ flags: macScreen.flags,
   captureBlocked: () => screenRecordingTruth() === false, jxaRelease: () => macScreen.jxaRelease(),
-  jpegIdle: () => macScreen.jpegIdle(), focusSecure: (o) => macScreen.focusSecure(o) });
+  jpegIdle: () => macScreen.jpegIdle(), focusSecure: (o) => macScreen.focusSecure(o),
+  lockState: (o) => macScreen.lockState(o) });
 macScreen.setInputGate(() => screenStream.jpegInputAllowed());
 // GET /cmux/screen/video?displayId=&gen=&epoch= -> chunked body of framed helper packets until the client goes.
 function cmuxScreenVideo(req, res, u) {
