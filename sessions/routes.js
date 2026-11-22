@@ -51,7 +51,8 @@ const LIMITS = {
   markerIdMax: 128,
   procSnapshotTtlMs: 2000,           // one ps+tmux snapshot is shared for this long (list, describe, streams)
   listSnapshotMs: 2000,              // D272: the sessions list is rebuilt locally at most this often, however many clients poll
-  listSnapshotMaxAgeMs: 300000,      // D272/D278: an older snapshot is never served; the request waits for a fresh build
+  listSnapshotMaxAgeMs: 300000,      // D296: an older snapshot still answers at once, flagged stale: true (a rebuild runs behind it)
+  listBuildStuckMs: 120000,          // D296: a build in flight longer than this no longer blocks a new one
   listIdleStopMs: 30000,             // D272/D278: no client asked for this long = idle; the loop slows to listIdleRefreshMs
   listIdleRefreshMs: 15000,          // D278: while idle the list is still rebuilt this often, so a new client gets it at once
   listWarmStartMs: 3000,             // D278: the first build runs this long after the bridge starts (not on the first GET)
@@ -359,17 +360,32 @@ function createSessionRoutes(deps) {
   // listIdleStopMs) it rebuilds every listIdleRefreshMs instead of every listSnapshotMs, the first build runs
   // listWarmStartMs after start (deps.listWarm), a snapshot up to listSnapshotMaxAgeMs old answers at once
   // while one rebuild runs, and a write marks the snapshot stale (rebuild now) instead of dropping it.
+  // D296 ("slow to answer" while /healthz answers): once a good snapshot exists a GET never waits on a
+  // build. A failed build (cmux tree read null/timeout, or a throw) keeps the last good snapshot instead
+  // of replacing it with a 502 that made the next GET wait a whole rebuild (up to 2 x 12 s tree reads);
+  // a snapshot older than listSnapshotMaxAgeMs answers flagged stale; every answer carries snapshotAge.
   const listSnapshotMs = deps.listSnapshotMs ?? LIMITS.listSnapshotMs;
   const listNow = deps.now || Date.now;
   let listSnap = null;   // { at, code, body }
   let listBuild = null;  // the one build in flight (concurrent asks share it)
+  let listBuildAt = 0;   // D296: when it started
+  let listGen = 0;       // D296: build generation; a late, older build never overwrites a newer snapshot
+  let listSnapGen = 0;
   let listAskedAt = 0;
   let listTimer = null;
+  const goodSnap = () => (listSnap && listSnap.code === 200 ? listSnap : null);
   function rebuildList() {
-    if (!listBuild) {
-      listBuild = buildList()
-        .then((r) => { listSnap = { at: listNow(), ...r }; return listSnap; })
-        .finally(() => { listBuild = null; });
+    if (!listBuild || listNow() - listBuildAt > LIMITS.listBuildStuckMs) {
+      const gen = ++listGen;
+      listBuildAt = listNow();
+      const p = buildList()
+        .then((r) => {
+          if (gen < listSnapGen) return goodSnap() || { at: listNow(), ...r };
+          if (r.code === 200 || !goodSnap()) { listSnap = { at: listNow(), ...r }; listSnapGen = gen; }
+          return goodSnap() || listSnap;   // D296: a failed build answers the last good snapshot
+        }, (e) => { const g = goodSnap(); if (g) return g; throw e; })
+        .finally(() => { if (listBuild === p) listBuild = null; });
+      listBuild = p;
     }
     return listBuild;
   }
@@ -396,13 +412,13 @@ function createSessionRoutes(deps) {
   }
   async function list(res) {
     listAskedAt = listNow();
-    let snap = listSnap;
-    const age = listAge();
-    const usable = snap && snap.code === 200 && age <= LIMITS.listSnapshotMaxAgeMs;
-    if (!listSnapshotMs || !usable) snap = await rebuildList();
+    let snap = goodSnap();
+    if (!listSnapshotMs || !snap) snap = await rebuildList();
     else if (listDue(listSnapshotMs)) rebuildList().catch(() => {});
     armListLoop();
-    send(res, snap.code, snap.code === 200 ? { ...snap.body, snapshotAt: snap.at } : snap.body);
+    if (snap.code !== 200) return send(res, snap.code, snap.body);
+    const age = Math.max(0, listNow() - snap.at);
+    send(res, 200, { ...snap.body, snapshotAt: snap.at, snapshotAge: age, ...(age > LIMITS.listSnapshotMaxAgeMs ? { stale: true } : {}) });
   }
 
   async function buildList() {
