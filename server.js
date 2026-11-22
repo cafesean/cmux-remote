@@ -194,7 +194,9 @@ function upstream(m, pathAndQuery, init) {
 }
 
 // p41 B1: /api/sessions* pass-through (mounted in handleApi next to the completions relay).
-const sessionsProxy = require('./lib/sessions-proxy').createSessionsProxy({ machines: MACHINES, upstream, accessHeaders, findMachine, allowed: (m) => planAllowed(m), refusal: () => machinesRefusal() });
+const sessionsProxy = require('./lib/sessions-proxy').createSessionsProxy({ machines: MACHINES, upstream, accessHeaders, findMachine, allowed: (m) => planAllowed(m), refusal: () => machinesRefusal(),
+  // p42 R5/R9: a session-id route resolved to machine m is an open session ON m (a thread-stream must close on downgrade)
+  admitted: (req, res, u, m) => { if (planPolicy) trackPlanSession(req, res, u, planCred(req, u), m.id); } });
 
 // Fetch a bridge endpoint with its secret (+ CF Access token if set) and a hard timeout.
 // D52: ONE retry when the connect itself was refused (no byte reached the bridge, so no double send;
@@ -587,7 +589,8 @@ async function handleApi(req, res, u) {
   if (!authed(req, u)) return sendJson(res, 401, { error: 'unauthorized' });
   req.cmuxRes = res;   // lib/read-body.js answers 500 through it if a body handler throws
   // BUG2: GET/query routes carry ?machine=; same bridge-machineId learning as readBody does for bodies.
-  if (p.startsWith('/api/cmux/') && !p.startsWith('/api/cmux/fs/download')) {
+  // p42 R9: /api/sessions?machine=<alias> too, so a cold alias of a disallowed machine resolves (402, not 404).
+  if ((p.startsWith('/api/cmux/') && !p.startsWith('/api/cmux/fs/download')) || p === '/api/sessions' || p.startsWith('/api/sessions/')) {
     const qm = u.searchParams.get('machine');
     if (qm) await ensureMachine(qm).catch(() => {});
   }
