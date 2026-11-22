@@ -70,7 +70,7 @@ const planPolicy = process.env.HMX_PLAN_STATE_DIR
 const pairing = require('./lib/pairing').createPairing({ serverToken: SERVER_TOKEN, publicUrl: process.env.PUBLIC_URL || '', policy: planPolicy,
   confirm: String(process.env.PAIR_LOCAL || '').toLowerCase() === 'off' ? confirmDialog.disabledConfirm : confirmDialog.createConfirm(),
   localMachine: () => { const m = MACHINES.find((x) => x.socketPath || loopbackHttp(x.baseUrl)); return m ? m.id : null; } });
-const { parseUnixBaseUrl, unixFetch } = require('./lib/unix-fetch');
+const { parseUnixBaseUrl, unixFetch, streamRequest: streamTo } = require('./lib/unix-fetch');
 let SERVER_SOCKET = '';
 try { SERVER_SOCKET = unixListen.socketSetting('SERVER_SOCKET', process.env, emptyShadowed); }
 catch (e) { console.error(`refusing to start: ${e.code}: ${e.detail}`); process.exit(1); }
@@ -191,6 +191,10 @@ const accessHeaders = (m) => cfAccess.accessHeadersFor(m, process.env);
 // unix:<path>: lib/unix-fetch over the socket — Node's fetch cannot dial a UNIX socket.
 function upstream(m, pathAndQuery, init) {
   return m.socketPath ? unixFetch(m.socketPath, pathAndQuery, init) : fetch(`${m.baseUrl}${pathAndQuery}`, init);
+}
+// The same bridge, answered as a node IncomingMessage (for bodies piped with backpressure).
+function streamRequest(m, pathAndQuery, init) {
+  return streamTo(m.socketPath ? { socketPath: m.socketPath } : { url: `${m.baseUrl}${pathAndQuery}` }, pathAndQuery, init);
 }
 
 // p41 B1: /api/sessions* pass-through (mounted in handleApi next to the completions relay).
@@ -466,19 +470,19 @@ async function relayDownload(req, res, u) {
   req.on('close', () => ctrl.abort());
   const headers = { 'x-bridge-secret': m.secret, ...accessHeaders(m) };
   if (req.headers['range']) headers.range = req.headers['range'];
+  // node:http, not fetch: the body is piped with the client's backpressure. (Bun's fetch reads a body
+  // ahead without bound, so a 50 MB file sat in memory under the compiled runtime.)
   let up;
   try {
-    up = await upstream(m, `/cmux/fs/download?path=${encodeURIComponent(tk.path)}`,
-      { headers, signal: ctrl.signal });
+    up = await streamRequest(m, `/cmux/fs/download?path=${encodeURIComponent(tk.path)}`, { headers, signal: ctrl.signal });
   } catch (_) { return sendJson(res, 502, { error: 'bridge_unreachable' }); }
   const out = { 'cache-control': 'no-store' };
   for (const h of ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range']) {
-    const v = up.headers.get(h);
-    if (v) out[h] = v;
+    const v = up.headers[h];
+    if (v) out[h] = Array.isArray(v) ? v.join(', ') : v;
   }
-  res.writeHead(up.status, out);
-  if (!up.body) return res.end();
-  try { await pipeline(Readable.fromWeb(up.body), res); } catch (_) { /* client left, or upstream cut */ }
+  res.writeHead(up.statusCode, out);
+  try { await pipeline(up, res); } catch (_) { /* client left, or upstream cut */ }
   try { res.end(); } catch (_) {}
 }
 
