@@ -1317,6 +1317,48 @@ function afterListen() {
   }
   if (!SERVER_TOKEN) console.log('WARNING: SERVER_TOKEN empty → UI/API open. Set it before exposing outside a trusted LAN.');
 }
+// p43: video Remote Desktop WebSocket (one viewer per machine). Every other upgrade path answers 404.
+const { screenInfoFromBridge } = require('./lib/screen-ws');
+// lib/screen-ws.js owns gates, the grant ledger and input epochs; the Bun front door can call screenWs.attach().
+const wsLib = require('./lib/ws');
+const screenWs = require('./lib/screen-ws').createScreenWs({
+  serverToken: () => SERVER_TOKEN, authed, findMachine, accept: wsLib.accept, refuse: wsLib.refuse,
+  policy: planPolicy ? {
+    authorize: async (req, u, ctx) => { const r = await planPolicy.authorize(req, u, ctx); return r ? { status: r.status, body: r.body } : null; },
+    plan: () => planPolicy.planCode(),
+    ctx: (req, u) => ({ cred: planCred(req, u), local: pairing.localOnly(req), machineIds: machineOrder(), keys: pairing.list() }),
+    track: (req, s, ctx, machineId) => {
+      const cred = ctx.cred, keyHash = cred && cred.kind === 'device' ? cred.dev.keyHash : null;
+      const untrack = planPolicy.track({ cred, machineId, local: ctx.local, keys: () => pairing.list(),
+        currentDev: () => (cred && cred.kind === 'device' ? pairing.byId(cred.dev.id) : null),
+        credOk: () => (cred && cred.kind === 'device' ? !!pairing.byId(cred.dev.id) && pairing.byId(cred.dev.id).keyHash === keyHash : true),
+        close: () => s.destroy(), onChange: () => s.onChange() });
+      s.on('close', untrack);
+    },
+  } : null,
+  bridge: {
+    open(m, { display, displayId, gen, epoch }, onChunk, onEnd) {
+      const ctrl = new AbortController();
+      const qs = new URLSearchParams({ displayId: String(displayId != null ? displayId : display), gen: String(gen), epoch: String(epoch) });
+      upstream(m, `/cmux/screen/video?${qs}`, { headers: { 'x-bridge-secret': m.secret, ...accessHeaders(m) }, signal: ctrl.signal }).then(async (up) => {
+        if (!up.ok || !up.body) return onEnd(up.status || 502);
+        const reader = up.body.getReader();
+        for (;;) { const { done, value } = await reader.read(); if (done) break; onChunk(Buffer.from(value)); }
+        onEnd(0);
+      }).catch(() => onEnd(502));
+      return { close: () => ctrl.abort() };
+    },
+    // Helper ops other than input (grant, keyframe, rate, time, release) -> bridge POST /cmux/screen/video/op.
+    op: (m, op) => bridge(m, '/cmux/screen/video/op', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(op), timeout: 5000 }),
+    input: async (m, body) => { const r = await bridge(m, '/cmux/screen/video/in', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), timeout: 5000 }); return { status: r.status, body: await r.json().catch(() => ({})) }; },
+    info: async (m, display) => {
+      const r = await bridge(m, `/cmux/screen/info?display=${display}`, { timeout: 10000 });
+      if (!r.ok) throw new Error('info_' + r.status);
+      return screenInfoFromBridge(await r.json(), display);
+    },
+  },
+});
+httpServer.on('upgrade', (req, socket, head) => screenWs.handleUpgrade(req, socket, head));
 const graceful = require('./lib/graceful').createGraceful(httpServer);
 if (SERVER_SOCKET) {
   // lib/unix-listen.js checks the directory (real path, 0700, ours, safe ancestors), refuses a live

@@ -3185,6 +3185,13 @@ function dispatchCmux(req, res, u) {
       screenStream.input({ ...b, items }).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
     }, 64 * 1024);
   }
+  if (req.method === 'POST' && p === '/cmux/screen/video/op') {   // p43: grant/keyframe/rate/time (SCREEN_VIEW), release (+ SCREEN_CONTROL)
+    if (!macScreen.flags.view) return send(res, 403, { error: 'screen_disabled', flag: 'SCREEN_VIEW' });
+    return cmuxReadBody(req, (b) => {
+      if (!b) return send(res, 400, { error: 'bad_json' });
+      screenStream.op(b).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
+    }, 4 * 1024);
+  }
   if (req.method === 'GET' && p === '/cmux/screen/info') return macScreen.info().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));
   if (req.method === 'GET' && p === '/cmux/screen/dialogs') return macScreen.dialogs().then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));   // p41 D135
   if (req.method === 'GET' && p === '/cmux/screen/shot') return macScreen.shot(u.searchParams.get('display'), u.searchParams.get('displayId')).then((r) => send(res, r.status, r.body), () => send(res, 502, { error: 'screen_failed' }));

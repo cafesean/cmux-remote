@@ -42,6 +42,10 @@ setInterval(() => {}, 1000);
 let on, open, dir;
 const rd = (f) => { try { return fs.readFileSync(path.join(dir, f), 'utf8'); } catch (_) { return ''; } };
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// The fakes are separate node processes (caffeinate is spawned detached, osascript after jpegIdle): their
+// log lines land on their own schedule, so poll for them instead of a fixed pause (fixed pauses flaked).
+async function waitFor(fn, ms = 3000) { const end = Date.now() + ms; let v; while (!(v = fn()) && Date.now() < end) await pause(20); return v || fn(); }
+const helperOps = () => rd('helper.log').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 before(async () => {
   dir = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 'p43v-')));
   for (const [n, src] of [['osascript', FAKE_OSA], ['caffeinate', FAKE_CAFF], ['hm-screen-stream', FAKE_HELPER], ['screencapture', FAKE_CAP], ['sips', FAKE_SIPS]]) fs.writeFileSync(path.join(dir, n), src, { mode: 0o755 });
@@ -90,12 +94,13 @@ test('GET video: bad displayId -> 400; stream -> framed helper packets, start op
   assert.equal((await get(on, '/cmux/screen/video?displayId=abc&gen=1')).status, 400);
   const s = await openStream(on, 'displayId=69733378&gen=3&epoch=1');
   assert.equal(s.status, 200);
-  assert.equal(s.first[4], 5);   // type 5 meta
-  const start = rd('helper.log').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((m) => m.op === 'start');
+  try {   // the stream must close even on a failure, or video keeps control and the next test sees 409
+  assert.equal(s.first[4], 5);   // type 5 meta (the bridge's 'started' or the helper's own)
+  const start = await waitFor(() => helperOps().find((m) => m.op === 'start'));
   assert.equal(start.displayId, 69733378); assert.equal(start.gen, 3);
-  assert.match(rd('caff.log'), /"-u"/);   // D103: display held awake while the stream runs
-  await pause(300);   // control opens after jpegIdle + one JXA release
-  assert.match(rd('osa-stdin.log'), /kCGEventLeftMouseUp/);   // release of both buttons + modifiers before video input opens
+  assert.match(await waitFor(() => rd('caff.log')), /"-u"/);   // D103: display held awake while the stream runs
+  // control opens after jpegIdle + one JXA release of both buttons + modifiers before video input opens
+  assert.match(await waitFor(() => /kCGEventLeftMouseUp/.test(rd('osa-stdin.log')) && rd('osa-stdin.log')), /kCGEventLeftMouseUp/);
 
   // JPEG input while video owns control -> 409 control_busy
   const tap = await post(on, '/cmux/screen/tap', { fx: 0.5, fy: 0.5 });
@@ -104,7 +109,11 @@ test('GET video: bad displayId -> 400; stream -> framed helper packets, start op
   assert.equal(mouse.status, 409); assert.equal(mouse.json.error, 'control_busy');
 
   // video input: KEY_ALLOW + clamps applied before the helper sees an item
-  const r = await post(on, '/cmux/screen/video/in', { gen: 3, epoch: 1, items: [
+  const vin = (items) => post(on, '/cmux/screen/video/in', { gen: 3, epoch: 1, items });
+  // control opens once the JXA release answer reaches the bridge; a 409 input_blocked forwards nothing, so retry
+  let r = await vin([]); for (let i = 0; i < 100 && r.status === 409; i++) { await pause(20); r = await vin([]); }
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  r = await post(on, '/cmux/screen/video/in', { gen: 3, epoch: 1, items: [
     { seq: 1, t: 'key', key: 'f13', mods: [] },                  // not allowed -> dropped
     { seq: 2, t: 'scroll', dy: 99999, dx: -99999 },              // clamped
     { seq: 3, t: 'mouse', kind: 'move', fx: 5, fy: 0.5 },        // bad coords -> dropped
@@ -113,12 +122,11 @@ test('GET video: bad displayId -> 400; stream -> framed helper packets, start op
     { seq: 6, t: 'evil', cmd: 'rm' },
   ] });
   assert.equal(r.status, 200, JSON.stringify(r.json));
-  await pause(100);
-  const inp = rd('helper.log').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((m) => m.op === 'input');
+  const inp = await waitFor(() => helperOps().find((m) => m.op === 'input' && m.items.length));   // skips the empty probe
   assert.deepEqual(inp.items.map((i) => i.seq), [2, 4]);
   assert.equal(inp.items[0].dy, 3000); assert.equal(inp.items[0].dx, -3000);
   assert.deepEqual(inp.items[1].mods, ['cmd']);
-  s.close();
+  } finally { s.close(); }
 });
 
 test('JPEG routes: displayId resolved per call; absent -> 404 display_gone', async () => {
@@ -132,6 +140,27 @@ test('JPEG routes: displayId resolved per call; absent -> 404 display_gone', asy
   const s2 = await get(on, '/cmux/screen/shot?displayId=4128836');
   assert.equal(s2.status, 200, JSON.stringify(s2.json));
   assert.match(rd('cap.log'), /"-D","2"/);   // id 4128836 -> index 2 at this execution
+});
+
+test('POST video/op: secret + flag gates, bad op 400, no stream 409; grant/keyframe reach the helper stdin as clean JSON', async () => {
+  assert.strictEqual((await post(on, '/cmux/screen/video/op', { op: 'grant', gen: 1, grantId: 1 }, '')).status, 403);
+  const off = await post(open, '/cmux/screen/video/op', { op: 'release', epoch: 1 }, '');
+  assert.strictEqual(off.status, 403); assert.strictEqual(off.json.error, 'screen_disabled');
+  assert.strictEqual((await post(on, '/cmux/screen/video/op', { op: 'nope' })).status, 400);
+  assert.strictEqual((await post(on, '/cmux/screen/video/op', { op: 'grant', gen: 1 })).status, 400);
+  assert.strictEqual((await post(on, '/cmux/screen/video/op', { op: 'grant', gen: 1, grantId: 1, displayId: 999 })).status, 409);
+  const s = await openStream(on, 'displayId=4128836&gen=3&epoch=0');
+  assert.strictEqual(s.status, 200);
+  try {
+    const g = await post(on, '/cmux/screen/video/op', { op: 'grant', gen: 3, grantId: 7, displayId: 4128836, junk: { x: 1 } });
+    assert.deepStrictEqual([g.status, g.json.ok], [200, true]);
+    const k = await post(on, '/cmux/screen/video/op', { op: 'keyframe', gen: 3, grantId: 8, emergency: true, reason: 'decode_error', displayId: 4128836 });
+    assert.strictEqual(k.status, 200);
+    await waitFor(() => helperOps().some((l) => l.op === 'keyframe'));
+    const lines = helperOps();
+    assert.ok(lines.some((l) => l.op === 'grant' && l.gen === 3 && l.grantId === 7 && !('junk' in l) && !('displayId' in l)), 'grant on helper stdin');
+    assert.ok(lines.some((l) => l.op === 'keyframe' && l.grantId === 8 && l.emergency === true && l.reason === 'decode_error'), 'keyframe on helper stdin');
+  } finally { s.close(); }
 });
 
 test('displayIndexFor: CGDirectDisplayID -> 1-based NSScreen index from fake geometry', () => {

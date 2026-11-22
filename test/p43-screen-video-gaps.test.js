@@ -160,6 +160,7 @@ test('bridge shutdown (SIGTERM) stops every stream helper', async () => {
     fs.writeFileSync(path.join(dir, 'helper.pid'), '');
     const s = await openStream(b2, 'displayId=4128836&gen=1&epoch=1');
     assert.equal(s.status, 200);
+    let t0 = 0; while (!rd('helper.pid').trim() && t0++ < 100) await pause(20);   // the bridge's 'started' meta can precede the helper's first write
     const pid = Number(rd('helper.pid').trim().split('\n')[0]);
     assert.ok(pid > 0 && alive(pid));
     await b2.stop();
