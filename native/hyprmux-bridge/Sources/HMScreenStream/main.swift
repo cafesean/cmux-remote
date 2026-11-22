@@ -2,6 +2,7 @@
 //
 // default: long-lived helper (stdin JSON ops, stdout framed packets; see "helper mode" below).
 // --decode-check: decode a captured helper stdout stream (smoke tool).
+// --dry-input: helper mode, but input steps are logged to stderr instead of posted.
 // --probe: one-shot feasibility check on this Mac. Prints exactly one JSON line on stdout:
 //   permissions (preflight only, never prompts), main-display identity, SCStream 420v capture,
 //   VTCompressionSession H.264 encode (low-latency rate control, else RealTime), decode back through
@@ -9,6 +10,7 @@
 //   whether a public API exposes the current system cursor image.
 import AppKit
 import ApplicationServices
+import Carbon
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -331,6 +333,75 @@ func runProbe() async -> [String: Any] {
 }
 
 
+// MARK: input (CGEvent port of the JXA input; planning, epoch gate and held set in ScreenStreamCore.InputCore)
+
+func postStep(_ s: EventStep, dry: Bool) -> Bool {
+  if case let .pause(ms) = s { usleep(UInt32(ms) * 1000); return true }
+  if dry { log("dry-input: \(s)"); return true }
+  let src: CGEventSource? = nil
+  var e: CGEvent?
+  switch s {
+  case let .mouse(kind, x, y, button, click):
+    e = CGEvent(mouseEventSource: src, mouseType: CGEventType(rawValue: kind.rawValue)!, mouseCursorPosition: CGPoint(x: x, y: y),
+                mouseButton: CGMouseButton(rawValue: button.rawValue)!)
+    if let click { e?.setIntegerValueField(.mouseEventClickState, value: Int64(click)) }
+  case let .scroll(w1, w2):
+    e = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 2, wheel1: w1, wheel2: w2, wheel3: 0)
+  case let .key(code, down, flags):
+    e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down)
+    e?.flags = CGEventFlags(rawValue: flags)
+  case let .unicode(units, down):
+    e = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: down)
+    units.withUnsafeBufferPointer { e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: $0.baseAddress) }
+  case .pause: return true
+  }
+  guard let e else { return false }
+  e.post(tap: .cghidEventTap)
+  return true
+}
+
+final class InputPoster {
+  let q = DispatchQueue(label: "input")
+  var engine = InputEngine()
+  let dry: Bool
+  var display: () -> DisplayGeometry? = { nil }
+  var emit: ([String: Any]) -> Void = { _ in }
+  var onPosted: (UInt32) -> Void = { _ in }
+  var timer: DispatchSourceTimer?
+  init(dry: Bool) { self.dry = dry }
+
+  var env: InputEngine.Env {
+    InputEngine.Env(now: nowUs, axTrusted: { [dry] in dry || AXIsProcessTrusted() }, secureInput: { IsSecureEventInputEnabled() },
+                    display: display, post: { [dry] in postStep($0, dry: dry) })
+  }
+
+  func startWatchdog() {
+    let t = DispatchSource.makeTimerSource(queue: q)
+    t.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
+    t.setEventHandler { [self] in
+      for r in engine.watchdog(env) { log("input: safety up after 5 s held"); emit(r.json) }
+    }
+    t.resume(); timer = t
+  }
+
+  func gen(_ g: UInt32) { q.async { self.engine.setGen(g) } }
+
+  /// op input: {gen, epoch, items:[{seq, t, ...}]} (an item may carry its own gen/epoch).
+  func input(_ c: ControlOp) {
+    let raw = (c.fields["items"] as? [[String: Any]]) ?? []
+    let items = raw.compactMap { InputItem.from($0, gen: c.uint("gen"), epoch: c.uint("epoch")) }
+    q.async { [self] in
+      for r in engine.run(items, env) { emit(r.json) }
+      onPosted(engine.lastPostedSeq)
+    }
+  }
+
+  func release(_ c: ControlOp) {
+    guard let e = c.uint("epoch") else { return }
+    q.async { [self] in for r in engine.release(epoch: e, env) { emit(r.json) } }
+  }
+}
+
 // MARK: helper mode (long-lived)
 //
 // stdin: JSON lines, ops exactly start|rate|grant|keyframe|time|input|release|stop.
@@ -409,7 +480,17 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
   var lastHeartbeat: UInt64 = 0
   let synthetic: Bool
   var synthIndex = 0
-  init(synthetic: Bool) { self.synthetic = synthetic }
+  let input: InputPoster
+  var postedInput: UInt32 = 0
+  init(synthetic: Bool, dryInput: Bool) {
+    self.synthetic = synthetic
+    input = InputPoster(dry: dryInput)
+    super.init()
+    input.display = { [weak self] in self?.q.sync { self?.geometry } ?? nil }
+    input.emit = { [weak self] o in self?.q.async { self?.meta(o) } }
+    input.onPosted = { [weak self] s in self?.q.async { self?.postedInput = s } }
+    input.startWatchdog()
+  }
 
   func nextSeq(_ t: PacketType) -> UInt32 { let s = seqs[t, default: 0]; seqs[t] = s &+ 1; return s }
 
@@ -434,7 +515,8 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
         out.send(Packet(type: .heartbeat, gen: gen, seq: nextSeq(.heartbeat), captureTs: lastCaptureTs, rev: revs.rev,
                         payload: TimeReply.encode(frameCaptureTs: lastCaptureTs, helperRecvTs: recv, helperSendTs: nowUs(),
                                                   timeId: c.uint("id") ?? 0)))
-      case "input", "release": break // input posting is a separate story; accepted and ignored here
+      case "input": input.input(c)
+      case "release": input.release(c)
       case "stop": stopAll(); exit(0)
       default: break
       }
@@ -442,7 +524,7 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
   }
 
   func newGen(_ g: UInt32) {
-    gen = g; ledger.reset(gen: g); seqs = [:]; needsIDR = true
+    gen = g; ledger.reset(gen: g); seqs = [:]; needsIDR = true; input.gen(g)
   }
 
   func start(_ c: ControlOp) {
@@ -606,7 +688,7 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if PacketHeader.size + payload.count > PacketHeader.maxPacket { needsIDR = true; return }
         out.send(Packet(type: .video, flags: flags, gen: p.gen, seq: nextSeq(.video), captureTs: p.captureTs, encodeDoneTs: done,
-                        postedInput: 0, rev: p.rev, grantId: p.grantId, payload: payload))
+                        postedInput: postedInput, rev: p.rev, grantId: p.grantId, payload: payload))
       }
     }
   }
@@ -617,9 +699,9 @@ final class Streamer: NSObject, SCStreamOutput, SCStreamDelegate {
   func stopAll() { stopCapture(); encoder = nil; timer?.cancel(); timer = nil }
 }
 
-func runHelper(synthetic: Bool) -> Never {
+func runHelper(synthetic: Bool, dryInput: Bool) -> Never {
   _ = NSApplication.shared
-  let s = Streamer(synthetic: synthetic)
+  let s = Streamer(synthetic: synthetic, dryInput: dryInput)
   Thread.detachNewThread {
     while let line = readLine(strippingNewline: true) { if !line.isEmpty { s.handle(line) } }
     s.q.sync { s.stopAll() }
@@ -667,5 +749,5 @@ if args.contains("--probe") {
 } else if args.contains("--decode-check") {
   runDecodeCheck()
 } else {
-  runHelper(synthetic: args.contains("--synthetic"))
+  runHelper(synthetic: args.contains("--synthetic"), dryInput: args.contains("--dry-input"))
 }
