@@ -129,6 +129,13 @@ if (mode === 'tunnel') {
   // D128: the account scripts run in cmux panes on Macs without node; the bridge points at wrappers that
   // set HYPERMUX_NODE to the bundled runtime (Resources/server/node-compat/node) before the real script.
   if (mode === 'bridge' && !process.env.HYPERMUX_BIN_DIR) process.env.HYPERMUX_BIN_DIR = path.join(CONTENTS, 'Resources', 'server', 'hyprmux-bin');
+  // Uploads (files dropped into a session): default ~/HyprMux-Uploads. The old default ~/Downloads/cmux-remote fails
+  // where ~/Downloads is privacy-protected for a background agent or is an alias file (Sean's MacBook: ENOTDIR).
+  // No spaces: the path is typed into the agent's prompt. A user's own UPLOAD_DIR line in .env still wins.
+  if (mode === 'bridge') {
+    const dflt = require('./lib/hm-home').bridgeUploadDefault(fs.readFileSync(path.join(STATE_DIR, '.env'), 'utf8'));
+    if (dflt) process.env.UPLOAD_DIR = dflt;
+  }
   if (mode === 'bridge') require('./bridge.js');
   else require('./server.js');
 }
