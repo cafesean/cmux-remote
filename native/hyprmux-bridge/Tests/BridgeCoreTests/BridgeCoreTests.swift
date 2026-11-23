@@ -17,6 +17,7 @@ final class FakeAgents: AgentService {
 /// Stub launchctl: per-label exit status and `print` body.
 final class StubRunner: CommandRunner, @unchecked Sendable {
   var loaded = Set<String>()
+  var bootedOut = Set<String>()
   var running: [String: String] = [:] // label -> program path
   /// SMAppService BundleProgram jobs: label -> (pid, executable path), printed the way launchd really does.
   var bundleProgram: [String: (pid: Int, exe: String)] = [:]
@@ -33,6 +34,9 @@ final class StubRunner: CommandRunner, @unchecked Sendable {
       return (0, "\tstate = running\n\tprogram identifier = Contents/MacOS/x (mode: 2)\n\truns = 1\n\tpid = \(bp.pid)\n")
     }
     if let prog = running[label] { return (0, "\tstate = running\n\tprogram = \(prog)\n") }
+    // 0.3.6: the Bridge's own jobs count as loaded (launchd took the SMAppService registration) unless a test
+    // booted one out by hand.
+    if label.hasPrefix("com.hyprmux.bridge."), !bootedOut.contains(label) { return (0, "\tstate = waiting\n") }
     return loaded.contains(label) ? (0, "\tstate = waiting\n") : (113, "")
   }
 }

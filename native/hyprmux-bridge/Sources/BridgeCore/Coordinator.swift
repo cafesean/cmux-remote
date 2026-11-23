@@ -39,6 +39,10 @@ public final class AgentCoordinator {
     do {
       for a in want {
         try agents.register(a)
+        // 0.3.6 (mini 2026-11-23: daemon + core gone after an uninstall/reinstall): SMAppService can say .enabled
+        // while launchd holds no job for the label, and register() skips an enabled agent. Re-register it so the
+        // next poll heals it. A loaded job that keeps exiting stays loaded (KeepAlive), so this never thrashes.
+        if !legacy.launchctl.isLoaded(a.label) { try agents.restart(a) }
         done.append(a)
       }
     } catch {

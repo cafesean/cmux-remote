@@ -35,3 +35,36 @@ final class UploadFolder036Tests: XCTestCase {
     XCTAssertTrue(m.contains(.action("Upload Folder…", .chooseUploadFolder)))
   }
 }
+
+/// 0.3.6 (mini 2026-11-23): daemon + core were enabled in SMAppService but not loaded in launchd after an
+/// uninstall/reinstall, so register() skipped them and the mini listed no machine. The poll now re-registers them.
+final class AgentHeal036Tests: XCTestCase {
+  func testEnabledButNotLoadedAgentIsReRegistered() throws {
+    let home = NSTemporaryDirectory() + "heal-\(UUID().uuidString)"
+    defer { try? FileManager.default.removeItem(atPath: home) }
+    let paths = BridgePaths(home: home)
+    try FileManager.default.createDirectory(atPath: paths.launchAgentsDir, withIntermediateDirectories: true)
+    let state = BridgeState(paths: paths)
+    let runner = StubRunner()
+    let agents = FakeAgents()
+    agents.registered = [.daemon, .server, .core]          // SMAppService says enabled
+    runner.bootedOut = ["com.hyprmux.bridge.daemon", "com.hyprmux.bridge.core"]   // launchd has no job
+    let coord = AgentCoordinator(agents: agents, legacy: LegacyGuard(launchctl: Launchctl(runner: runner, uid: 501, pidPath: runner.pidPath),
+                                                                     launchAgentsDir: paths.launchAgentsDir), state: state)
+    XCTAssertEqual(coord.tick(), .registered([.daemon, .server, .core]))
+    XCTAssertEqual(agents.log, ["+daemon", "-daemon", "+daemon", "+server", "+core", "-core", "+core"])
+  }
+
+  func testLoadedAgentsAreLeftAlone() throws {
+    let home = NSTemporaryDirectory() + "heal-\(UUID().uuidString)"
+    defer { try? FileManager.default.removeItem(atPath: home) }
+    let paths = BridgePaths(home: home)
+    try FileManager.default.createDirectory(atPath: paths.launchAgentsDir, withIntermediateDirectories: true)
+    let runner = StubRunner()
+    let agents = FakeAgents()
+    let coord = AgentCoordinator(agents: agents, legacy: LegacyGuard(launchctl: Launchctl(runner: runner, uid: 501, pidPath: runner.pidPath),
+                                                                     launchAgentsDir: paths.launchAgentsDir), state: BridgeState(paths: paths))
+    _ = coord.tick()
+    XCTAssertEqual(agents.log, ["+daemon", "+server", "+core"])
+  }
+}
