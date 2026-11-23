@@ -54,7 +54,15 @@ if CommandLine.arguments.contains("--core") {
     session.ensureHubSession()
     let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "core"))
     timer.schedule(deadline: .now(), repeating: CheckoutPoller.interval)
-    timer.setEventHandler { session.coreTick(port: serverPort(), tokenEndpoint: tokenEndpoint) }
+    timer.setEventHandler {
+      // k123: a replaced bundle (manual DMG update with the menu app closed) must not keep running old code.
+      let onDisk = BundleSwap.onDiskVersion(bundlePath: Bundle.main.bundlePath)
+      if BundleSwap.replaced(running: bundleVersion, onDisk: onDisk) {
+        CoreLog.append("bundle-replaced-restart", [("running", bundleVersion), ("disk", onDisk ?? "-")], logsDir: paths.logsDir)
+        exit(0)
+      }
+      session.coreTick(port: serverPort(), tokenEndpoint: tokenEndpoint)
+    }
     timer.resume()
     withExtendedLifetime(timer) { dispatchMain() }
   }
