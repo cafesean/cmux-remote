@@ -6,6 +6,7 @@
 #   Contents/MacOS/cloudflared                      pinned + verified (cloudflared.ref), Cloudflare's signature kept
 #   Contents/Resources/server/                      files the server reads at run time
 #   Contents/Resources/StatusBarIconTemplate*.png   menu bar logo (template image, 18 pt @1x/@2x)
+#   Contents/Resources/AppIcon.icns                 app icon (HyprMux mark, colours swapped)
 #   Contents/Library/LaunchAgents/*.plist           registered by the Bridge with SMAppService.agent
 #   Contents/Info.plist                             version = package.json version
 # Usage: scripts/bridge-app/package-bridge.sh <out-dir> [work-dir]   -> <out-dir>/HyprMux Bridge.app
@@ -57,6 +58,8 @@ install -m 755 "$CF" "$C/MacOS/cloudflared"
 
 # 4. menu bar logo
 cp $HERE/Resources/StatusBarIconTemplate.png $HERE/Resources/StatusBarIconTemplate@2x.png "$C/Resources/"
+# app icon (Finder, Applications, System Settings privacy panes): the HyprMux mark, colours swapped
+cp $HERE/Resources/AppIcon.icns "$C/Resources/AppIcon.icns"
 
 # 5. LaunchAgents + Info.plist
 cp $HERE/LaunchAgents/*.plist "$C/Library/LaunchAgents/"
