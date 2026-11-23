@@ -76,7 +76,11 @@ public struct BridgeState: Sendable {
   public static let screenKeyLines = ["SCREEN_VIEW=1", "SCREEN_CONTROL=1"]
 
   /// Keys every Bridge .env must carry; appended to an existing file only when the key is missing.
-  func defaultKeyLines() -> [String] { planKeyLines() + Self.screenKeyLines }
+  /// HMX-137 S1: the fixed loopback port the server answers `GET /api/pair/hello` on (lib/discovery.js), so the
+  /// HyprMux app on this Mac finds this Bridge although its server port was picked at random.
+  public static let discoveryPort = 47380
+  public static let discoveryKeyLines = ["HMX_DISCOVERY_PORT=\(discoveryPort)"]
+  func defaultKeyLines() -> [String] { planKeyLines() + Self.screenKeyLines + Self.discoveryKeyLines }
 
   /// KEY=value, double-quoted when the value has a space ("Application Support"), so a shell `source` of the
   /// file works too. loadenv.js and readEnv() strip the quotes.

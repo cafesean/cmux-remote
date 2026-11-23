@@ -148,7 +148,7 @@ final class BridgeCoreTests: XCTestCase {
     FileManager.default.createFile(atPath: paths.envPath, contents: Data(env.utf8), attributes: [.posixPermissions: 0o644])
     try state.ensure()
     // Every existing line kept verbatim; only the p42 plan keys are appended, once.
-    let planKeys = "HMX_PLAN_STATE_DIR=\"\(paths.stateDir)\"\nHMX_HUB_URL=\(BridgeState.hubBase)\nSCREEN_VIEW=1\nSCREEN_CONTROL=1\n"
+    let planKeys = "HMX_PLAN_STATE_DIR=\"\(paths.stateDir)\"\nHMX_HUB_URL=\(BridgeState.hubBase)\nSCREEN_VIEW=1\nSCREEN_CONTROL=1\nHMX_DISCOVERY_PORT=47380\n"
     XCTAssertEqual(try String(contentsOfFile: paths.envPath, encoding: .utf8), env + planKeys)
     try state.ensure()
     XCTAssertEqual(try String(contentsOfFile: paths.envPath, encoding: .utf8), env + planKeys)

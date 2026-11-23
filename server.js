@@ -1314,6 +1314,12 @@ const httpServer = http.createServer((req, res) => {
 });
 
 // What both listen paths print once the server is reachable.
+// HMX-137 S1: the HyprMux app on this Mac finds a Bridge on its random port through a fixed loopback hello (lib/discovery.js).
+function startLocalDiscovery(serverPort) {
+  if (!process.env.HMX_DISCOVERY_PORT) return;
+  require('./lib/discovery').startDiscovery({ port: process.env.HMX_DISCOVERY_PORT, serverPort, hello: () => pairing.hello() });
+}
+
 function afterListen() {
   graceful.markReady();
   // id, label and host only — never the secret. This is the first place a two-Mac setup can be
@@ -1396,7 +1402,7 @@ if (SERVER_SOCKET) {
     (e) => { console.error(`refusing to start: ${e.code || 'listen_failed'}: ${e.detail || e.message}`); process.exit(1); });
 } else if (FRONT) {
   startFront({ port: PORT, host: HOST }).then(
-    (f) => { console.log(`cmux-remote server on http://${HOST}:${f.port} with ${MACHINES.length} machine(s)`); afterListen(); },
+    (f) => { console.log(`cmux-remote server on http://${HOST}:${f.port} with ${MACHINES.length} machine(s)`); afterListen(); startLocalDiscovery(f.port); },
     (e) => { console.error(`refusing to start: ${e.code || 'listen_failed'}: ${e.detail || e.message}`); process.exit(1); });
 } else {
   httpServer.listen(PORT, HOST, () => {
@@ -1405,6 +1411,7 @@ if (SERVER_SOCKET) {
     const bound = (httpServer.address() && httpServer.address().port) || PORT;
     console.log(`cmux-remote server on http://${HOST}:${bound} with ${MACHINES.length} machine(s)`);
     afterListen();
+    startLocalDiscovery(bound);
   });
 }
 

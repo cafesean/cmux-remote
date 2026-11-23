@@ -45,16 +45,16 @@ final class Fixes027Tests: XCTestCase {
     let env = "PORT=4123\nSERVER_TOKEN=aaa\nDEVICES_FILE=\(paths.devicesPath)\nHMX_PLAN_STATE_DIR=\(paths.stateDir)\nHMX_HUB_URL=\(BridgeState.hubBase)\n"
     try seed(env)
     try state.ensure()
-    XCTAssertEqual(try text(), env + "SCREEN_VIEW=1\nSCREEN_CONTROL=1\n")
+    XCTAssertEqual(try text(), env + "SCREEN_VIEW=1\nSCREEN_CONTROL=1\nHMX_DISCOVERY_PORT=47380\n")
     try state.ensure()   // idempotent
-    XCTAssertEqual(try text(), env + "SCREEN_VIEW=1\nSCREEN_CONTROL=1\n")
+    XCTAssertEqual(try text(), env + "SCREEN_VIEW=1\nSCREEN_CONTROL=1\nHMX_DISCOVERY_PORT=47380\n")
   }
 
   func testExistingScreenControlZeroIsUntouched() throws {
     let env = "PORT=4123\nHMX_PLAN_STATE_DIR=\(paths.stateDir)\nHMX_HUB_URL=\(BridgeState.hubBase)\nSCREEN_CONTROL=0"
     try seed(env)
     try state.ensure()
-    XCTAssertEqual(try text(), env + "\nSCREEN_VIEW=1\n")
+    XCTAssertEqual(try text(), env + "\nSCREEN_VIEW=1\nHMX_DISCOVERY_PORT=47380\n")
     XCTAssertEqual(state.readEnv()["SCREEN_CONTROL"], "0")
   }
 
