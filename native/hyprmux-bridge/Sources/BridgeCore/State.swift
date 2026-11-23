@@ -158,6 +158,24 @@ public struct BridgeState: Sendable {
     return true
   }
 
+  /// k95: the folder dropped files are saved to (Bridge menu "Upload Folder…"). One UPLOAD_DIR line: replaced in
+  /// place, else appended; every other line is kept as written. The daemon reads it on its next start.
+  public func setUploadDir(_ dir: String) throws {
+    let text = (try? String(contentsOfFile: paths.envPath, encoding: .utf8)) ?? ""
+    var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    if lines.last == "" { lines.removeLast() }
+    let line = Self.envLine("UPLOAD_DIR", dir)
+    if let i = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("UPLOAD_DIR=") }) {
+      lines[i] = line
+      lines.removeAll { $0 != line && $0.trimmingCharacters(in: .whitespaces).hasPrefix("UPLOAD_DIR=") }
+    } else { lines.append(line) }
+    try Self.writePrivate(paths.envPath, lines.joined(separator: "\n") + "\n")
+  }
+
+  /// The upload folder in use: the env file's UPLOAD_DIR, else the Bridge default (~/HyprMux-Uploads,
+  /// lib/hm-home.js bridgeUploadDefault).
+  public func uploadDir() -> String { readEnv()["UPLOAD_DIR"] ?? paths.home + "/HyprMux-Uploads" }
+
   public func readEnv() -> [String: String] {
     guard let text = try? String(contentsOfFile: paths.envPath, encoding: .utf8) else { return [:] }
     var out: [String: String] = [:]

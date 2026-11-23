@@ -5,6 +5,7 @@ public enum MenuAction: Equatable, Sendable {
   case signIn, connectDevice, devices, toggleRemoteAccess, upgrade, managePlan, signOut, quit, openNotice
   case restart, openLogs, stopBridge, checkUpdate
   case allowScreenRecording, allowAccessibility
+  case chooseUploadFolder
 }
 
 public indirect enum MenuItem: Equatable, Sendable {
@@ -91,6 +92,8 @@ public enum MenuModel {
     if signedIn { out.append(.action("Devices…", .devices)) }
     out.append(.separator)
     out.append(.action(remoteAccessTitle, .toggleRemoteAccess, checked: i.remoteAccessOn))
+    // k95 (Sean 2026-11-23): "User should be able to configure their destination folder" for files dropped in.
+    out.append(.action("Upload Folder…", .chooseUploadFolder))
     out.append(.separator)
     if i.optionHeld {
       out += [.info("Troubleshooting"), .action("Restart", .restart), .action("Open Logs", .openLogs),

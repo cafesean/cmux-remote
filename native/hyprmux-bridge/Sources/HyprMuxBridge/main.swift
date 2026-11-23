@@ -143,6 +143,32 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
 
   func openPermissionPane(_ p: RemoteDesktopPermission) { NSWorkspace.shared.open(RemoteDesktopPermissions.settingsURL(p)) }
 
+  /// k95: pick the folder files dropped into a session are saved to; saved as UPLOAD_DIR, then the daemon restarts
+  /// so it takes the new folder (the server and tunnel keep running).
+  func chooseUploadFolder() {
+    let panel = NSOpenPanel()
+    panel.title = "Upload Folder"
+    panel.message = "Files you drop into a HyprMux session are saved here."
+    panel.prompt = "Use Folder"
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.directoryURL = URL(fileURLWithPath: state.uploadDir())
+    NSApp.activate(ignoringOtherApps: true)
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    do {
+      try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+      try state.setUploadDir(url.path)
+      try agents.restart(.daemon)
+    } catch {
+      let a = NSAlert()
+      a.messageText = "Couldn't use that folder"
+      a.informativeText = "\(error)"
+      a.runModal()
+    }
+  }
+
   func poll() {
     switch coordinator.tick() {
     case .waitingForLegacy:
@@ -286,6 +312,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     case .checkUpdate: checkUpdate()
     case .allowScreenRecording: openPermissionPane(.screenRecording)
     case .allowAccessibility: openPermissionPane(.accessibility)
+    case .chooseUploadFolder: chooseUploadFolder()
     }
   }
 
