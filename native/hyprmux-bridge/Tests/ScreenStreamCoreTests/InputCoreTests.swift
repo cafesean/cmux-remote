@@ -56,9 +56,24 @@ final class InputCoreTests: XCTestCase {
   }
 
   func testTypeUnicodeChunks16() {
-    let s = try! plan(item("type") { $0.text = String(repeating: "x", count: 20) }).get()
-    XCTAssertEqual(s, [.unicode(Array(repeating: 120, count: 16), down: true), .unicode(Array(repeating: 120, count: 16), down: false), .pause(ms: 5),
-                       .unicode(Array(repeating: 120, count: 4), down: true), .unicode(Array(repeating: 120, count: 4), down: false), .pause(ms: 5)])
+    // chars with no US keycode stay unicode chunks of 16 units
+    let s = try! plan(item("type") { $0.text = String(repeating: "é", count: 20) }).get()
+    XCTAssertEqual(s, [.unicode(Array(repeating: 0xE9, count: 16), down: true), .unicode(Array(repeating: 0xE9, count: 16), down: false), .pause(ms: 5),
+                       .unicode(Array(repeating: 0xE9, count: 4), down: true), .unicode(Array(repeating: 0xE9, count: 4), down: false), .pause(ms: 5)])
+  }
+
+  func testTypeSendsRealKeycodesWithTextK151() {
+    // HMX k151: never keycode 0 for a char that has its own key ("a" for every key in apps that read the keycode)
+    let s = try! plan(item("type") { $0.text = "xA éé!" }).get()
+    XCTAssertEqual(s, [
+      .keyText(code: 7, down: true, flags: 0, units: [120]), .keyText(code: 7, down: false, flags: 0, units: [120]), .pause(ms: 2),
+      .keyText(code: 0, down: true, flags: 0x20000, units: [65]), .keyText(code: 0, down: false, flags: 0x20000, units: [65]), .pause(ms: 2),
+      .keyText(code: 49, down: true, flags: 0, units: [32]), .keyText(code: 49, down: false, flags: 0, units: [32]), .pause(ms: 2),
+      .unicode([0xE9, 0xE9], down: true), .unicode([0xE9, 0xE9], down: false), .pause(ms: 5),
+      .keyText(code: 18, down: true, flags: 0x20000, units: [33]), .keyText(code: 18, down: false, flags: 0x20000, units: [33]), .pause(ms: 2)])
+    let all = try! plan(item("type") { $0.text = "hello" }).get()
+    XCTAssertFalse(all.contains { if case .unicode = $0 { return true } else { return false } }, "plain ASCII never goes as keycode 0")
+    XCTAssertEqual(plan(item("type") { $0.text = String(repeating: "a", count: 1001) }), .failure(.toolong))
   }
 
   func testSecureInputUsesKeycodesD106() {

@@ -217,7 +217,7 @@ test('D103 shot wakes the display (caffeinate -u -t 30), at most once per 15 s; 
 test('D106 Secure Input typing: ASCII -> real US keycodes (+shift), other chars unicode; no 409 gate', () => {
   const { JXA_INPUT } = require('../lib/mac-screen');
   assert.ok(!/'secure'/.test(JXA_INPUT), 'no secure_input refusal: lock-screen keycodes reach the field (probe 2026-11-06)');
-  assert.match(JXA_INPUT, /if\(!\$\.IsSecureEventInputEnabled\(\)\)return typeUni/); assert.match(JXA_INPUT, /length>100\)return.toolong/);
+  assert.match(JXA_INPUT, /if\(!\$\.IsSecureEventInputEnabled\(\)\)return typeText/); assert.match(JXA_INPUT, /length>100\)return.toolong/);
   const src = JXA_INPUT.replace(/ObjC\.import\([^)]*\);/g, '');
   const kc = new Function('$', 'delay', 'post', src + ';return kc;')({}, () => {}, () => {});
   const want = { a: [0, false], A: [0, true], z: [6, false], '1': [18, false], '!': [18, true], '\\': [42, false], '|': [42, true], '`': [50, false], '~': [50, true], '"': [39, true], ' ': [49, false], '?': [44, true] };
@@ -227,4 +227,22 @@ test('D106 Secure Input typing: ASCII -> real US keycodes (+shift), other chars 
 
 test('D109 frames keep Retina detail: max edge >= 3000 px, JPEG q in 30..90', () => {
   assert.ok(LIMITS.SCREEN_SHOT_MAX_DIM >= 3000, String(LIMITS.SCREEN_SHOT_MAX_DIM));
+});
+
+test('HMX k151 typing outside Secure Input: each ASCII char posts its real US keycode (+shift) carrying its text, never keycode 0', () => {
+  const { JXA_INPUT } = require('../lib/mac-screen');
+  const src = JXA_INPUT.replace(/ObjC\.import\([^)]*\);/g, '');
+  const ev = [];
+  const $ = {
+    kCGEventFlagMaskShift: 0x20000,
+    CGEventCreateKeyboardEvent: (_s, code, down) => ({ code, down, flags: 0, text: null }),
+    CGEventSetFlags: (e, f) => { e.flags = f; },
+    CGEventKeyboardSetUnicodeString: (e, n, u) => { e.text = String.fromCharCode(...u.slice(0, n)); },
+    CGEventPost: (_tap, e) => ev.push(e),
+  };
+  const typeText = new Function('$', 'delay', 'post', src + ';return typeText;')($, () => {}, (e) => ev.push(e));
+  assert.equal(typeText('hA é!'), 'ok');
+  const downs = ev.filter((e) => e.down);
+  assert.deepEqual(downs.map((e) => [e.code, e.flags, e.text]), [[4, 0, 'h'], [0, 0x20000, 'A'], [49, 0, ' '], [0, 0, 'é'], [18, 0x20000, '!']]);
+  assert.equal(ev.length, 10, 'every down has its up');
 });

@@ -357,6 +357,10 @@ func postStep(_ s: EventStep, dry: Bool) -> Bool {
   case let .unicode(units, down):
     e = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: down)
     units.withUnsafeBufferPointer { e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: $0.baseAddress) }
+  case let .keyText(code, down, flags, units):
+    e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down)
+    e?.flags = CGEventFlags(rawValue: flags)
+    units.withUnsafeBufferPointer { e?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: $0.baseAddress) }
   case .pause: return true
   }
   guard let e else { return false }

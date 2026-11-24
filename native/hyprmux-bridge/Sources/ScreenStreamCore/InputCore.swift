@@ -27,6 +27,9 @@ public enum EventStep: Equatable {
   case key(code: UInt16, down: Bool, flags: UInt64)
   /// Keycode 0 + CGEventKeyboardSetUnicodeString(units).
   case unicode([UInt16], down: Bool)
+  /// HMX k151: the char's real US keycode (+ flags) AND CGEventKeyboardSetUnicodeString(units). Apps that read the
+  /// text get the text; apps that read the keycode (terminals) get the right key instead of keycode 0 = "a".
+  case keyText(code: UInt16, down: Bool, flags: UInt64, units: [UInt16])
   /// Sleep between steps (the JXA delay() calls).
   case pause(ms: Int)
 }
@@ -219,7 +222,7 @@ public enum InputPlanner {
     guard let text = it.text else { return .failure(.badop) }
     if !secure {
       guard text.utf16.count <= InputLimits.typeMaxChars else { return .failure(.toolong) }
-      return .success(unicode(text))
+      return .success(keyText(text))
     }
     guard text.utf16.count <= InputLimits.secureTypeMaxChars else { return .failure(.toolong) }
     var s: [EventStep] = []
@@ -229,6 +232,24 @@ public enum InputPlanner {
       s += [.key(code: k.code, down: true, flags: f), .pause(ms: 20), .key(code: k.code, down: false, flags: f), .pause(ms: 20), .pause(ms: 60)]
     }
     return .success(s)
+  }
+
+  /// HMX k151 (Sean 2026-11-24: "Typing in text box will type only 'a' for every keypress"): outside Secure Input
+  /// every char went as keycode 0 + a unicode string, and an app that reads the keycode typed "a" for each key.
+  /// Now a char with a US keycode goes as that keycode (+ shift) carrying its own text; runs of other chars
+  /// (accents, emoji, CJK) stay unicode chunks. Same steps as JXA typeText() in lib/mac-screen.js.
+  public static func keyText(_ text: String) -> [EventStep] {
+    var s: [EventStep] = []
+    var run = ""
+    for ch in text {
+      guard let k = KeyTable.secureKey(ch) else { run.append(ch); continue }
+      if !run.isEmpty { s += unicode(run); run = "" }
+      let f = k.shift ? KeyTable.shiftFlag : 0
+      let u = Array(String(ch).utf16)
+      s += [.keyText(code: k.code, down: true, flags: f, units: u), .keyText(code: k.code, down: false, flags: f, units: u), .pause(ms: 2)]
+    }
+    if !run.isEmpty { s += unicode(run) }
+    return s
   }
 
   /// JXA typeUni(): 16 UTF-16 units per event pair, 5 ms apart (a surrogate pair is never split).
@@ -279,7 +300,7 @@ public struct HeldSet {
     case let .key(code, down, _):
       guard KeyTable.modifierKeycodes.contains(code) else { return }
       if down { held[.modifier(code)] = HeldEntry(epoch: epoch, lastEventUs: now, x: lastX, y: lastY) } else { held[.modifier(code)] = nil }
-    case .scroll, .unicode, .pause: break
+    case .scroll, .unicode, .keyText, .pause: break   // keyText codes are never modifier keys
     }
   }
 
