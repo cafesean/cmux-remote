@@ -23,7 +23,7 @@ final class InputCoreTests: XCTestCase {
                    [.mouse(.leftDragged, x: p.x, y: p.y, button: .left, clickState: 1)])
     XCTAssertEqual(plan(item("mouse") { $0.type = "drag"; $0.fx = 0.5; $0.fy = 0.5 }), .failure(.notDown))
     XCTAssertEqual(try plan(item("mouse") { $0.type = "up"; $0.fx = 0; $0.fy = 1 }).get(),
-                   [.mouse(.leftUp, x: 100, y: 550, button: .left, clickState: 1)])
+                   [.mouse(.leftUp, x: 100, y: 549, button: .left, clickState: 1)])   // k94: fy 1 = the last point
     XCTAssertEqual(try plan(item("tap") { $0.fx = 0.5; $0.fy = 0.5 }).get(), [
       .mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil),
       .mouse(.leftDown, x: p.x, y: p.y, button: .left, clickState: 1), .mouse(.leftUp, x: p.x, y: p.y, button: .left, clickState: 1)])
@@ -186,7 +186,7 @@ final class InputCoreTests: XCTestCase {
     let f = Fake(); var eng = InputEngine()
     let r = eng.run([item("mouse", seq: 7) { $0.type = "move"; $0.fx = 0; $0.fy = 0 }, item("mouse", seq: 8) { $0.type = "move"; $0.fx = 1; $0.fy = 1 }], env(f))
     XCTAssertEqual(r, [.coalesced(epoch: 0, seq: 7), .posted(epoch: 0, seq: 8)])
-    XCTAssertEqual(f.posted, [.mouse(.moved, x: 1100, y: 550, button: .left, clickState: nil)])
+    XCTAssertEqual(f.posted, [.mouse(.moved, x: 1099, y: 549, button: .left, clickState: nil)])   // k94: far corner on the display
     XCTAssertEqual(eng.lastPostedSeq, 8)
   }
 

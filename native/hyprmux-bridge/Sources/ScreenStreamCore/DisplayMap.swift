@@ -50,10 +50,12 @@ public enum DisplayMap {
   }
 
   /// Input fraction (of the display's points rectangle, clamped to 0...1) -> CG global point.
+  /// k94: the far edge (fraction 1) is the display's LAST point, never `origin + size`: that point is outside the
+  /// display (on the next display, or nowhere), so the Dock and the right/bottom hot corners never saw the pointer.
   public static func inputPoint(fx: Double, fy: Double, in g: DisplayGeometry) -> (x: Double, y: Double) {
     let cx = fx.isFinite ? min(max(fx, 0), 1) : 0
     let cy = fy.isFinite ? min(max(fy, 0), 1) : 0
-    return (g.originX + cx * g.ptsW, g.originY + cy * g.ptsH)
+    return (g.originX + min(cx * g.ptsW, max(g.ptsW - 1, 0)), g.originY + min(cy * g.ptsH, max(g.ptsH - 1, 0)))
   }
 
   /// Encoded size: requested px capped at native, aspect kept, even dimensions (H.264 4:2:0).

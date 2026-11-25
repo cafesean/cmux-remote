@@ -56,8 +56,13 @@ final class DisplayMapTests: XCTestCase {
     XCTAssertEqual(mid.x, -960); XCTAssertEqual(mid.y, -298 + 540)
     let clamped = DisplayMap.inputPoint(fx: -3, fy: .nan, in: g)
     XCTAssertEqual(clamped.x, -1920); XCTAssertEqual(clamped.y, -298)
+    // k94: the far edge is the display's last point (x = 0 is the NEXT display's first column)
     let far = DisplayMap.inputPoint(fx: 9, fy: 9, in: g)
-    XCTAssertEqual(far.x, 0); XCTAssertEqual(far.y, -298 + 1080)
+    XCTAssertEqual(far.x, -1); XCTAssertEqual(far.y, -298 + 1079)
+    let edge = DisplayMap.inputPoint(fx: 1, fy: 1, in: g)
+    XCTAssertEqual(edge.x, -1); XCTAssertEqual(edge.y, -298 + 1079)
+    let corner = DisplayMap.inputPoint(fx: 0, fy: 0, in: g)
+    XCTAssertEqual(corner.x, -1920); XCTAssertEqual(corner.y, -298)
   }
 
   func testEncodeSizeCapsAtNativeAndIsEven() {
