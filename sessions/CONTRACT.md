@@ -27,6 +27,12 @@ One terminal, agent or browser surface on one machine.
   that matches `^[a-z0-9-]+$` and has `<dir>/<taskName>.md`; `spawnedBy` / `continues` = that file's frontmatter
   `from:` / `continues:` (same name rule, never the row's own name). Never a path or file content. Absent when the
   dir is unset, the file is missing or unreadable, or the task-file read misses its deadline (`lineageMs` 1500 ms).
+- `lead`, `lane`: strings, optional (k176, same conditions). `lead` = frontmatter `lead:` (a lead line name, name
+  rule, e.g. `x-remix-lead`); `lane` = frontmatter `lane:` matching `^[A-Za-z0-9-]+/[A-Za-z0-9_-]+$` (e.g. `agents/p14`,
+  `agents/lead`). A row with no task file of its own resolves through its LINE file: strip one trailing `-N` from
+  the key (`x-agents-lead-94` -> `x-agents-lead`) and read `<dir>/<line>.md` only when it says `line: <line>`; then
+  only its `lead` / `lane` apply (no `taskName`, `spawnedBy`, `continues`: those describe the line, not this holder).
+  A line file read under its own name never sends its `from:` / `continues:`.
 - `title`: string. The session title shown in the list and the thread header. Chosen by priority
   (sessions/titles.js): transcript custom-title, tmux session name, `<workspace title> <surface ref>`,
   the tab title only when it is not a process/wrapper/shell/prompt title (`cswap`, `zsh`, `user@host:~`).

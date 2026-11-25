@@ -475,7 +475,7 @@ function createSessionRoutes(deps) {
     send(res, 200, { ...snap.body, snapshotAt: snap.at, snapshotAge: age, ...(age > LIMITS.listSnapshotMaxAgeMs ? { stale: true } : {}) });
   }
 
-  // p45 S2 / D16: stamp taskName / spawnedBy / continues from deps.lineage (lib/tasks.js lineage). At most one
+  // p45 S2 / D16 (+k176 lead / lane): stamp taskName / spawnedBy / continues from deps.lineage (lib/tasks.js lineage). At most one
   // call outstanding (a build while one is out skips enrichment); a call that does not settle within
   // lineageMs is abandoned (signal.aborted, so its late results never write the reader's cache) and the
   // build publishes without fields. The slot frees when the underlying call settles. Never throws.
@@ -498,12 +498,16 @@ function createSessionRoutes(deps) {
     if (map === TIMEOUT) { signal.aborted = true; return; }
     if (!(map instanceof Map)) return;
     for (const r of rows) {
-      const name = (r.keys || []).find((k) => map.has(k));
+      const keys = r.keys || [];
+      // k176: a key with its own task file wins; else a key resolved through its line file (lead/lane only).
+      const name = keys.find((k) => map.has(k) && !(map.get(k) || {}).viaLine) || keys.find((k) => map.has(k));
       if (!name) continue;
       const v = map.get(name) || {};
-      r.session.taskName = name;
-      if (typeof v.spawnedBy === 'string') r.session.spawnedBy = v.spawnedBy;
-      if (typeof v.continues === 'string') r.session.continues = v.continues;
+      if (!v.viaLine) r.session.taskName = name;
+      if (!v.viaLine && typeof v.spawnedBy === 'string') r.session.spawnedBy = v.spawnedBy;
+      if (!v.viaLine && typeof v.continues === 'string') r.session.continues = v.continues;
+      if (typeof v.lead === 'string') r.session.lead = v.lead;
+      if (typeof v.lane === 'string') r.session.lane = v.lane;
     }
   }
 
