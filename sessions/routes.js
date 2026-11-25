@@ -50,6 +50,7 @@ const LIMITS = {
   eventMaxPages: 20,                  // event-log pages followed per read (= detect.js MAX_EVENT_PAGES)
   markerIdMax: 128,
   procSnapshotTtlMs: 2000,           // one ps+tmux snapshot is shared for this long (list, describe, streams)
+  lineageMs: 1500,                   // p45 D16: a build waits at most this long for task-file lineage, then publishes without outline fields
   listSnapshotMs: 2000,              // D272: the sessions list is rebuilt locally at most this often, however many clients poll
   listSnapshotMaxAgeMs: 300000,      // D296: an older snapshot still answers at once, flagged stale: true (a rebuild runs behind it)
   listBuildStuckMs: 120000,          // D296: a build in flight longer than this no longer blocks a new one
@@ -298,7 +299,13 @@ function createSessionRoutes(deps) {
   const kindMemo = new Map();
   const kindNow = deps.now || Date.now;
   // The full Session (CONTRACT.md) for one tab, plus its join for the caller.
+  // p45 S2: the row's task-file key candidates, in order tmuxName, userName, title (internal, never serialized).
   async function describe(entry, d, unread) {
+    const k = {};
+    const r = await describeInner(entry, d, unread, k);
+    return { ...r, keys: [k.tmuxName, k.userName, r.session.title].filter((x) => typeof x === 'string' && x) };
+  }
+  async function describeInner(entry, d, unread, keys) {
     const { ws, tab } = entry;
     const id = `${machineId}:${tab.id}`;
     const s = { id, machine: machineId, workspace: ws.title || ws.ref, surface: tab.id, kind: 'terminal',
@@ -310,6 +317,7 @@ function createSessionRoutes(deps) {
     // A11: title never comes from a process/wrapper name (cswap, zsh...); see sessions/titles.js.
     let tmuxName = tab.tmuxPane ? tab.title : null;
     if (!tmuxName && d.procSnapshot) { try { tmuxName = procs.tmuxNameFor(await d.procSnapshot(), js); } catch (_) { tmuxName = null; } }
+    keys.tmuxName = tmuxName;
     // D280: the tmux panes of the session this tab shows, so hook events with no surface id find it.
     if (tmuxName && d.procSnapshot) {
       try {
@@ -343,6 +351,7 @@ function createSessionRoutes(deps) {
     if (s.kind === 'claude' && isCodeMode(fg)) s.codeMode = true;                    // D287: Code Mode pilot build in front
     if (s.kind === 'terminal') { const h = harnessOf(fg); if (h) s.harness = h; }   // D262: pi, gemini, hermes… (terminal view)
     userName = nameStore.get(nameKey(join, tab));
+    keys.userName = userName;
     if (userName) s.userNamed = true;
     s.title = titleOf('', s.kind === 'terminal');
     if (s.kind !== 'claude' || !join) return { session: s, join: s.kind === 'codex' ? join : null };
@@ -466,6 +475,38 @@ function createSessionRoutes(deps) {
     send(res, 200, { ...snap.body, snapshotAt: snap.at, snapshotAge: age, ...(age > LIMITS.listSnapshotMaxAgeMs ? { stale: true } : {}) });
   }
 
+  // p45 S2 / D16: stamp taskName / spawnedBy / continues from deps.lineage (lib/tasks.js lineage). At most one
+  // call outstanding (a build while one is out skips enrichment); a call that does not settle within
+  // lineageMs is abandoned (signal.aborted, so its late results never write the reader's cache) and the
+  // build publishes without fields. The slot frees when the underlying call settles. Never throws.
+  let lineageBusy = false;
+  const lineageMs = deps.lineageMs ?? LIMITS.lineageMs;
+  async function enrichLineage(rows) {
+    if (typeof deps.lineage !== 'function' || lineageBusy) return;
+    const want = [...new Set(rows.flatMap((r) => r.keys || []))];
+    if (!want.length) return;
+    const signal = { aborted: false };
+    let call;
+    try { call = Promise.resolve(deps.lineage(want, { signal })); } catch (_) { return; }
+    lineageBusy = true;
+    call.then(() => {}, () => {}).then(() => { lineageBusy = false; });
+    const TIMEOUT = {};
+    let timer;
+    const late = new Promise((res) => { timer = setTimeout(() => res(TIMEOUT), lineageMs); });
+    let map = null;
+    try { map = await Promise.race([call, late]); } catch (_) { map = null; } finally { clearTimeout(timer); }
+    if (map === TIMEOUT) { signal.aborted = true; return; }
+    if (!(map instanceof Map)) return;
+    for (const r of rows) {
+      const name = (r.keys || []).find((k) => map.has(k));
+      if (!name) continue;
+      const v = map.get(name) || {};
+      r.session.taskName = name;
+      if (typeof v.spawnedBy === 'string') r.session.spawnedBy = v.spawnedBy;
+      if (typeof v.continues === 'string') r.session.continues = v.continues;
+    }
+  }
+
   async function buildList() {
     const d = requestDeps();
     const all = await treeTabs(d.procSnapshot);
@@ -527,7 +568,9 @@ function createSessionRoutes(deps) {
         folded.add(r);
       }
     }
-    const sessions = results.filter((r) => !folded.has(r)).map((r) => r.session);
+    const kept = results.filter((r) => !folded.has(r));
+    await enrichLineage(kept);
+    const sessions = kept.map((r) => r.session);
     const claims = new Map();
     results.forEach((r, i) => { if (r.join && r.join.via !== 'cwd' && !claims.has(r.join.sessionId)) claims.set(r.join.sessionId, tabs[i].tab.id); });
     lastClaims = claims;

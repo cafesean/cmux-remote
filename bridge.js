@@ -292,7 +292,13 @@ async function privateGate(allRefs) {
   return null;
 }
 const gateRefuse = (res, code) => send(res, code, code === 423 ? { error: 'private' } : { error: 'gate_unavailable' });
+// p45 S2: the ONE task-file reader (p41 D152 routes + session outline lineage). Declared before
+// createSessionRoutes so the lineage dep is not a temporal-dead-zone reference. Logs set|unset, never the path.
+const tasksLib = require('./lib/tasks');
+const tasks = tasksLib.createTasks();
+console.log(`tasks: dir ${tasks.enabled ? 'set' : 'unset'}`);
 const sessionRoutes = require('./sessions/routes').createSessionRoutes({
+  lineage: tasks.enabled ? tasks.lineage : undefined,   // p45 S2: taskName/spawnedBy/continues on list rows
   machineId: MACHINE_ID,
   screenStatus: () => rdSetup.cached() || rdSetup.status(),   // p41 D189: stale-while-revalidate; awaits only the first probe (rdSetup is built below; per request only)
   privateCheck: (refs) => privacy.verdict(refs),
@@ -2982,8 +2988,7 @@ function cmuxAccounts(req, res, u, p) {
 }
 
 // ---------- p41 D152 task file (opt-in HYPERMUX_TASKS_DIR; lib/tasks.js) ----------
-const tasksLib = require('./lib/tasks');
-const tasks = tasksLib.createTasks();
+// (tasksLib / tasks are declared above createSessionRoutes: p45 S2 shares the one instance.)
 function cmuxTasks(req, res, u, p) {
   const done = (pr) => pr.then((r) => send(res, r.code, r.body), () => { if (!res.headersSent) send(res, 500, { error: 'tasks_failed' }); });
   if (!tasks.enabled) return send(res, 404, { error: 'disabled' });

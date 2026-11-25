@@ -22,6 +22,11 @@ One terminal, agent or browser surface on one machine.
   with it; the terminal mirror stays its chat view. An app ignores a value it does not know.
 - `codeMode`: `true`, optional, `claude` kind only (D287). The pane runs a Claude Code "Code Mode" pilot build
   (program path under `~/.local/share/claude/pilot/`; override with `CODE_MODE_BIN_RE`). Absent = normal build.
+- `taskName`, `spawnedBy`, `continues`: strings, optional (p45 session outline). Only when the bridge has
+  `HYPERMUX_TASKS_DIR` (absolute) set. `taskName` = the first of the row's tmux session name, user name, title
+  that matches `^[a-z0-9-]+$` and has `<dir>/<taskName>.md`; `spawnedBy` / `continues` = that file's frontmatter
+  `from:` / `continues:` (same name rule, never the row's own name). Never a path or file content. Absent when the
+  dir is unset, the file is missing or unreadable, or the task-file read misses its deadline (`lineageMs` 1500 ms).
 - `title`: string. The session title shown in the list and the thread header. Chosen by priority
   (sessions/titles.js): transcript custom-title, tmux session name, `<workspace title> <surface ref>`,
   the tab title only when it is not a process/wrapper/shell/prompt title (`cswap`, `zsh`, `user@host:~`).
