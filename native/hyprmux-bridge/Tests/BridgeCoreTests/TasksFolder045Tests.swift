@@ -65,6 +65,20 @@ final class TasksFolder045Tests: XCTestCase {
     XCTAssertNil(state.tasksDir())
   }
 
+  func testRefusesNewlineAndQuotePathsForTasksAndUploadFolder() throws {
+    let state = try freshState()
+    let before = try env(state)
+    for name in ["x\nHYPERMUX_EVIL=1", "x\rcr", "x\"quote", "x\ttab"] {
+      let dir = root + "/" + name
+      try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+      XCTAssertThrowsError(try state.setTasksDir(dir), name) { e in XCTAssertFalse("\(e)".contains(self.root)) }
+      XCTAssertThrowsError(try state.setUploadDir(dir), name)
+      XCTAssertEqual(try env(state), before, "env file unchanged: \(name)")
+    }
+    XCTAssertNil(state.tasksDir())
+    XCTAssertEqual(mode(state), 0o600)
+  }
+
   func testValueSurvivesEnsureOnExistingFile() throws {
     let state = try freshState()
     let dir = root + "/example-tasks"

@@ -84,6 +84,14 @@ public struct BridgeState: Sendable {
 
   /// KEY=value, double-quoted when the value has a space ("Application Support"), so a shell `source` of the
   /// file works too. loadenv.js and readEnv() strip the quotes.
+  /// p45 review: a value written from a folder pick must stay ONE line and survive the quoting: any control
+  /// character (newline, CR, NUL, anything below 0x20, DEL) or a double quote is refused. The error carries no path.
+  static func checkEnvValue(_ value: String) throws {
+    if value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f || $0 == "\"" }) {
+      throw BridgeError.io("folder path has a character the settings file cannot hold")
+    }
+  }
+
   static func envLine(_ key: String, _ value: String) -> String {
     value.contains(" ") ? "\(key)=\"\(value)\"" : "\(key)=\(value)"
   }
@@ -174,6 +182,7 @@ public struct BridgeState: Sendable {
     if lines.last == "" { lines.removeLast() }
     let isKey = { (l: String) in l.trimmingCharacters(in: .whitespaces).hasPrefix(key + "=") }
     if let value {
+      try Self.checkEnvValue(value)   // before any read-modify-write: a refused value writes nothing
       let line = Self.envLine(key, value)
       if let i = lines.firstIndex(where: isKey) {
         lines[i] = line

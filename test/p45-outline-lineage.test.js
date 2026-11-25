@@ -93,6 +93,19 @@ test('an aborted call never writes the cache', async () => {
   const t = createTasks({ dir });
   const signal = { aborted: true };
   const m = await t.lineage(['x-lead-1'], { signal });
-  assert.deepEqual(m.get('x-lead-1'), { spawnedBy: 'x-chief-1' });
+  assert.equal(m.size, 0, 'already aborted: no work');
+  assert.equal(t._lineageCache.size, 0);
+});
+
+test('an aborted call stops early (frees the single-flight slot)', async () => {
+  const dir = mkdir();
+  for (let i = 0; i < 40; i++) write(dir, `x-example-${i}`, 'from: x-chief-1');
+  const t = createTasks({ dir });
+  const signal = { aborted: false };
+  const realRp = fsp.realpath;
+  let ops = 0;
+  fsp.realpath = async (...a) => { ops++; if (ops === 3) signal.aborted = true; await new Promise((r) => setTimeout(r, 5)); return realRp(...a); };
+  try { await t.lineage(Array.from({ length: 40 }, (_, i) => `x-example-${i}`), { signal }); } finally { fsp.realpath = realRp; }
+  assert.ok(ops < 40, `stopped early: ${ops} realpath calls for 40 names`);
   assert.equal(t._lineageCache.size, 0);
 });
