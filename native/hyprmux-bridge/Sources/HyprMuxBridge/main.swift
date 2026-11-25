@@ -177,6 +177,45 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     }
   }
 
+  /// p45 S7 (D11): pick this Mac's session task-file folder; saved as HYPERMUX_TASKS_DIR, then the daemon restarts
+  /// so the node Bridge reads it (server and tunnel keep running). An invalid pick alerts; nothing written, no restart.
+  /// The path is never logged.
+  func chooseTasksFolder() {
+    let panel = NSOpenPanel()
+    panel.title = "Session Tasks Folder"
+    panel.message = "The folder of this Mac's session task files, for the session outline."
+    panel.prompt = "Use Folder"
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = false
+    panel.allowsMultipleSelection = false
+    if let d = state.tasksDir() { panel.directoryURL = URL(fileURLWithPath: d) }
+    NSApp.activate(ignoringOtherApps: true)
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    do {
+      try state.setTasksDir(url.path)
+      try agents.restart(.daemon)
+    } catch {
+      let a = NSAlert()
+      a.messageText = "Couldn't use that folder"
+      a.informativeText = "\(error)"
+      a.runModal()
+    }
+  }
+
+  /// p45 S7: Clear removes the HYPERMUX_TASKS_DIR line, then the daemon restarts.
+  func clearTasksFolder() {
+    do {
+      try state.clearTasksDir()
+      try agents.restart(.daemon)
+    } catch {
+      let a = NSAlert()
+      a.messageText = "Couldn't clear the session tasks folder"
+      a.informativeText = "\(error)"
+      a.runModal()
+    }
+  }
+
   func poll() {
     switch coordinator.tick() {
     case .waitingForLegacy:
@@ -292,7 +331,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
                      signInVisible: s?.config.signInVisible ?? false, signedIn: signedIn, email: s?.accountEmail, plan: s?.plan,
                      canManagePlan: s?.canManagePlan ?? false, problems: problems, notice: core?.text, noticeOpens: core?.url != nil,
                      remoteAccessOn: state.phoneAccessOn, version: bundleVersion,
-                     optionHeld: NSEvent.modifierFlags.contains(.option), permissions: permissions)
+                     optionHeld: NSEvent.modifierFlags.contains(.option), permissions: permissions,
+                     tasksFolderSet: state.tasksDir() != nil)
   }
 
   func menuNeedsUpdate(_ menu: NSMenu) {
@@ -321,6 +361,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate, NSW
     case .allowScreenRecording: openPermissionPane(.screenRecording)
     case .allowAccessibility: openPermissionPane(.accessibility)
     case .chooseUploadFolder: chooseUploadFolder()
+    case .chooseTasksFolder: chooseTasksFolder()
+    case .clearTasksFolder: clearTasksFolder()
     }
   }
 

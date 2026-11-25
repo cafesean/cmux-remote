@@ -6,6 +6,7 @@ public enum MenuAction: Equatable, Sendable {
   case restart, openLogs, stopBridge, checkUpdate
   case allowScreenRecording, allowAccessibility
   case chooseUploadFolder
+  case chooseTasksFolder, clearTasksFolder   // p45 S7 (D11)
 }
 
 public indirect enum MenuItem: Equatable, Sendable {
@@ -41,15 +42,17 @@ public struct MenuInput: Equatable, Sendable {
   public var optionHeld: Bool
   /// Remote Desktop grants, re-read on menu open; nil = not read (no permission block).
   public var permissions: PermissionStatus?
+  /// p45 S7: a session tasks folder is set (shows "Clear Session Tasks Folder").
+  public var tasksFolderSet: Bool
 
   public init(status: String, hostname: String? = nil, signInVisible: Bool = true, signedIn: Bool = false, email: String? = nil,
               plan: String? = nil, canManagePlan: Bool = false, problems: [String] = [], notice: String? = nil,
               noticeOpens: Bool = false, remoteAccessOn: Bool = false, version: String, optionHeld: Bool = false,
-              permissions: PermissionStatus? = nil) {
+              permissions: PermissionStatus? = nil, tasksFolderSet: Bool = false) {
     self.status = status; self.hostname = hostname; self.signInVisible = signInVisible; self.signedIn = signedIn
     self.email = email; self.plan = plan; self.canManagePlan = canManagePlan; self.problems = problems; self.notice = notice
     self.noticeOpens = noticeOpens; self.remoteAccessOn = remoteAccessOn; self.version = version; self.optionHeld = optionHeld
-    self.permissions = permissions
+    self.permissions = permissions; self.tasksFolderSet = tasksFolderSet
   }
 }
 
@@ -57,6 +60,8 @@ public enum MenuModel {
   public static let connectTitle = "Connect a Device…"
   public static let remoteAccessTitle = "Allow Remote Access"
   public static let upgradeTitle = "Upgrade to Pro…"
+  public static let tasksFolderTitle = "Session Tasks Folder…"
+  public static let clearTasksFolderTitle = "Clear Session Tasks Folder"
   public static let upgradeSymbol = "arrow.up.circle.fill"
 
   /// "Stopped" reads as Offline; every other status word is shown as is.
@@ -94,6 +99,9 @@ public enum MenuModel {
     out.append(.action(remoteAccessTitle, .toggleRemoteAccess, checked: i.remoteAccessOn))
     // k95 (Sean 2026-11-23): "User should be able to configure their destination folder" for files dropped in.
     out.append(.action("Upload Folder…", .chooseUploadFolder))
+    // p45 S7 (D11): the folder of this Mac's session task files (HYPERMUX_TASKS_DIR), for the session outline.
+    out.append(.action(tasksFolderTitle, .chooseTasksFolder))
+    if i.tasksFolderSet { out.append(.action(clearTasksFolderTitle, .clearTasksFolder)) }
     out.append(.separator)
     if i.optionHeld {
       out += [.info("Troubleshooting"), .action("Restart", .restart), .action("Open Logs", .openLogs),

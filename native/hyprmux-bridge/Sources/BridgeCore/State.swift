@@ -164,17 +164,42 @@ public struct BridgeState: Sendable {
 
   /// k95: the folder dropped files are saved to (Bridge menu "Upload Folder…"). One UPLOAD_DIR line: replaced in
   /// place, else appended; every other line is kept as written. The daemon reads it on its next start.
-  public func setUploadDir(_ dir: String) throws {
+  public func setUploadDir(_ dir: String) throws { try setEnvKey("UPLOAD_DIR", dir) }
+
+  /// One KEY= line in the env file: replaced in place (duplicates dropped), else appended; nil removes it. Every
+  /// other line is kept as written; the file stays 0600.
+  func setEnvKey(_ key: String, _ value: String?) throws {
     let text = (try? String(contentsOfFile: paths.envPath, encoding: .utf8)) ?? ""
     var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     if lines.last == "" { lines.removeLast() }
-    let line = Self.envLine("UPLOAD_DIR", dir)
-    if let i = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("UPLOAD_DIR=") }) {
-      lines[i] = line
-      lines.removeAll { $0 != line && $0.trimmingCharacters(in: .whitespaces).hasPrefix("UPLOAD_DIR=") }
-    } else { lines.append(line) }
-    try Self.writePrivate(paths.envPath, lines.joined(separator: "\n") + "\n")
+    let isKey = { (l: String) in l.trimmingCharacters(in: .whitespaces).hasPrefix(key + "=") }
+    if let value {
+      let line = Self.envLine(key, value)
+      if let i = lines.firstIndex(where: isKey) {
+        lines[i] = line
+        lines.removeAll { $0 != line && isKey($0) }
+      } else { lines.append(line) }
+    } else { lines.removeAll(where: isKey) }
+    try Self.writePrivate(paths.envPath, lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n"))
   }
+
+  /// p45 S7 (D11): the Mac's session task-file folder (Bridge menu "Session Tasks Folder…"), one
+  /// HYPERMUX_TASKS_DIR line; the node Bridge reads it on its next start (lib/tasks.js tasksDir). Only an
+  /// absolute, existing, readable directory is accepted; otherwise this throws and nothing is written. The
+  /// error text never carries the path. It lives in the state-dir env file, so it survives Bridge upgrades.
+  public static let tasksDirKey = "HYPERMUX_TASKS_DIR"
+  public func setTasksDir(_ dir: String) throws {
+    guard dir.hasPrefix("/") else { throw BridgeError.io("tasks folder must be an absolute path") }
+    var isDir: ObjCBool = false
+    guard fm.fileExists(atPath: dir, isDirectory: &isDir) else { throw BridgeError.io("tasks folder does not exist") }
+    guard isDir.boolValue else { throw BridgeError.io("tasks folder is not a folder") }
+    guard access(dir, R_OK | X_OK) == 0 else { throw BridgeError.io("tasks folder is not readable") }
+    try setEnvKey(Self.tasksDirKey, dir)
+  }
+  /// "Clear": removes the line (unset = no outline fields, the app shows the flat list).
+  public func clearTasksDir() throws { try setEnvKey(Self.tasksDirKey, nil) }
+  /// The folder set, or nil when unset/empty. Shown only in the local menu, never logged or sent.
+  public func tasksDir() -> String? { readEnv()[Self.tasksDirKey].flatMap { $0.isEmpty ? nil : $0 } }
 
   /// The upload folder in use: the env file's UPLOAD_DIR, else the Bridge default (~/HyprMux-Uploads,
   /// lib/hm-home.js bridgeUploadDefault).
