@@ -102,11 +102,12 @@ public enum MenuModel {
     // p45 S7 (D11): the folder of this Mac's session task files (HYPERMUX_TASKS_DIR), for the session outline.
     out.append(.action(tasksFolderTitle, .chooseTasksFolder))
     if i.tasksFolderSet { out.append(.action(clearTasksFolderTitle, .clearTasksFolder)) }
+    // k195 (2026-11-26): "Doesn't the bridge need check for updates?" — always in the menu, not only with Option held.
+    out.append(.action("Check for Updates…", .checkUpdate))
     out.append(.separator)
     if i.optionHeld {
       out += [.info("Troubleshooting"), .action("Restart", .restart), .action("Open Logs", .openLogs),
-              .action("Stop Bridge", .stopBridge), .action("Check for Update", .checkUpdate),
-              .info("Version \(i.version)"), .separator]
+              .action("Stop Bridge", .stopBridge), .info("Version \(i.version)"), .separator]
     }
     out.append(.action("Quit HyprMux Bridge", .quit))
     return out
