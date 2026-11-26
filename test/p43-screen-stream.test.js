@@ -172,3 +172,24 @@ test("bridge reports the helper start: 'started' meta for this gen after attach 
   await until(() => metas(b).some((m) => m.kind === 'started'));
   assert.strictEqual(metas(b).find((m) => m.kind === 'started').gen, 5);
 });
+
+test('k191: a new viewer gen on a running helper moves the helper to that gen, so clicks are not stale', async (t) => {
+  const logs = [];
+  const ss = mk('ok', { jxaRelease: async () => 'ok', log: (l) => logs.push(l) });
+  t.after(() => ss.stopAll());
+  const a = sink();
+  const first = ss.attach(9, 1, a);
+  assert.ok((await ss.openControl(9, 1, 1)).ok);
+  assert.strictEqual((await ss.input({ gen: 1, epoch: 1, items: [{ seq: 1, t: 'mouse', kind: 'down', fx: 0.5, fy: 0.5 }] })).status, 200);
+  await until(() => metas(a).some((m) => m.kind === 'posted' && m.seq === 1));
+  // screen-ws downscale: a new stream at gen 2 replaces the old one while the helper keeps running
+  const b = sink();
+  assert.ok(ss.attach(9, 2, b).ok);
+  first.detach();
+  assert.ok((await ss.openControl(9, 2, 2)).ok);
+  await until(() => metas(b).some((m) => m.kind === 'started' && m.gen === 2));
+  assert.strictEqual((await ss.input({ gen: 2, epoch: 2, items: [{ seq: 2, t: 'mouse', kind: 'up', fx: 0.5, fy: 0.5 }] })).status, 200);
+  await until(() => metas(b).some((m) => (m.kind === 'posted' || m.kind === 'failed') && m.seq === 2));
+  assert.ok(!metas(b).some((m) => m.kind === 'failed' && m.why === 'stale'), 'no stale refusal after the gen change');
+  assert.ok(logs.some((l) => /helper gen -> 2/.test(l)));
+});
