@@ -341,6 +341,23 @@ async function relay(res, upstreamPromise, opt = {}) {
   }
 }
 
+// k185: image bytes from the bridge (GET /api/cmux/avatar-image). Upstream 200 image/jpeg|png -> the
+// bytes streamed with the bridge's Content-Type, Content-Length and Cache-Control; any other status ->
+// parsed as JSON and answered as relay() would; a network fault -> relay()'s 502 path.
+async function relayBytes(res, upstreamPromise) {
+  let r;
+  try { r = await upstreamPromise; } catch (e) { return relay(res, Promise.reject(e)); }
+  const type = String(r.headers.get('content-type') || '').split(';')[0].trim();
+  if (r.status !== 200 || (type !== 'image/jpeg' && type !== 'image/png') || !r.body) return relay(res, Promise.resolve(r));
+  const headers = { 'content-type': type, 'cache-control': r.headers.get('cache-control') || 'private, no-store' };
+  const len = r.headers.get('content-length');
+  if (len) headers['content-length'] = len;
+  res.writeHead(200, headers);
+  const src = require('stream').Readable.fromWeb(r.body);
+  src.on('error', () => { try { res.destroy(); } catch (_) {} });
+  src.pipe(res);
+}
+
 // D121: remembered sendIds for /api/cmux/send (persisted next to push.json; SEND_IDS_FILE overrides).
 const sendIdem = require('./lib/send-idem');
 const sendIds = sendIdem.createSendIdem();
@@ -555,12 +572,7 @@ function accountCaller(req, u) {
   for (const c of slots) { const dev = c && pairing.verifyKey(c); if (dev) return callerKeyOf('device:' + dev.id); }
   return null;
 }
-function readRaw(req, cap, cb) {
-  const chunks = []; let size = 0, over = false;
-  req.on('data', (c) => { if (over) return; size += c.length; if (size > cap) { over = true; return; } chunks.push(c); });
-  req.on('end', () => cb(over ? null : Buffer.concat(chunks)));
-  req.on('error', () => cb(null));
-}
+const { readRaw } = require('./lib/read-raw');
 function accountsRelay(req, res, u, p) {
   if (!SERVER_TOKEN) return sendJson(res, 503, { error: 'not_secured' });
   const m = findMachine(u.searchParams.get('machine'));
@@ -650,6 +662,33 @@ async function handleApi(req, res, u) {
       const fwd = req.method === 'POST' ? { name: b.name, text: b.text } : { name: b.name, id: b.id, done: b.done, text: b.text };
       relay(res, bridge(m, '/cmux/tasks/item', { method: req.method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(fwd), timeout: 10000 }));
     }, require('./lib/tasks').LIMITS.bodyMax);
+  }
+
+  // ----- k185 avatars: GET/PUT ?machine= (JSON relay); POST image ?machine=&target=&key=&color=&emoji= (raw
+  // bytes, 256 KB cap here and on the bridge); GET image ?machine=&id= (relayBytes) -----
+  if (p === '/api/cmux/avatars' || p === '/api/cmux/avatar-image') {
+    const AV = require('./lib/avatars').LIMITS;
+    const m = findMachine(u.searchParams.get('machine'));
+    if (!m) return sendJson(res, 404, { error: 'no_machine' });
+    if (req.method === 'GET' && p === '/api/cmux/avatars') return relay(res, bridge(m, '/cmux/avatars', { timeout: 10000 }));
+    if (req.method === 'PUT' && p === '/api/cmux/avatars') {
+      return readRaw(req, AV.putMax, (buf) => {
+        if (!buf) return sendJson(res, 413, { error: 'too_large' });
+        relay(res, bridge(m, '/cmux/avatars', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: buf, timeout: 10000 }));
+      });
+    }
+    if (req.method === 'POST' && p === '/api/cmux/avatar-image') {
+      return readRaw(req, AV.imageMax, (buf) => {
+        if (!buf) return sendJson(res, 413, { error: 'too_large' });
+        const q = new URLSearchParams();
+        for (const k of ['target', 'key', 'color', 'emoji']) { const v = u.searchParams.get(k); if (v != null) q.set(k, v); }
+        relay(res, bridge(m, `/cmux/avatar-image?${q}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: buf, timeout: 15000 }));
+      });
+    }
+    if (req.method === 'GET' && p === '/api/cmux/avatar-image') {
+      return relayBytes(res, bridge(m, `/cmux/avatar-image?${new URLSearchParams({ id: u.searchParams.get('id') || '' })}`, { timeout: 10000 }));
+    }
+    return sendJson(res, 404, { error: 'not_found' });
   }
 
   // ----- p27 Chrome "Allow remote debugging?" -----

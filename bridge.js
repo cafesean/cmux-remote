@@ -79,6 +79,7 @@ const tmuxCli = BACKEND === 'tmux' ? require('./lib/tmux-cli').createTmuxCli({
 const CAPABILITIES = Object.freeze({
   backend: BACKEND, browser: BACKEND === 'cmux', sidebarStatus: BACKEND === 'cmux', tabsInPane: BACKEND === 'cmux',
   radar: BACKEND === 'cmux',   // radar types into panes and starts sessions; not supported on tmux (owner, p18)
+  avatars: true,               // k185: /cmux/avatars + /cmux/avatar-image (lib/avatars.js)
 });
 // Which cmux this is, and whether it is at least the version this code was verified against
 // (lib/cmux-version.js says why the floor is where it is). Probed once at boot and refreshed lazily —
@@ -1708,11 +1709,24 @@ function cmuxRenameWorkspace(req, res) {
     const args = title
       ? ['workspace-action', '--action', 'rename', '--workspace', workspace, '--title', title]
       : ['workspace-action', '--action', 'clear-name', '--workspace', workspace];
-    cmux(args, async (err, stdout, stderr) => {
-      if (err) return send(res, 502, { error: 'cmux_failed', detail: String(stderr || err.message || '').slice(0, 400) });
-      const workspaces = await treePayload();
-      send(res, 200, { ok: true, workspace, title, workspaces: workspaces || [] });
-    }, 8000);
+    // k185 §3.1: the WHOLE sequence (old title, cmux rename, fresh tree, avatar move) is one entry in the
+    // avatar mutation queue, so overlapping renames (A->B, then B->C) each read titles after the last one.
+    // An unknown tree (null) is never read as empty: the avatar stays where it was (avatarMoved:false).
+    avatars.run(async () => {
+      const titleIn = (ws) => { const w = ws && ws.find((x) => x.id === workspace || x.ref === workspace); return w ? w.title : null; };
+      const oldTitle = titleIn(await treePayload().catch(() => null));
+      const ran = await new Promise((resolve) => cmux(args, (err, stdout, stderr) => resolve({ err, stderr }), 8000));
+      if (ran.err) return send(res, 502, { error: 'cmux_failed', detail: String(ran.stderr || ran.err.message || '').slice(0, 400) });
+      const workspaces = await treePayload().catch(() => null);
+      const newTitle = titleIn(workspaces);
+      let avatarMoved = false;
+      if (oldTitle != null && newTitle != null) {
+        const mv = avatars.moveTitleLocked(oldTitle, newTitle, workspaces.some((w) => w.title === oldTitle));
+        avatarMoved = mv.moved;
+        if (mv.error) console.log(`avatars: rename move skipped (${mv.error})`);
+      }
+      send(res, 200, { ok: true, workspace, title, workspaces: workspaces || [], avatarMoved });
+    }).catch(() => { if (!res.headersSent) send(res, 500, { error: 'rename_failed' }); });
   });
 }
 
@@ -3003,10 +3017,44 @@ function cmuxTasks(req, res, u, p) {
   return send(res, 404, { error: 'not_found' });
 }
 
+// ---------- k185 avatars (lib/avatars.js) ----------------------------------
+// GET/PUT /cmux/avatars, POST/GET /cmux/avatar-image. Answered after the secret gate and BEFORE the
+// private-surface gate: `target` / `id` here name an avatar slot / picture file, never a surface.
+const avatarsLib = require('./lib/avatars');
+const avatars = avatarsLib.createAvatars();
+{ const sw = avatars.sweep(); if (sw.removed.length) console.log(`avatars: swept ${sw.removed.length} orphan picture(s)`); }
+const { readRaw } = require('./lib/read-raw');
+function cmuxAvatars(req, res, u, p) {
+  const done = (pr) => Promise.resolve(pr).then((r) => send(res, r.code, r.body), () => { if (!res.headersSent) send(res, 500, { error: 'avatars_failed' }); });
+  if (p === '/cmux/avatars' && req.method === 'GET') return done(avatars.read());
+  if (p === '/cmux/avatars' && req.method === 'PUT') {
+    return readRaw(req, avatarsLib.LIMITS.putMax, (buf) => {
+      if (!buf) return send(res, 413, { error: 'too_large' });
+      let b; try { b = JSON.parse(buf.toString('utf8') || '{}'); } catch (_) { return send(res, 400, { error: 'bad_json' }); }
+      done(avatars.put(b));
+    });
+  }
+  if (p === '/cmux/avatar-image' && req.method === 'POST') {
+    return readRaw(req, avatarsLib.LIMITS.imageMax, (buf) => {
+      if (!buf) return send(res, 413, { error: 'too_large' });
+      const q = (k) => u.searchParams.get(k);
+      done(avatars.postImage({ target: q('target'), key: q('key'), color: q('color'), emoji: q('emoji') }, buf));
+    });
+  }
+  if (p === '/cmux/avatar-image' && req.method === 'GET') {
+    const r = avatars.getImage(u.searchParams.get('id'));
+    if (r.code !== 200) return send(res, r.code, r.body);
+    res.writeHead(200, { 'content-type': r.type, 'content-length': String(r.bytes.length), 'cache-control': avatarsLib.IMAGE_CACHE });
+    return res.end(r.bytes);
+  }
+  return send(res, 404, { error: 'not_found' });
+}
+
 // ---------- routing ---------------------------------------------------------
 function handleCmux(req, res) {
   if (SECRET && !safeEqual(req.headers['x-bridge-secret'], SECRET)) return send(res, 403, { error: 'forbidden' });
   let u; try { u = new URL(req.url, 'http://x'); } catch (_) { return send(res, 400, { error: 'bad_url' }); }
+  if (u.pathname === '/cmux/avatars' || u.pathname === '/cmux/avatar-image') return cmuxAvatars(req, res, u, u.pathname);   // k185
   // tmux has no browser surfaces: answered before the gate, nothing is reached either way
   if (tmuxCli && u.pathname.startsWith('/cmux/browser/')) return send(res, 501, { error: 'unsupported_backend', backend: 'tmux' });
   // p41 S2p — the one private-surface gate (spec §4.5). Query params here; JSON bodies in cmuxReadBody.

@@ -174,6 +174,11 @@ function cases() {
     '/api/cmux/screen/scroll': [post('/api/cmux/screen/scroll', { dy: 10 })],
     '/api/cmux/screen/type': [post('/api/cmux/screen/type', { text: 'a' })],
     '/api/cmux/screen/key': [post('/api/cmux/screen/key', { key: 'return' })],
+    // k185 avatars (PUT body + POST bytes; the image GET with a bad id answers JSON 404 on both)
+    '/api/cmux/avatars': [json('GET', '/api/cmux/avatars?machine=default'),
+      json('PUT', '/api/cmux/avatars?machine=default', { target: 'workspace', key: 'Example Title', emoji: '🚀', color: 'blue' })],
+    '/api/cmux/avatar-image': [json('POST', '/api/cmux/avatar-image?machine=default&target=machine', Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])),
+      json('GET', '/api/cmux/avatar-image?machine=default&id=a-0000000000000000.png')],
   };
 }
 
