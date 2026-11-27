@@ -40,6 +40,8 @@ public enum InputLimits {
   public static let unicodeChunk = 16
   public static let scrollMax = 3000
   public static let holdMaxUs: UInt64 = 5_000_000
+  /// HMX k207: pause between the posted events of a click or double-click (0 ms lost events; 10 and 20 ms did not).
+  public static let clickPauseMs = 20
 }
 
 // MARK: keys (same table and allow-list as lib/mac-screen.js KEYCODES / KEY_ALLOW / parseKey)
@@ -198,9 +200,15 @@ public enum InputPlanner {
     guard let p = point(it, d) else { return .failure(.badcoords) }
     let r = it.button == "right"
     let b: MouseButton = r ? .right : .left
-    var s: [EventStep] = [.mouse(.moved, x: p.x, y: p.y, button: b, clickState: nil)]
+    // HMX k207 ("double click does nothing" in Remote Desktop): posted back to back, the Mac dropped the later events
+    // of a double-click (measured on a MacBook, 3 runs: 0 ms gave 1-3 of 4 events, 10 and 20 ms all 4 with
+    // clickCount 2). Every step of a tap is InputLimits.clickPauseMs apart, as keys are 20 ms apart.
+    let gap = EventStep.pause(ms: InputLimits.clickPauseMs)
+    var s: [EventStep] = [.mouse(.moved, x: p.x, y: p.y, button: b, clickState: nil), gap]
     for i in 1...(it.double ? 2 : 1) {
+      if i > 1 { s.append(gap) }
       s.append(.mouse(r ? .rightDown : .leftDown, x: p.x, y: p.y, button: b, clickState: i))
+      s.append(gap)
       s.append(.mouse(r ? .rightUp : .leftUp, x: p.x, y: p.y, button: b, clickState: i))
     }
     return .success(s)

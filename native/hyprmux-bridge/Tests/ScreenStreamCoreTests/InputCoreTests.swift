@@ -25,15 +25,18 @@ final class InputCoreTests: XCTestCase {
     XCTAssertEqual(try plan(item("mouse") { $0.type = "up"; $0.fx = 0; $0.fy = 1 }).get(),
                    [.mouse(.leftUp, x: 100, y: 549, button: .left, clickState: 1)])   // k94: fy 1 = the last point
     XCTAssertEqual(try plan(item("tap") { $0.fx = 0.5; $0.fy = 0.5 }).get(), [
-      .mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil),
-      .mouse(.leftDown, x: p.x, y: p.y, button: .left, clickState: 1), .mouse(.leftUp, x: p.x, y: p.y, button: .left, clickState: 1)])
+      .mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil), .pause(ms: 20),
+      .mouse(.leftDown, x: p.x, y: p.y, button: .left, clickState: 1), .pause(ms: 20), .mouse(.leftUp, x: p.x, y: p.y, button: .left, clickState: 1)])
+    // HMX k207: a double-click posted with no pause lost its later events on the Mac (measured 3/3: 0 ms delivered
+    // 1-3 of 4 events, 10 and 20 ms all 4 with clickCount 2), so every step of a tap is 20 ms apart, like keys.
     XCTAssertEqual(try plan(item("tap") { $0.fx = 0.5; $0.fy = 0.5; $0.double = true }).get(), [
-      .mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil),
-      .mouse(.leftDown, x: p.x, y: p.y, button: .left, clickState: 1), .mouse(.leftUp, x: p.x, y: p.y, button: .left, clickState: 1),
-      .mouse(.leftDown, x: p.x, y: p.y, button: .left, clickState: 2), .mouse(.leftUp, x: p.x, y: p.y, button: .left, clickState: 2)])
+      .mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil), .pause(ms: 20),
+      .mouse(.leftDown, x: p.x, y: p.y, button: .left, clickState: 1), .pause(ms: 20), .mouse(.leftUp, x: p.x, y: p.y, button: .left, clickState: 1),
+      .pause(ms: 20),
+      .mouse(.leftDown, x: p.x, y: p.y, button: .left, clickState: 2), .pause(ms: 20), .mouse(.leftUp, x: p.x, y: p.y, button: .left, clickState: 2)])
     XCTAssertEqual(try plan(item("tap") { $0.fx = 0.5; $0.fy = 0.5; $0.button = "right" }).get(), [
-      .mouse(.moved, x: p.x, y: p.y, button: .right, clickState: nil),
-      .mouse(.rightDown, x: p.x, y: p.y, button: .right, clickState: 1), .mouse(.rightUp, x: p.x, y: p.y, button: .right, clickState: 1)])
+      .mouse(.moved, x: p.x, y: p.y, button: .right, clickState: nil), .pause(ms: 20),
+      .mouse(.rightDown, x: p.x, y: p.y, button: .right, clickState: 1), .pause(ms: 20), .mouse(.rightUp, x: p.x, y: p.y, button: .right, clickState: 1)])
     XCTAssertEqual(try plan(item("scroll") { $0.dy = 120; $0.dx = -40 }).get(), [.scroll(wheel1: -120, wheel2: 40)])
     XCTAssertEqual(try plan(item("scroll") { $0.dy = 9999; $0.fx = 0.5; $0.fy = 0.5 }).get(),
                    [.mouse(.moved, x: p.x, y: p.y, button: .left, clickState: nil), .scroll(wheel1: -3000, wheel2: 0)])
