@@ -275,10 +275,15 @@ app sends one JSON frame per action:
 - `thread-claude.json`: a Thread built from real Claude Code transcript shapes (user string, assistant
   text, tool_use and tool_result pairs, an AskUserQuestion, a TodoWrite, a pasted image, a callout,
   a callout inside a code fence). The text is generic; nothing private is kept.
-- `thread-codex.json`: a Thread in the same normalised shape for a Codex session. It is hand-written.
-  A real Codex rollout file exists under `~/.codex/sessions`, but its content is private, so only its
-  shapes were used (user and assistant messages, `function_call` and `function_call_output` pairs,
-  an image view). Re-check this fixture against a real rollout when the Codex normaliser (task A2) lands.
+- `thread-codex.json`: a Thread for a Codex session, produced by the Codex normaliser
+  (`sessions/transcript-codex.js`, p46 C1) from `test/fixtures/p46/codex-rollout.jsonl`. That rollout is
+  shape-derived and anonymised: its records copy the keys and record types real Codex rollouts carry
+  (`session_meta`, `turn_context`, `world_state`, `event_msg` items `UserMessage` / `AgentMessage` /
+  `Reasoning` / `CommandExecution`, `response_item` `message` / `reasoning` / `function_call` /
+  `function_call_output` / `custom_tool_call`, `token_count`, `token_usage_record`), and every text,
+  id, path and host is a placeholder. No real rollout content was read or kept. Codex emits only `user`,
+  `assistant` and `tools`, so the other message kinds are covered by `thread-claude.json`.
+  `test/p46-transcript-codex.test.js` fails if the two files drift apart.
 - `stream.ndjson`: Stream events, one per line, including a replaced message and a `reset`.
 
 ## Graceful restart (p41 A18)
