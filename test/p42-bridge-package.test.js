@@ -100,8 +100,8 @@ test('menu bar shows the logo (template image), status in the tooltip, reopen op
   }
 });
 
-test('package.json version is a Bridge 0.x release (0.2.x field fixes, 0.3.x video Remote Desktop)', () => {
-  assert.match(require('../package.json').version, /^0\.[23]\.\d+$/);
+test('package.json version is a Bridge 0.x release (0.2.x field fixes, 0.3.x video Remote Desktop, 0.4.x key capture, 0.5.x Codex sessions)', () => {
+  assert.match(require('../package.json').version, /^0\.[2-5]\.\d+$/);
 });
 
 test('Connect refresh token is kept only in the Keychain store (never written to a file, never logged)', () => {
