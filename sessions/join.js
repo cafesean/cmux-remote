@@ -197,7 +197,7 @@ async function transcriptFor(surface, deps) {
     let a = null;
     try { a = await d.agentFor(s); } catch (_) { a = null; }
     const real = a && a.transcriptPath && await allowedRealPath(a.transcriptPath, d);
-    if (real) cands.push({ kind: 'claude', path: real, sessionId: a.sessionId, via: 'process' });
+    if (real) cands.push({ kind: isCodexPath(real) ? 'codex' : 'claude', path: real, sessionId: a.sessionId, via: 'process' });
   }
   // The lexical screen runs inside the event lookup, so a bad newest event falls back to the next
   // good one; the realpath check then decides on the winner, and a failure falls to the cwd path.

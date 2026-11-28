@@ -145,7 +145,7 @@ function createSessionRoutes(deps) {
     : null;
   const withAgent = (base) => {
     base.procSnapshot = sharedSnapshot;
-    base.agentFor = (s) => procs.agentFor(s, { home, procSnapshot: sharedSnapshot, surfaceLines });
+    base.agentFor = (s) => procs.agentFor(s, { home, procSnapshot: sharedSnapshot, surfaceLines, codexOpenFiles: deps.codexOpenFiles });
     return base;
   };
 

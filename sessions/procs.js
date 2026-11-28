@@ -44,6 +44,8 @@ const LIMITS = {
   screenMatchMinLines: 3,    // D264: distinctive lines a surface must share with exactly one session
   screenMatchRetryMs: 30 * 1000,   // D264: an unmatched surface is re-read only this often while the candidate set is unchanged
   screenCacheMax: 256,       // D264: remembered surface -> session matches
+  codexOpenCacheMs: 2000,    // p46: `lsof -p <codex pid>` is cached this long (one spawn per Codex pid, not per request); lsof output cut at codexOpenMaxBytes
+  codexOpenMaxBytes: 256 * 1024,
 };
 
 // The cmux app's own process (args of the main executable, not its bundled CLI helpers).
@@ -231,6 +233,10 @@ async function agentFor(surface, deps) {
     agent = rootPid ? findAgent(snap.table, rootPid) : null;
   }
   if (!agent && rootPid) agent = findHarness(snap.table, rootPid);   // D262
+  if (agent && agent.kind === 'codex') {   // p46: the rollout the Codex process holds open is this pane's own
+    const c = await codexTranscriptOf(agent.pid, { ...d, table: snap.table });
+    return c ? { ...agent, ...c } : agent;
+  }
   if (!agent || agent.kind !== 'claude') return agent;
   const t = await claudeTranscriptOf(agent.pid, d);
   return t ? { ...agent, ...t } : agent;
@@ -486,6 +492,60 @@ async function claudeTranscriptOf(pid, deps) {
   }
   return best ? { sessionId: best.sessionId, transcriptPath: best.transcriptPath } : null;
 }
+// p46: a Codex process keeps its session rollout open for the life of the session (measured on Mac x, Codex
+// 0.154: `lsof -p <pid>` lists ~/.codex/sessions/YYYY/MM/DD/rollout-<start>-<uuid>.jsonl open read/write).
+// That open file is the pane's own rollout, with no working-directory guess. Only names under the real
+// ~/.codex/sessions are accepted; the newest name wins when a process holds several (a resumed session).
+// -> {sessionId, transcriptPath} | null (not open yet, lsof refused, or a name that is not a rollout).
+const ROLLOUT_NAME = /(?:^|\/)rollout-[^/]*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
+const codexOpenCache = new Map();
+function defaultCodexOpenFiles(pids) {
+  // lsof exits 1 when it could not stat some descriptor; its stdout is still the answer, so keep it on error.
+  return new Promise((resolve) => {
+    execFile('/usr/sbin/lsof', ['-nP', '-p', [].concat(pids).map((x) => String(Number(x))).join(','), '-Fn'], { timeout: LIMITS.psTimeoutMs, maxBuffer: 4 * 1024 * 1024, env: require('../lib/secrets-stdin').childEnv() },
+      (_err, stdout) => resolve(String(stdout || '').slice(0, LIMITS.codexOpenMaxBytes).split('\n').filter((l) => l[0] === 'n').map((l) => l.slice(1))));
+  });
+}
+// The agent a pane runs is often the `codex` node wrapper; the Rust binary under it holds the rollout. So the
+// wrapper and its codex-kind descendants are asked together (one lsof, bounded by procTreeDepth/Nodes).
+function codexFamily(table, pid) {
+  const out = [Number(pid)];
+  if (!table) return out;
+  let level = [Number(pid)];
+  let seen = 0;
+  for (let depth = 0; depth < LIMITS.procTreeDepth && level.length; depth++) {
+    const next = [];
+    for (const q of level) for (const c of table.kids.get(q) || []) {
+      if (++seen > LIMITS.procTreeNodes) return out;
+      const p = table.byPid.get(c);
+      if (p && kindOfCommand(p.args) === 'codex') out.push(c);
+      next.push(c);
+    }
+    level = next;
+  }
+  return out;
+}
+async function codexTranscriptOf(pid, deps) {
+  const d = deps || {};
+  const home = d.home || os.homedir();
+  const key = Number(pid);
+  const hit = d.codexOpenFiles ? null : codexOpenCache.get(key);
+  if (hit && Date.now() - hit.at < LIMITS.codexOpenCacheMs) return hit.v;
+  let names = [];
+  try { names = await (d.codexOpenFiles || defaultCodexOpenFiles)(codexFamily(d.table, key)); } catch (_) { names = []; }
+  const root = path.join(home, '.codex', 'sessions') + path.sep;
+  let best = null;
+  for (const n of names) {
+    if (typeof n !== 'string' || !path.isAbsolute(n) || !n.startsWith(root) || n.includes('..')) continue;
+    const m = ROLLOUT_NAME.exec(n);
+    if (m && (!best || path.basename(n) > path.basename(best.transcriptPath))) best = { sessionId: m[1], transcriptPath: n };
+  }
+  if (!d.codexOpenFiles) {
+    if (codexOpenCache.size > 256) codexOpenCache.clear();
+    codexOpenCache.set(key, { at: Date.now(), v: best });
+  }
+  return best;
+}
 // `ps -o lstart=` of the live pid -> epoch ms (null when unknown: the check then does not apply).
 const startCache = new Map();
 async function defaultProcStartMs(pid) {
@@ -630,4 +690,4 @@ async function tmuxGrid(target, deps) {
   return { seq, grid: redactGrid(grid) };
 }
 
-module.exports = { screenOwner, matchScreen, gridLines, resetScreenCache, clientOwners, directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, findHarness, parsePs, claudeTranscriptOf, defaultSockets, ownerOf, LIMITS };
+module.exports = { screenOwner, matchScreen, gridLines, resetScreenCache, clientOwners, directAgents, underCmuxApp, tmuxNameFor, agentFor, orphanTmuxTabs, tmuxTargetFor, tmuxKeyTargetFor, tmuxSend, tmuxGrid, snapshot, findAgent, findHarness, parsePs, claudeTranscriptOf, codexTranscriptOf, defaultSockets, ownerOf, LIMITS };
