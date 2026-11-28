@@ -2909,7 +2909,7 @@ async function openAccountPane(cmdline) {
   return { surface: pick.t.id };
 }
 
-// D160 (Sean: "it says it continues on the Mac, but on the Mac nothing happens, no pane opens"): the pane
+// D160 (continuing on the Mac opened no visible pane): the pane
 // was opened with --focus false in the hidden "Claude accounts" workspace, so the person at the Mac never
 // saw it. Setup is always asked for by that person, so bring the workspace + pane to the front. Best
 // effort: a cmux without these commands leaves it where it is (the reply still names the workspace).
@@ -2955,7 +2955,7 @@ function cmuxAccounts(req, res, u, p) {
       const alsoOn = b.alsoOn == null || b.alsoOn === '' ? null : b.alsoOn;
       if (alsoOn !== null && (typeof alsoOn !== 'string' || !ACCOUNT_LABEL_RE.test(alsoOn))) return send(res, 400, { error: 'bad_label' });
       const replace = b.replace === true;
-      // D128 (Sean: "I have the long-lived token. We just need to store it"): paste mode — the pane asks for the
+      // D128 (a user who already has a long-lived token only needs to store it): paste mode — the pane asks for the
       // token with a hidden read on the Mac; the token is never in this request, argv or any log.
       if (b.paste != null && typeof b.paste !== 'boolean') return send(res, 400, { error: 'bad_paste' });
       const paste = b.paste === true;

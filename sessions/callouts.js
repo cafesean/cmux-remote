@@ -11,7 +11,7 @@
 //
 // Fenced code (``` and ~~~) and indented code are example text: nothing in them is a callout.
 //
-// Sean's █ banner is the `seanBanner` preset (off unless asked): a run of rows that start with █ and hold at
+// The █ banner is the `seanBanner` preset (off unless asked): a run of rows that start with █ and hold at
 // least one `██  N. ask` row is one needs-you callout whose body is the asks. A run with no numbered ask
 // stays text. Callouts come out in the order they appear in the text.
 // D190: the same preset also lifts the chief's plain SWEEP/SNAPSHOT shape (chief-of-staff SKILL): a line that

@@ -23,15 +23,15 @@ final class MenuModel025Tests: XCTestCase {
   }
 
   func testSignedInPro() {
-    let m = MenuModel.items(MenuInput(status: "Online", signedIn: true, email: "sean@example.test", plan: "pro",
+    let m = MenuModel.items(MenuInput(status: "Online", signedIn: true, email: "user@example.test", plan: "pro",
                                       canManagePlan: true, remoteAccessOn: true, version: "0.2.5"))
-    XCTAssertEqual(titles(m), ["(HyprMux · Online)", "sean@example.test · Pro>[Manage Plan…,Sign Out]", "Connect a Device…",
+    XCTAssertEqual(titles(m), ["(HyprMux · Online)", "user@example.test · Pro>[Manage Plan…,Sign Out]", "Connect a Device…",
                                "Devices…", "-", "✓Allow Remote Access", "Upload Folder…", "Session Tasks Folder…", "-", "Quit HyprMux Bridge"])
   }
 
   func testSignedInFreeShowsProminentUpgradeUnderAccount() {
-    let m = MenuModel.items(MenuInput(status: "Online", signedIn: true, email: "sean@example.test", plan: "free", version: "0.2.5"))
-    XCTAssertEqual(titles(m), ["(HyprMux · Online)", "sean@example.test · Free>[Sign Out]", "*Upgrade to Pro…",
+    let m = MenuModel.items(MenuInput(status: "Online", signedIn: true, email: "user@example.test", plan: "free", version: "0.2.5"))
+    XCTAssertEqual(titles(m), ["(HyprMux · Online)", "user@example.test · Free>[Sign Out]", "*Upgrade to Pro…",
                                "Connect a Device…", "Devices…", "-", "Allow Remote Access", "Upload Folder…", "Session Tasks Folder…", "-", "Quit HyprMux Bridge"])
     XCTAssertEqual(m[2], .prominent("Upgrade to Pro…", .upgrade))
     for gone in ["Restart", "Open Logs", "Stop Bridge", "Check for Update", "(Version 0.2.5)", "Pair a Phone…", "Phone access"] {

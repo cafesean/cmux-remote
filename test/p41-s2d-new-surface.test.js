@@ -354,7 +354,7 @@ test('D177 start-dirs: lists the last-used folder first; every entry is a real d
   for (const d of j.dirs) assert.ok(fs.statSync(d.path).isDirectory(), d.path);
 });
 
-// D176 follow-up: Sean's case — every session stopped, so the clicked pane is terminal-only (no status
+// D176 follow-up: every session stopped, so the clicked pane is terminal-only (no status
 // line, the app sends no cwd). The bridge resolves the pane's own folder from its last hook event.
 test('D176 terminal-only pane, no cwd sent -> starts in the pane folder from its last hook event', async () => {
   const work = path.join(dir, 'vault'); fs.mkdirSync(work, { recursive: true });

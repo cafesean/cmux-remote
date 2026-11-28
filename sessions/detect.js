@@ -57,7 +57,7 @@ const EXITED = '(agent exited)';
 
 const base = (tok) => path.basename(String(tok).replace(/^-+(?=[a-z])/i, ''));
 
-// p41 D262 (Sean 2026-11-15 'detect any agent harness'): other agent CLIs. They stay kind 'terminal' (no
+// p41 D262 (detect any agent harness): other agent CLIs. They stay kind 'terminal' (no
 // transcript reader: the terminal view IS their chat: live screen, composer, keys); the session only
 // carries `harness` so the app can name it. Program basename -> harness id; npm package -> id.
 const HARNESS_BINS = { pi: 'pi', gemini: 'gemini', hermes: 'hermes', opencode: 'opencode', aider: 'aider', goose: 'goose',

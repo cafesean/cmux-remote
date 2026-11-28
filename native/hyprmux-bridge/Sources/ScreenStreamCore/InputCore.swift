@@ -234,7 +234,7 @@ public enum InputPlanner {
     return .success(s)
   }
 
-  /// HMX k151 (Sean 2026-11-24: "Typing in text box will type only 'a' for every keypress"): outside Secure Input
+  /// HMX k151 (typing in a text box typed only 'a' for every keypress): outside Secure Input
   /// every char went as keycode 0 + a unicode string, and an app that reads the keycode typed "a" for each key.
   /// Now a char with a US keycode goes as that keycode (+ shift) carrying its own text; runs of other chars
   /// (accents, emoji, CJK) stay unicode chunks. Same steps as JXA typeText() in lib/mac-screen.js.

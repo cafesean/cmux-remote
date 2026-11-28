@@ -10,13 +10,14 @@
 #
 # Usage: scripts/bridge-app/sign-bridge.sh <"HyprMux Bridge.app"> <out-dir>
 # Env:   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH (App Store Connect key, for notarytool)
-#        SIGN_ID (default "Developer ID Application: Imaginato Pte. Ltd. (7CTVV9C45A)")
+#        SIGN_ID (required: the "Developer ID Application: <name> (<team id>)" signing identity; no default)
 #        SIGN_DRY_RUN=1 prints the codesign commands in order (steps 0-3) and stops: no signing, no
 #        notarization, no DMG, no ASC key needed.
 set -euo pipefail
 HERE=${0:A:h}
 APP=${1:?HyprMux Bridge.app}; OUT=${2:?out dir}
-SIGN_ID=${SIGN_ID:-"Developer ID Application: Imaginato Pte. Ltd. (7CTVV9C45A)"}
+SIGN_ID=${SIGN_ID:-}
+[ -n "$SIGN_ID" ] || { echo "error: SIGN_ID is unset; set it to your Developer ID Application signing identity" >&2; exit 1; }
 DRY=${SIGN_DRY_RUN:-}
 [ -n "$DRY" ] || : ${ASC_KEY_ID:?} ${ASC_ISSUER_ID:?} ${ASC_KEY_PATH:?}
 C="$APP/Contents"

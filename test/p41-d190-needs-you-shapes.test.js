@@ -1,5 +1,5 @@
 'use strict';
-// p41 D190 (Sean: "the NEEDS YOU buttons no longer appear"): the chief's SWEEP replies end with a plain
+// p41 D190 (the NEEDS YOU buttons no longer appeared): the chief's SWEEP replies end with a plain
 // `⛔ NEEDS YOU:` line + numbered asks (chief-of-staff SKILL "SWEEP reply" shape), not the █ banner. Only the
 // banner was lifted into a needs-you callout, so those replies reached the app as plain text with no buttons.
 // Fixtures are real chief replies (2026-11-08), names and hosts scrubbed.

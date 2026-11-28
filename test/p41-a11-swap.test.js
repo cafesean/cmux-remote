@@ -27,7 +27,7 @@ test('title priority: custom > tmux name > workspace+ref > non-volatile tab titl
 });
 
 test('volatile titles are denylisted', () => {
-  for (const t of ['cswap', 'claude', 'node', 'python3.13', 'zsh', 'bash', 'sh', 'fish', 'tmux', 'sean@mini:~/code', '']) assert.ok(isVolatileTitle(t), t);
+  for (const t of ['cswap', 'claude', 'node', 'python3.13', 'zsh', 'bash', 'sh', 'fish', 'tmux', 'user@test-host:~/code', '']) assert.ok(isVolatileTitle(t), t);
   assert.ok(!isVolatileTitle('release plan'));
 });
 

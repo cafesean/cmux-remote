@@ -36,7 +36,7 @@
 // (only lines that mention an image are parsed).
 //
 // Assistant text runs through parseCallouts (callouts.js): each callout becomes a `callout` message after
-// the assistant text that is left. Sean's █ banner is lifted as a needs-you callout while `bannerPreset` is
+// the assistant text that is left. The █ banner is lifted as a needs-you callout while `bannerPreset` is
 // on (the default).
 const fs = require('fs');
 const { splitCallouts } = require('./callouts.js');

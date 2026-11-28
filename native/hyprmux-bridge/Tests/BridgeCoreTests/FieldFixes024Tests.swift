@@ -2,7 +2,7 @@ import XCTest
 import CryptoKit
 @testable import BridgeCore
 
-/// 0.2.4 field fixes (Sean's MacBook): each test failed on 0.2.3.
+/// 0.2.4 field fixes (field machine): each test failed on 0.2.3.
 final class FieldFixes024Tests: WiredTests {
   func wrap(_ f: @escaping (StubHubProtocol.Seen) -> (Int, Any)?) {
     let base = StubHubProtocol.handler!

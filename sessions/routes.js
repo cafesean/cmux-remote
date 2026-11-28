@@ -335,7 +335,7 @@ function createSessionRoutes(deps) {
     let fg = null;
     try { fg = await foregroundCommand(js, be, d); } catch (_) { fg = null; }
     s.kind = detectKind({ surfaceType: tab.type, foregroundCmd: fg, transcriptPath: join && join.path });
-    // D279 (Sean 2026-11-21: "panes are flipping between terminal format and agent format"): on a slow cmux the
+    // D279 (panes flipped between terminal format and agent format): on a slow cmux the
     // agent probe can come back empty (no process match, no recent hook event, no transcript join). That is
     // "unknown", not "terminal", so the pane keeps the agent kind it had within kindStickyMs. A real answer
     // (another command in front, or SessionEnd) still turns it into a terminal at once.
@@ -409,7 +409,7 @@ function createSessionRoutes(deps) {
   // p41 D272: the sessions list is a local heartbeat. The bridge builds it on its own loop (one build per
   // listSnapshotMs, however many devices poll) and every GET answers the newest snapshot at once, in one
   // response, with snapshotAt = when it was built. deps.listSnapshotMs = 0 turns it off (every GET builds).
-  // D278 (Sean 2026-11-21: "It took about 30 seconds to load all the sessions"): on a slow cmux a build can
+  // D278 (loading all the sessions took about 30 seconds): on a slow cmux a build can
   // take 10-30 s, so a client must never be the one that waits for it. The loop never stops: idle (no GET for
   // listIdleStopMs) it rebuilds every listIdleRefreshMs instead of every listSnapshotMs, the first build runs
   // listWarmStartMs after start (deps.listWarm), a snapshot up to listSnapshotMaxAgeMs old answers at once

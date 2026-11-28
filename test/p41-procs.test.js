@@ -56,7 +56,7 @@ function fixture() {
 
 test('tmux-wrapped claude: cmux surface -> tmux session env -> pane -> claude, kind claude + transcript joined', async () => {
   const { write, d } = fixture();
-  const p = write(12282, 'sess-native-2', '/Volumes/HD/code/ai');
+  const p = write(12282, 'sess-native-2', '/tmp/fixture/ai');
   const fg = await foregroundCommand({ id: SURF }, 'cmux', d);
   const j = await transcriptFor({ id: SURF }, d);
   assert.strictEqual(detectKind({ surfaceType: 'terminal', foregroundCmd: fg, transcriptPath: j && j.path }), 'claude');
@@ -114,8 +114,8 @@ test('two tmux sessions naming one surface: the attached one owns it; the other 
 
 test('/clear: a fresher hook-event transcript beats the live sessions file (newest mtime wins)', async () => {
   const { write, d, home } = fixture();
-  const oldP = write(12282, 'sess-before-clear', '/Volumes/HD/code/ai');
-  const newP = path.join(home, '.claude', 'projects', '-Volumes-HD-code-ai', 'sess-after-clear.jsonl');
+  const oldP = write(12282, 'sess-before-clear', '/tmp/fixture/ai');
+  const newP = path.join(home, '.claude', 'projects', '-tmp-fixture-ai', 'sess-after-clear.jsonl');
   fs.writeFileSync(newP, '{}\n');
   const t = Date.now() / 1000;
   fs.utimesSync(oldP, t - 60, t - 60);
@@ -172,7 +172,7 @@ test('D238 direct cmux pane: claude started straight in the pane (no tmux, tty n
   const STALE = 'AAAAAAAA-0000-0000-0000-000000000001';
   const ps = [
     '  500     1 /Applications/cmux.app/Contents/MacOS/cmux',
-    ' 1300   500 /usr/bin/login -flp seanliao /bin/zsh',
+    ' 1300   500 /usr/bin/login -flp testuser /bin/zsh',
     ' 1374  1300 -zsh',
     ' 1375  1374 /Users/s/.local/bin/claude --settings chief.json -n m-chief',
     ' 1376  1375 /Users/s/.local/bin/claude --print sub',          // a child agent: never its own pane
@@ -191,7 +191,7 @@ test('D238 direct cmux pane: claude started straight in the pane (no tmux, tty n
   };
   const snapObj = { table: procs.parsePs(ps), sessions: [] };
   const deps = { home, procSnapshot: async () => snapObj, psEnv };
-  write(1375, 'sess-chief-now', '/Volumes/General/s/Main');
+  write(1375, 'sess-chief-now', '/tmp/fixture/main');
 
   const a = await procs.agentFor({ id: DIRECT }, deps);
   assert.strictEqual(a.kind, 'claude');

@@ -533,7 +533,7 @@ test('local pair: an iPad/iPhone model label from loopback is shown and saved as
 test('thisMacName: iOS model / empty -> This Mac; the app\'s own label or a Mac name kept', () => {
   assert.strictEqual(THIS_MAC_LABEL, 'This Mac (HyprMux app)');
   for (const n of ['iPad Pro (12.9-inch) (3rd generation)', 'iPad', 'iPhone 15 Pro', 'ipod touch', '', '  ', undefined, 'device']) assert.strictEqual(thisMacName(n), THIS_MAC_LABEL, String(n));
-  assert.strictEqual(thisMacName("This Mac (HyprMux app) · Sean's Mac mini"), "This Mac (HyprMux app) · Sean's Mac mini");
+  assert.strictEqual(thisMacName("This Mac (HyprMux app) · Test Mac mini"), "This Mac (HyprMux app) · Test Mac mini");
   assert.strictEqual(thisMacName('这台 Mac（HyprMux 应用）'), '这台 Mac（HyprMux 应用）');
   assert.strictEqual(thisMacName('Desk app'), 'Desk app');
   assert.strictEqual(thisMacName('x'.repeat(200)).length, 64, 'still capped at NAME_MAX');

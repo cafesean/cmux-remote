@@ -113,7 +113,7 @@
   // Ceiling on simultaneously mirrored panes: each one costs a terminal.replay per stream round, and
   // the bridge refuses more surfaces than this on one stream (bridge.js MAX_STREAM_SURFACES — keep the
   // two equal). Was 6, which left real desktop panes (8-pane worker grids, stacked splits) as blank
-  // holes; 16 covers every grid in use. Sean OK 2026-10-15, row in monorepo _context/LIMITS.md.
+  // holes; 16 covers every grid in use. Limit recorded in the project limits register.
   const MAX_PANES = 16;
   const canSplit = () => state.splitPref !== 'off' && window.innerWidth >= SPLIT_MIN_WIDTH;
   const layoutPanes = () => (state.layout && state.layout.panes) || [];
@@ -2849,7 +2849,7 @@
   // ---- wire up ----
   if (elFilesBtn) elFilesBtn.onclick = (e) => { e.stopPropagation(); toggleFiles(); };
   if (elRadarBtn) elRadarBtn.onclick = (e) => { e.stopPropagation(); toggleRadar(); };
-  if (elRefresh) elRefresh.remove();   // p20: removed from the toolbar (Sean: did nothing useful); stale cached shells still carry it
+  if (elRefresh) elRefresh.remove();   // p20: removed from the toolbar (it did nothing useful); stale cached shells still carry it
   wireFileDrop();
   if (elModeCompose) elModeCompose.onclick = null;   // modes are gone (§5.3); markup kept one cache epoch
   if (elModeLive) elModeLive.onclick = null;
@@ -3182,7 +3182,7 @@
   // `radarUI` stays null, no chip renders, and nothing below this comment ever runs again. The
   // terminal UI cannot tell the difference.
   try {
-    // p20: radar + inbox are off the toolbar (Sean 2026-10-10). The modules stay in the repo; a stale
+    // p20: radar + inbox are off the toolbar. The modules stay in the repo; a stale
     // cached shell may still load them, so the mount is skipped here rather than relying on index.html.
     if (SHOW_RADAR_UI && window.cmuxRadar && typeof window.cmuxRadar.create === 'function') {
       radarUI = window.cmuxRadar.create({

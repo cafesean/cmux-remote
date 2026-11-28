@@ -15,7 +15,7 @@ const SAMPLE = [
   'name: x-demo-1',
   'status: running',
   'task_goal: "build the demo."',
-  "done_means: 'Sean says finished'",
+  "done_means: 'Owner says finished'",
   'asks:',
   '  - id: a1',
   '    class: TEST',
@@ -42,7 +42,7 @@ const fresh = async (name, body = SAMPLE) => { await fsp.writeFile(path.join(dir
 test('parse: goal, done means, latest status, asks with option pills, last 8 reports', () => {
   const t = parseTask(SAMPLE);
   assert.equal(t.goal, 'build the demo.');
-  assert.equal(t.doneMeans, 'Sean says finished');
+  assert.equal(t.doneMeans, 'Owner says finished');
   assert.deepEqual(t.status, { word: 'WORKING', text: 'step 8. jira: HMX-1 In Progress' });
   assert.deepEqual(t.asks, [
     { id: 'a1', what: 'Does it work?', options: ['works', 'still broken', 'other'] },

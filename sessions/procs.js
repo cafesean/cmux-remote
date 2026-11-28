@@ -238,7 +238,7 @@ async function agentFor(surface, deps) {
 
 // ---- tmux sessions shown by a cmux pane, named by their client (D241) ------------------------------
 //
-// Sean 2026-11-11: after a power loss the workers came back in tmux and cmux re-attached them from new
+// After a power loss the workers came back in tmux and cmux re-attached them from new
 // panes. The tmux SESSION env still held the CMUX_SURFACE_ID of a pane from before the reboot (0 of 20
 // matched a live pane), so every pane showed as a plain terminal. The `tmux attach` client runs inside the
 // live pane, so its own env carries that pane's id. Only clients under the cmux app are read; one env read
@@ -283,7 +283,7 @@ async function scanClientOwners(snap, d) {
 
 // ---- tmux sessions shown by a cmux pane, matched by screen (D264) ---------------------------------
 //
-// Sean 2026-11-17: m-chief SIGTERMed a hung cmux.app and re-attached every tmux worker from new panes.
+// A chief SIGTERMed a hung cmux.app and re-attached every tmux worker from new panes.
 // Those clients carried CMUX_TAB_ID / CMUX_WORKSPACE_ID but no CMUX_SURFACE_ID, so neither the session
 // env (update-environment unset it) nor the client env (D241) named a pane, cmux's own process
 // attribution is env-based too, and every worker pane fell back to the narrow Terminal view.
@@ -404,7 +404,7 @@ function findHarness(table, rootPid) {
   return null;
 }
 
-// Sean 2026-11-10: a chief started directly in a cmux pane (no tmux) showed as a plain terminal. cmux
+// A chief started directly in a cmux pane (no tmux) showed as a plain terminal. cmux
 // reports tty null for every surface and a session without the radar hooks fires no hook events, so
 // neither older signal sees it. The agent process itself carries the CMUX_SURFACE_ID cmux exported into
 // that pane. Only agents whose parent chain reaches the cmux app qualify: a tmux-hosted agent (parent =
@@ -550,7 +550,7 @@ async function tmuxTargetFor(surfaceId, deps) {
   return null;
 }
 
-// p41 D140 (Sean: "Tapping allow doesn't work" -> Claude got a REJECT): a cmux pane that shows an ATTACHED tmux
+// p41 D140 (tapping allow did not work: Claude got a REJECT): a cmux pane that shows an ATTACHED tmux
 // session gets keys through cmux -> terminal -> `tmux attach`, where an arrow is ESC [ B. With tmux escape-time
 // 10 ms, a busy Mac writes those bytes >10 ms apart and tmux delivers a lone Escape = Claude's "No". KEYS for such
 // a pane go straight to that session's active pane with `tmux send-keys <Name>` (one atomic key). Text is not
@@ -605,7 +605,7 @@ async function tmuxSend(target, opts, deps) {
   return { ok: true };
 }
 
-// p41 D179 (Sean: "option menus don't show in the app"): a tmux-only session (a cos worker no cmux pane shows)
+// p41 D179 (option menus did not show in the app): a tmux-only session (a cos worker no cmux pane shows)
 // had NO screen for the live-menu parser, so its permission prompt / selector never became answer buttons.
 // Its current screen as a cmux render_grid: one `display` + `capture-pane -e` (visible rows only, read-only),
 // rebuilt by lib/tmux-grid.js exactly like the tmux backend's terminal.replay. `seq` changes exactly when the

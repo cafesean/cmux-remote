@@ -97,7 +97,7 @@ public enum MenuModel {
     if signedIn { out.append(.action("Devices…", .devices)) }
     out.append(.separator)
     out.append(.action(remoteAccessTitle, .toggleRemoteAccess, checked: i.remoteAccessOn))
-    // k95 (Sean 2026-11-23): "User should be able to configure their destination folder" for files dropped in.
+    // k95: the user should be able to configure the destination folder for files dropped in.
     out.append(.action("Upload Folder…", .chooseUploadFolder))
     // p45 S7 (D11): the folder of this Mac's session task files (HYPERMUX_TASKS_DIR), for the session outline.
     out.append(.action(tasksFolderTitle, .chooseTasksFolder))

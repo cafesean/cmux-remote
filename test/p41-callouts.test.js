@@ -73,7 +73,7 @@ test('a plain blockquote is not a callout and stays in the text', () => {
   assert.deepStrictEqual(splitCallouts(md), { text: md, callouts: [] });
 });
 
-test('Sean banner preset off by default, on -> needs-you', () => {
+test('banner preset off by default, on -> needs-you', () => {
   const md = ['Intro', BANNER, 'After'].join('\n');
   assert.deepStrictEqual(parseCallouts(md), []);
   assert.deepStrictEqual(parseCallouts(md, { seanBanner: true }), [

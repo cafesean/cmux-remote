@@ -49,7 +49,7 @@ One terminal, agent or browser surface on one machine.
   non-sidechain assistant record with usage). Prompt-cache age is measured from this, never from `lastActivity`.
 - `model`: string, optional. The model name, for chat kinds.
 - `contextPct`: number 0 to 100, optional. How full the model context is.
-- `statusLine`: optional object, what Sean's terminal status line shows. Claude kind with a joined transcript only.
+- `statusLine`: optional object, what the user's terminal status line shows. Claude kind with a joined transcript only.
   `{account, lastReplyAt, ctxUsed, ctxLimit, ctxPct, model, title, branch, repo, writtenAt}`; every field is a
   string or number or `null`. `lastReplyAt` is ISO UTC (the app formats it local); `ctxPct` may exceed 100.
   Source: the sidecar `<configDir>/statusline/<sessionId>.json` written by `~/.claude/get-session-name.sh`
