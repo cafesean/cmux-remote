@@ -19,7 +19,11 @@
 //       Reasoning        -> hidden
 //   - response_item function_call {call_id, name, arguments} + function_call_output {call_id, output},
 //     paired by call_id -> one Tool. response_item message repeats the event_msg text and reasoning holds
-//     encrypted_content: both are hidden and never read.
+//     encrypted_content: both are hidden and never read. custom_tool_call `exec` (+ output) is hidden too:
+//     the commands it runs arrive as CommandExecution items, so each command is exactly one row.
+//   - FileChange, McpToolCall and Extension items are skipped + warn-once in v1 (chief, p46).
+//   - An old-format rollout (no payload envelope) reads as {title: '', messages: [], cursor: null,
+//     unsupported: 'codex'}; its tail yields nothing.
 //   - Consecutive tools are one `tools` message whose id is the first tool's id, so a running tool that
 //     finishes is sent again under the same id. Tool ids are the rollout's call_id / item id.
 //   - Any other record type or item type is skipped and counted; the first time this process meets a
@@ -58,7 +62,9 @@ const short = (s, n) => {
 // Records that are known and never thread content.
 const HIDDEN_RECORDS = new Set(['session_meta', 'turn_context', 'token_usage_record', 'world_state', 'compacted']);
 const HIDDEN_EVENTS = new Set(['token_count', 'task_started', 'task_complete', 'thread_settings_applied', 'turn_aborted']);
-const HIDDEN_RESPONSES = new Set(['message', 'reasoning']);
+// custom_tool_call `exec` (+ its output) wraps the commands it runs; each command is its own
+// CommandExecution item, so the exec call is never a row of its own (one command = one row).
+const HIDDEN_RESPONSES = new Set(['message', 'reasoning', 'custom_tool_call', 'custom_tool_call_output']);
 const HIDDEN_ITEMS = new Set(['Reasoning']);
 
 // warn-once per type for the process lifetime.
@@ -279,8 +285,9 @@ class BackReader {
   }
 }
 
-// The first line (session_meta) read alone, up to HEAD_MAX bytes: the title when the pages held none.
-async function headTitle(h, size, log) {
+// The first line read alone, up to HEAD_MAX bytes -> the parsed record or null. It is session_meta (the
+// title when the pages held none) in the current format.
+async function headRecord(h, size) {
   let line = Buffer.alloc(0);
   for (let pos = 0; pos < Math.min(size, HEAD_MAX);) {
     const chunk = await readAt(h, pos, Math.min(CHUNK, size - pos));
@@ -290,10 +297,14 @@ async function headTitle(h, size, log) {
     line = Buffer.concat([line, nl < 0 ? chunk : chunk.subarray(0, nl)]);
     if (nl >= 0) break;
   }
-  const norm = new Normaliser({ log });
-  for (const e of parseLines(line, 0)) if (e.rec.type === 'session_meta') norm.push(e);
-  return norm.title;
+  const e = parseLines(line, 0)[0];
+  return e ? e.rec : null;
 }
+
+// The old rollout format (Codex CLI before the {timestamp, type, payload} envelope: a bare first line
+// {id, timestamp, instructions, git}, then record_type lines and bare response items) is not read:
+// the thread answers `unsupported: 'codex'`, never an empty thread.
+const isOldFormat = (head) => !!head && !(head.payload && typeof head.payload === 'object');
 
 async function cursorRecord(h, size, { id, off }, log) {
   if (off >= size || (off > 0 && (await readAt(h, off - 1, 1))[0] !== NL)) throw new BadCursorError();
@@ -319,6 +330,12 @@ async function readThread(p, opts = {}) {
   const h = await (opts.fs || REAL_FS).open(p, 'r');
   try {
     const { size } = await h.stat();
+    const head = await headRecord(h, size);
+    if (isOldFormat(head)) {
+      const thread = { title: '', messages: [], cursor: null, unsupported: 'codex' };
+      Object.defineProperty(thread, 'endOffset', { value: size, enumerable: false });
+      return thread;
+    }
     let end = size;
     let cursorEntry = null;
     let cursorId = null;
@@ -342,7 +359,12 @@ async function readThread(p, opts = {}) {
     }
     const messages = older.slice(-limit);
     const hasOlder = older.length > limit;
-    const title = norm.title || (br.pos > 0 ? await headTitle(h, size, log) : '');
+    let title = norm.title;
+    if (!title && head && head.type === 'session_meta') {
+      const hn = new Normaliser({ log });
+      hn.push({ off: 0, rec: head });
+      title = hn.title;
+    }
     const cursor = hasOlder ? encodeCursor(messages[0].id, norm.offs.get(messages[0].id)) : null;
     const thread = { title, messages, cursor };
     Object.defineProperty(thread, 'endOffset', { value: br.completeEnd == null ? size : br.completeEnd, enumerable: false });
@@ -401,6 +423,7 @@ async function* tailThread(p, fromOffset, opts = {}) {
         try { h = await fsx.open(p, 'r'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
         if (h) {
           const st = await h.stat();
+          if (st.ino !== ino && isOldFormat(await headRecord(h, st.size))) return;   // old format: nothing to tail
           if (offset == null) offset = st.size;
           const rotated = ino != null && st.ino !== ino;
           ino = st.ino;

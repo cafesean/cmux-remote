@@ -175,3 +175,52 @@ test('C5: thread-codex.json is exactly what the normaliser makes of the anonymis
   assert.ok(!/\/Users\/[a-z]/i.test(raw), 'no real home path');
   assert.ok(!/[\w.+-]+@[\w-]+\.[\w.]+/.test(raw), 'no email address');
 });
+
+test('exec maps only through CommandExecution: one command is one row', async () => {
+  const p = file('exec', [
+    meta(), user(1, 'go'),
+    resp(2, { type: 'custom_tool_call', id: 'ctc', call_id: 'call_exec', name: 'exec', status: 'completed', input: 'run it' }),
+    item(3, { type: 'CommandExecution', id: 'c3', command: ['/bin/zsh', '-lc', 'ls'], status: 'in_progress' }, 'item_started'),
+    cmd(3, 'ls', 'a'),
+    resp(4, { type: 'custom_tool_call_output', call_id: 'call_exec', output: [{ type: 'input_text', text: 'a' }] }),
+    agent(5, 'done'),
+  ]);
+  const t = await readThread(p, { log: quiet });
+  assert.deepStrictEqual(t.messages.map((m) => m.kind), ['user', 'tools', 'assistant']);
+  assert.deepStrictEqual(t.messages[1].items, [{ id: 'c3', name: 'shell', target: 'ls', status: 'ok', lines: 1, output: 'a' }]);
+  assert.deepStrictEqual(t.skipped, {});
+});
+
+test('FileChange, McpToolCall and Extension items are skipped and counted per type (v1)', async () => {
+  const p = file('v1skip', [
+    meta(), user(1, 'go'),
+    item(2, { type: 'FileChange', id: 'f2', status: 'completed', changes: {} }),
+    item(3, { type: 'McpToolCall', id: 'm3', server: 'example', tool: 'example', status: 'completed' }),
+    item(4, { type: 'McpToolCall', id: 'm4', server: 'example', tool: 'example', status: 'completed' }),
+    item(5, { type: 'Extension', id: 'e5', kind: 'example' }),
+    agent(6, 'done'),
+  ]);
+  const t = await readThread(p, { log: quiet });
+  assert.deepStrictEqual(t.messages.map((m) => m.kind), ['user', 'assistant']);
+  assert.deepStrictEqual(t.skipped, { 'item:FileChange': 1, 'item:McpToolCall': 2, 'item:Extension': 1 });
+});
+
+test('an old-format rollout (no payload envelope) is unsupported, never an empty thread', async () => {
+  const p = file('old', [
+    { id: 's-old', timestamp: ts(0), instructions: null, git: { branch: 'main' } },
+    { record_type: 'state' },
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'old words' }] },
+    { type: 'function_call', name: 'shell', arguments: '{"command":["ls"]}', call_id: 'c1' },
+    { type: 'function_call_output', call_id: 'c1', output: 'x' },
+  ]);
+  const logs = [];
+  const t = await readThread(p, { log: (m) => logs.push(m) });
+  assert.deepStrictEqual(t, { title: '', messages: [], cursor: null, unsupported: 'codex' });
+  assert.deepStrictEqual(logs, []);
+  const ac = new AbortController();
+  const got = [];
+  const timer = setTimeout(() => ac.abort(), 500);
+  for await (const m of tailThread(p, 0, { signal: ac.signal, pollMs: 20, log: quiet })) got.push(m);
+  clearTimeout(timer);
+  assert.deepStrictEqual(got, []);
+});
