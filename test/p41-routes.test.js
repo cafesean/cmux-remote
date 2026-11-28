@@ -214,7 +214,7 @@ test('tmux backend → sessions work, browser kind absent', { skip: tmuxBinary()
 
 // ---- fix round 1 ---------------------------------------------------------------------------------
 
-test('codex session: thread is empty + unsupported, stream sends one unsupported event', async () => {
+test('codex session: a Claude-shaped row is never parsed as a Codex message (p46: the Codex reader skips it; no unsupported note)', async () => {
   const h = tmp();
   const dir = path.join(h, '.codex', 'sessions', '2026', '11', '04');
   fs.mkdirSync(dir, { recursive: true });
@@ -229,11 +229,10 @@ test('codex session: thread is empty + unsupported, stream sends one unsupported
     const t = await call(b.socketPath, 'GET', `/cmux/sessions/${idOf(IDS.sfB1)}/thread`, { secret: SECRET });
     assert.equal(t.status, 200, t.text);
     assert.equal(typeof t.json.title, 'string');
-    assert.deepEqual({ ...t.json, title: '' }, { title: '', messages: [], cursor: null, unsupported: 'codex' });
-    const ev = await s.waitFor((f) => f.type === 'unsupported');
-    assert.equal(ev.unsupported, 'codex');
+    assert.deepEqual({ ...t.json, title: '' }, { title: '', messages: [], cursor: null });
+    await s.opened;
     await new Promise((r) => setTimeout(r, 800));
-    assert.equal(s.frames.length, 1, JSON.stringify(s.frames));
+    assert.ok(!s.frames.some((f) => f.type === 'msg' || f.type === 'unsupported'), JSON.stringify(s.frames));
   } finally { s.close(); await b.stop(); }
 });
 
@@ -355,7 +354,7 @@ test('D57 M1: an upload another session typed is 404 via this session; a private
 
 // ---- fix round 2 ---------------------------------------------------------------------------------
 
-test('stream on a claude pane whose join moves to a Codex rollout: reset + unsupported, no Claude-parsed msgs', async () => {
+test('stream on a claude pane whose join moves to a Codex rollout: reset, then the Codex reader; no Claude-parsed msgs (p46)', async () => {
   const { h, a } = home([user(1, 'go'), asst(2, 'first')]);
   const b = await boot(h);
   const s = sse(b.socketPath, `/cmux/sessions/${idOf(IDS.sfA1)}/thread-stream`);
@@ -367,14 +366,13 @@ test('stream on a claude pane whose join moves to a Codex rollout: reset + unsup
     const x = path.join(dir, 'rollout-2026-11-04T10-00-00-cx.jsonl');
     fs.writeFileSync(x, jsonl([{ type: 'session_meta', payload: { id: 'cx', cwd: '/work/alpha' } }]));
     eventlog.appendEventSync(path.join(h, '.radar'), { sessionId: 'cx', event: 'SessionStart', transcriptPath: x, surfaceId: IDS.sfA1 }, Date.now());
-    const ev = await s.waitFor((f) => f.type === 'unsupported');
-    assert.equal(ev.unsupported, 'codex');
+    await s.waitFor((f) => f.type === 'reset');
     await new Promise((r) => setTimeout(r, 600));
     fs.appendFileSync(x, jsonl([asst(20, 'CODEX-AS-CLAUDE')]));
     fs.appendFileSync(a, jsonl([asst(21, 'OLD-FILE')]));
     await new Promise((r) => setTimeout(r, 1500));
     assert.ok(!s.frames.some((f) => f.type === 'msg'), JSON.stringify(s.frames));
-    assert.equal(s.frames.filter((f) => f.type === 'unsupported').length, 1);
+    assert.ok(!s.frames.some((f) => f.type === 'unsupported'), JSON.stringify(s.frames));
   } finally { s.close(); await b.stop(); }
 });
 

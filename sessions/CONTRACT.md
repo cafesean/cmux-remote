@@ -194,9 +194,13 @@ One line of the live stream (`thread-stream`). Sent as server-sent events, one J
 - `status`: Session status. Set for `status`. The session changed state.
 - `reset`: no extra field. The transcript changed under the pane (restart, `/clear`, `/resume`). Drop
   the cached thread for this session and read it again.
-- `unsupported`: string, `'codex'`. Sent once, at open, for a Codex pane (transcripts are not read yet); the
-  stream then carries heartbeats only. The thread read for such a pane returns
-  `{title, messages: [], cursor: null, unsupported: 'codex'}`.
+- `unsupported`: string, `'codex'` or `'codex-ambiguous'` (p46). A Codex pane normally reads like a Claude pane
+  (`msg` events from its rollout). `'codex'` is sent once when the pane has no readable rollout (none found yet,
+  or an old-format file); the stream keeps heartbeats and binds when one appears. `'codex-ambiguous'` is sent
+  when two or more panes resolve the same rollout by their working directory alone, so no pane shows it; the
+  stream stops carrying messages, and when the ambiguity ends it sends `reset` and then `msg` events again.
+  The thread read for such a pane returns `{title, messages: [], cursor: null, unsupported: <value>}`. An app
+  that does not know a value shows its generic "not supported" note.
 - `gone`: no extra field. The pane was closed. The bridge ends the stream right after this event; do not
   reconnect for this session.
 

@@ -24,6 +24,7 @@ const path = require('path');
 
 const { detectKind, foregroundCommand, harnessOf, isCodeMode, latestSurfaceEvent } = require('./detect');
 const { readThread, tailThread, readAttachment, uploadRefs, BadCursorError } = require('./transcript-claude');
+const codexT = require('./transcript-codex');
 const uploads = require('./uploads');
 const thumbs = require('./thumbs');
 const { transcriptFor, watchJoin, isAllowedTranscriptPath, WATCH_POLL_MS } = require('./join');
@@ -257,6 +258,14 @@ function createSessionRoutes(deps) {
   // newest list build. A single-row read (thread, stream, rename...) excludes the sessions OTHER panes hold
   // from its cwd guess, so opening a pane never shows another pane's transcript in the same cwd.
   let lastClaims = null;
+  // p46 D5: Codex rollout ids that two or more panes resolve by the cwd guess alone (nothing ties either pane
+  // to its own rollout), as of the newest list build; null until the first build. Such panes answer
+  // `unsupported: 'codex-ambiguous'` instead of showing one thread to both.
+  let lastAmbiguous = null;
+  function codexAmbiguous(j) {
+    if (!j || j.kind !== 'codex' || j.via !== 'cwd') return false;   // process/event joins are the pane's own
+    return lastAmbiguous === null ? true : lastAmbiguous.has(j.sessionId);   // no build yet: cannot tell one pane from two
+  }
   function excludeFor(tabId) {
     if (!lastClaims) return null;
     const s = new Set();
@@ -346,7 +355,7 @@ function createSessionRoutes(deps) {
       join = memo.join && d.excludeSessionIds && d.excludeSessionIds.has(memo.join.sessionId) ? null : memo.join;
     } else if (s.kind !== 'terminal') kindMemo.set(tab.id, { kind: s.kind, join, at: kindNow() });
     else kindMemo.delete(tab.id);
-    // A Codex transcript is never parsed with the Claude reader (no Codex normaliser yet): kind only.
+    // A Codex transcript is never parsed with the Claude reader (p46: sessions/transcript-codex.js reads it): kind only here.
     if (s.kind !== 'terminal' && join && join.kind === 'codex') s.kind = 'codex';
     if (s.kind === 'claude' && isCodeMode(fg)) s.codeMode = true;                    // D287: Code Mode pilot build in front
     if (s.kind === 'terminal') { const h = harnessOf(fg); if (h) s.harness = h; }   // D262: pi, gemini, hermes… (terminal view)
@@ -578,6 +587,9 @@ function createSessionRoutes(deps) {
     const claims = new Map();
     results.forEach((r, i) => { if (r.join && r.join.via !== 'cwd' && !claims.has(r.join.sessionId)) claims.set(r.join.sessionId, tabs[i].tab.id); });
     lastClaims = claims;
+    const codexByRollout = new Map();
+    results.forEach((r) => { if (r.join && r.join.kind === 'codex' && r.join.via === 'cwd') codexByRollout.set(r.join.sessionId, (codexByRollout.get(r.join.sessionId) || 0) + 1); });
+    lastAmbiguous = new Set([...codexByRollout].filter(([, n]) => n > 1).map(([sid]) => sid));
     // p41 D189 (additive): Remote Desktop TCC setup status, so the app can say "needs setup on this Mac".
     let screen = null;
     if (deps.screenStatus) { try { screen = await deps.screenStatus(); } catch (_) { screen = null; } }
@@ -587,12 +599,34 @@ function createSessionRoutes(deps) {
   async function thread(res, entry, u) {
     const d = requestDeps();
     const { session, join } = await describeRow(entry, d, await unreadFor(entry.tab));
-    if (session.kind === 'codex') return send(res, 200, { title: session.title, messages: [], cursor: null, unsupported: 'codex' });
+    if (session.kind === 'codex') return codexThread(res, session, join, u);
     const o = join && await safeOpen(join.path);
     if (!o) return send(res, 200, { title: session.title, messages: [], cursor: null });
     let amap = new Map();
     try { amap = await subagents.agentIdMap(join.path); } catch (_) { amap = new Map(); }
     return page(res, u, join.path, o, { sessionId: session.id, agentIdFor: (tu) => amap.get(tu), uploadRoot: uploadRoot() }, session.title);
+  }
+
+  // p46: a Codex pane's Thread. `unsupported` only when no thread can be shown honestly: no readable rollout
+  // ('codex'), an old-format rollout ('codex', from the reader), or a pane that shares its rollout guess with
+  // another pane ('codex-ambiguous'). The path goes through safeOpen like every transcript read.
+  async function codexThread(res, session, join, u) {
+    const none = (unsupported) => send(res, 200, { title: session.title, messages: [], cursor: null, unsupported });
+    if (!join || join.kind !== 'codex') return none('codex');
+    if (codexAmbiguous(join)) return none('codex-ambiguous');
+    const o = await safeOpen(join.path);
+    if (!o) return none('codex');
+    const before = u.searchParams.get('before');
+    const lim = Number(u.searchParams.get('limit'));
+    try {
+      const t = await codexT.readThread(join.path, { before: before == null || before === '' ? undefined : before,
+        limit: Number.isFinite(lim) && lim > 0 ? Math.min(lim, LIMITS.pageMax) : undefined, fs: shim(o.fh) });
+      if (t.unsupported) return none(t.unsupported);
+      send(res, 200, { title: t.title || session.title, messages: t.messages, cursor: t.cursor });
+    } catch (e) {
+      if (e instanceof codexT.BadCursorError || (e && e.code === 'bad_cursor')) return send(res, 400, { error: 'bad_cursor' });
+      send(res, 500, { error: 'thread_failed' });
+    }
   }
 
   // One Thread page of an open transcript (main or sub-agent): the cursor is the reader's own.
@@ -679,7 +713,8 @@ function createSessionRoutes(deps) {
     res.end(a.data);
   }
 
-  // Kind is read once at open: a codex pane gets one `unsupported` event and heartbeats only. Every
+  // A codex pane tails its rollout with the Codex reader, or gets one `unsupported` event when it has no readable
+  // rollout or shares its guess with another pane (p46). Every
   // status poll re-reads the tree; a pane that is gone gets a `gone` event and the response ends.
   async function stream(req, res, entry) {
     if (streams >= LIMITS.maxStreams) return send(res, 429, { error: 'too_many_streams' });
@@ -690,7 +725,8 @@ function createSessionRoutes(deps) {
     let path0 = null;
     let lastStatus = null;
     let stopJoin = () => {};
-    let sentUnsupported = false;
+    let codexState = null;   // p46: 'tail' | 'ambiguous' | 'unreadable' for a Codex pane, else null
+    let codexPath = null;
     let st = null;
     const emit = (ev) => { if (!closed) res.write(`data: ${redactTokens(JSON.stringify({ ...ev, session: id }))}\n\n`); };
     const done = () => {
@@ -709,7 +745,8 @@ function createSessionRoutes(deps) {
     let first;
     try { first = await describeRow(entry, requestDeps(), await unreadFor(entry.tab)); } catch (_) { first = null; }
     if (closed) return;
-    if (first && first.session.kind === 'codex') { emit({ type: 'unsupported', unsupported: 'codex' }); return; }
+    // p46: a Codex pane with no readable rollout yet says so once; the join watcher binds it when one appears.
+    if (first && first.session.kind === 'codex' && !(first.join && first.join.kind === 'codex')) { codexState = 'unreadable'; emit({ type: 'unsupported', unsupported: 'codex' }); }
     if (first) lastStatus = first.session.status;
     const startTail = (p) => {
       if (tailAbort) tailAbort.abort();
@@ -725,6 +762,33 @@ function createSessionRoutes(deps) {
         } catch (_) { /* a broken tail ends quietly; the join watcher may start another */ }
       })();
     };
+    // p46: tail a Codex rollout with the Codex reader (never the Claude one). Re-run by the join watcher on a
+    // path change and by every status tick, so a second pane opening in the same cwd flips this one to
+    // 'ambiguous' (one `unsupported` event, tail stopped) and back to 'tail' (`reset`, then the tail) when it
+    // stops being ambiguous.
+    const applyCodex = (j) => {
+      if (closed) return;
+      const want = codexAmbiguous(j) ? 'ambiguous' : 'tail';
+      if (want === codexState && j.path === codexPath) return;
+      const was = codexState;
+      codexState = want;
+      codexPath = j.path;
+      if (tailAbort) { tailAbort.abort(); tailAbort = null; }
+      if (want === 'ambiguous') { emit({ type: 'unsupported', unsupported: 'codex-ambiguous' }); return; }
+      if (was === 'ambiguous' || was === 'unreadable') emit({ type: 'reset' });
+      const ac = new AbortController();
+      tailAbort = ac;
+      (async () => {
+        try {
+          for await (const msg of codexT.tailThread(j.path, null, { signal: ac.signal, fs: guardedFs, onReset: () => emit({ type: 'reset' }) })) {
+            if (ac.signal.aborted) break;
+            emit({ type: 'msg', msg });
+          }
+          // The generator ends without an abort only for an old-format rollout: nothing to tail.
+          if (!ac.signal.aborted) emit({ type: 'unsupported', unsupported: 'codex' });
+        } catch (_) { /* a broken tail ends quietly; the join watcher may start another */ }
+      })();
+    };
     const every = (fn) => setInterval(fn, joinPollMs);
     // D299: every poll excludes the sessions other panes hold, as of the newest list build.
     const joinDeps = { ...liveDeps(), setInterval: every };
@@ -734,11 +798,9 @@ function createSessionRoutes(deps) {
       if (path0 != null && j.path !== path0) emit({ type: 'reset' });
       path0 = j.path;
       // The join moved to a Codex rollout: never tail it with the Claude reader.
-      if (j.kind === 'codex') {
-        if (tailAbort) { tailAbort.abort(); tailAbort = null; }
-        if (!sentUnsupported) { sentUnsupported = true; emit({ type: 'unsupported', unsupported: 'codex' }); }
-        return;
-      }
+      if (j.kind === 'codex') { applyCodex(j); return; }
+      codexState = null;
+      codexPath = null;
       startTail(j.path);
     }, joinDeps);
     const statusTick = async () => {
@@ -746,7 +808,8 @@ function createSessionRoutes(deps) {
         const now = await findTab(id);
         if (closed || now === null) return;            // tree read failed: try again next poll
         if (!now) { emit({ type: 'gone' }); res.end(); done(); return; }
-        const { session } = await describeRow(now, requestDeps(), await unreadFor(now.tab));
+        const { session, join: nowJoin } = await describeRow(now, requestDeps(), await unreadFor(now.tab));
+        if (!closed && session.kind === 'codex' && nowJoin && nowJoin.kind === 'codex') applyCodex(nowJoin);
         if (!closed && session.status !== lastStatus) {
           emit({ type: 'status', status: session.status });
           lastStatus = session.status;
