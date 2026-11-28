@@ -23,7 +23,7 @@ C="$APP/Contents"
 mkdir -p "$OUT"
 
 # 0. sanity: the pieces package-bridge.sh adds
-for f in MacOS/HyprMuxBridge MacOS/hyprmux-runtime MacOS/hm-screen-stream MacOS/cloudflared Library/LaunchAgents/com.hyprmux.bridge.core.plist Info.plist; do
+for f in MacOS/HyprMuxBridge MacOS/hyprmux-runtime MacOS/hm-screen-stream MacOS/hm-key-tap MacOS/cloudflared Library/LaunchAgents/com.hyprmux.bridge.core.plist Info.plist; do
   [ -e "$C/$f" ] || { echo "missing $f (run package-bridge.sh first)" >&2; exit 2; }
 done
 CF_TEAM=$(grep '^team=' $HERE/cloudflared.ref | cut -d= -f2-)
@@ -41,6 +41,7 @@ sign --entitlements $HERE/entitlements-runtime.plist "$C/MacOS/hyprmux-runtime"
 sign "$C/MacOS/HyprMuxBridge"
 # 2b. screen video helper (inner binary: signed before the app)
 sign "$C/MacOS/hm-screen-stream"
+sign "$C/MacOS/hm-key-tap"   # HMX k110: hardened runtime, no entitlements (native Swift)
 # Any bundled native addons under Resources/server are signed too (none expected; listed for notarization).
 for lib in "$C"/Resources/server/**/*.(dylib|node)(N); do sign "$lib"; done
 # 3. app

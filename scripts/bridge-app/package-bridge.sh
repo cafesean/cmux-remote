@@ -36,6 +36,13 @@ if [ -n "${BRIDGE_SCREEN_STREAM_BIN:-}" ]; then SS=$BRIDGE_SCREEN_STREAM_BIN; el
 fi
 install -m 755 "$SS" "$C/MacOS/hm-screen-stream"
 
+# 1c. HMX k110: key tap helper (⌘Tab/⌘Space/⌘` for Remote Desktop), found the same way (lib/key-capture.js).
+if [ -n "${BRIDGE_KEY_TAP_BIN:-}" ]; then KT=$BRIDGE_KEY_TAP_BIN; else
+  swift build -c release --package-path $REPO/native/hyprmux-bridge --product hm-key-tap >&2
+  KT=$(swift build -c release --package-path $REPO/native/hyprmux-bridge --show-bin-path)/hm-key-tap
+fi
+install -m 755 "$KT" "$C/MacOS/hm-key-tap"
+
 # 2. runtime
 RT=${BRIDGE_RUNTIME_DIR:-}
 if [ -z "$RT" ]; then RT=$WORK/rt; $HERE/build-runtime.sh $RT; fi

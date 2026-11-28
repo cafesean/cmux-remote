@@ -8,6 +8,7 @@ let package = Package(
     .library(name: "BridgeCore", targets: ["BridgeCore"]),
     .executable(name: "HyprMuxBridge", targets: ["HyprMuxBridge"]),
     .executable(name: "hm-screen-stream", targets: ["HMScreenStream"]),
+    .executable(name: "hm-key-tap", targets: ["HMKeyTap"]),
   ],
   targets: [
     .target(name: "BridgeCore"),
@@ -16,6 +17,8 @@ let package = Package(
     // Screen capture + H.264 helper. Pure, testable logic lives in ScreenStreamCore.
     .target(name: "ScreenStreamCore"),
     .executableTarget(name: "HMScreenStream", dependencies: ["ScreenStreamCore"]),
+    // HMX k110 step 2: system key combos (⌘Tab, ⌘Space, ⌘`) caught on the VIEWING Mac while Remote Desktop has focus.
+    .executableTarget(name: "HMKeyTap", dependencies: ["ScreenStreamCore"]),
     .testTarget(name: "ScreenStreamCoreTests", dependencies: ["ScreenStreamCore"]),
   ]
 )

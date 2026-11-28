@@ -364,6 +364,8 @@ func postStep(_ s: EventStep, dry: Bool) -> Bool {
   case .pause: return true
   }
   guard let e else { return false }
+  // HMX k110: marked, so this Mac's own key tap (hm-key-tap) lets remote-sent keys through (RD to the same Mac).
+  e.setIntegerValueField(.eventSourceUserData, value: KeyCombo.postedMarker)
   e.post(tap: .cghidEventTap)
   return true
 }

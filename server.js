@@ -1242,6 +1242,30 @@ async function handleApi(req, res, u) {
     });
   }
   // p41 D97: Mac screen — info + one frame (bridge gates on SCREEN_VIEW, rate-limits, size-caps).
+  // HMX k110 step 2: system key combos for Remote Desktop, on THIS (viewing) Mac. Loopback-only: a phone or a web
+  // page never turns the keyboard tap on; the device key (authed above) is required too. lib/key-capture.js.
+  if (p === '/api/keys/capture' && req.method === 'POST') {
+    if (!pairing.localOnly(req)) return sendJson(res, 403, { error: 'local_only' });
+    return readBody(req, (b) => {
+      if (!b || typeof b.on !== 'boolean') return sendJson(res, 400, { error: 'bad_json' });
+      if (b.retry === true) keyCapture.retry();
+      sendJson(res, 200, keyCapture.capture(b.on));
+    });
+  }
+  if (p === '/api/keys/stream' && req.method === 'GET') {
+    if (!pairing.localOnly(req)) return sendJson(res, 403, { error: 'local_only' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    res.write(`data: ${JSON.stringify({ kind: 'hello', ...keyCapture.state() })}\n\n`);
+    const off = keyCapture.subscribe((o) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(o)}\n\n`); });
+    // Bun front door: 'close' may never fire for a client that left early; poll the socket too (tools:cmux rule).
+    const ka = setInterval(() => {
+      if (req.destroyed || res.socket?.destroyed || res.writableEnded) { clearInterval(ka); off(); return; }
+      res.write(': ka\n\n');
+    }, 15000);
+    const done = () => { clearInterval(ka); off(); };
+    req.on('close', done); res.on('close', done);
+    return;
+  }
   if (req.method === 'GET' && (p === '/api/cmux/screen/info' || p === '/api/cmux/screen/shot' || p === '/api/cmux/screen/dialogs')) {   // D135: + dialogs
     const m = findMachine(u.searchParams.get('machine'));
     if (!m) return sendJson(res, 404, { error: 'no_machine' });
@@ -1373,6 +1397,8 @@ function afterListen() {
 }
 // p43: video Remote Desktop WebSocket (one viewer per machine). Every other upgrade path answers 404.
 const { screenInfoFromBridge } = require('./lib/screen-ws');
+// HMX k110 step 2: the viewing Mac's key tap (hm-key-tap), driven by /api/keys/capture + /api/keys/stream.
+const keyCapture = require('./lib/key-capture').createKeyCapture({ log: (m) => console.log(`${new Date().toISOString()} ${m}`) });
 // lib/screen-ws.js owns gates, the grant ledger and input epochs; the Bun front door can call screenWs.attach().
 const wsLib = require('./lib/ws');
 const screenWs = require('./lib/screen-ws').createScreenWs({
