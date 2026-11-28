@@ -8,7 +8,7 @@ final class KeyComboTests: XCTestCase {
     XCTAssertEqual(KeyCombo.match(keycode: 48, flags: c | s), "cmd+shift+tab")
     XCTAssertEqual(KeyCombo.match(keycode: 49, flags: c), "cmd+space")
     XCTAssertEqual(KeyCombo.match(keycode: 50, flags: c), "cmd+`")
-    XCTAssertEqual(KeyCombo.match(keycode: 50, flags: c | s), "cmd+shift+`")
+    XCTAssertNil(KeyCombo.match(keycode: 50, flags: c | s))   // not in the remote KEY_ALLOW
   }
   func testEverythingElsePasses() {
     XCTAssertNil(KeyCombo.match(keycode: 48, flags: 0))                                  // plain Tab

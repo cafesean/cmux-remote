@@ -18,7 +18,7 @@ public enum KeyCombo {
     switch keycode {
     case tab: return sh ? "cmd+shift+tab" : "cmd+tab"
     case space: return sh ? nil : "cmd+space"
-    case grave: return sh ? "cmd+shift+`" : "cmd+`"
+    case grave: return sh ? nil : "cmd+`"   // ⌘⇧` is not in the remote KEY_ALLOW: it stays on this Mac
     default: return nil
     }
   }
