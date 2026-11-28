@@ -563,7 +563,7 @@ function createSessionRoutes(deps) {
     // D299: two live cmux panes are two rows even when they resolve to one sessionId; only rows that are
     // not cmux surfaces fold.
     const groups = new Map();
-    const keyOf = (r) => r.session.kind === 'claude' && r.join && r.join.sessionId;
+    const keyOf = (r) => (r.session.kind === 'claude' || r.session.kind === 'codex') && r.join && `${r.session.kind}:${r.join.sessionId}`;   // p46: a Codex cmux pane and its tmux orphan are one session too
     for (const r of results) {
       const k = keyOf(r);
       if (!k) continue;
@@ -588,7 +588,7 @@ function createSessionRoutes(deps) {
     results.forEach((r, i) => { if (r.join && r.join.via !== 'cwd' && !claims.has(r.join.sessionId)) claims.set(r.join.sessionId, tabs[i].tab.id); });
     lastClaims = claims;
     const codexByRollout = new Map();
-    results.forEach((r) => { if (r.join && r.join.kind === 'codex' && r.join.via === 'cwd') codexByRollout.set(r.join.sessionId, (codexByRollout.get(r.join.sessionId) || 0) + 1); });
+    kept.forEach((r) => { if (r.join && r.join.kind === 'codex' && r.join.via === 'cwd') codexByRollout.set(r.join.sessionId, (codexByRollout.get(r.join.sessionId) || 0) + 1); });   // after the fold: one session = one pane
     lastAmbiguous = new Set([...codexByRollout].filter(([, n]) => n > 1).map(([sid]) => sid));
     // p41 D189 (additive): Remote Desktop TCC setup status, so the app can say "needs setup on this Mac".
     let screen = null;
@@ -809,7 +809,11 @@ function createSessionRoutes(deps) {
         if (closed || now === null) return;            // tree read failed: try again next poll
         if (!now) { emit({ type: 'gone' }); res.end(); done(); return; }
         const { session, join: nowJoin } = await describeRow(now, requestDeps(), await unreadFor(now.tab));
-        if (!closed && session.kind === 'codex' && nowJoin && nowJoin.kind === 'codex') applyCodex(nowJoin);
+        if (!closed && session.kind === 'codex' && nowJoin && nowJoin.kind === 'codex') {
+          if (path0 != null && nowJoin.path !== path0) emit({ type: 'reset' });   // same rule as the join watcher; it then sees path0 already moved
+          path0 = nowJoin.path;
+          applyCodex(nowJoin);
+        }
         if (!closed && session.status !== lastStatus) {
           emit({ type: 'status', status: session.status });
           lastStatus = session.status;
