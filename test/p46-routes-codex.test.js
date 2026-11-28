@@ -257,3 +257,23 @@ test('ambiguity ends live: when the other pane goes away the stream resets and t
     assert.equal(m.msg.kind, 'assistant');
   } finally { s.close(); await b.stop(); }
 });
+
+test('a rewritten rollout (resume) emits one reset on the stream, then new rows arrive (C3)', async () => {
+  const h = tmp();
+  const r = rollouts(h, [{ id: 'cx5', cwd: '/work/beta' }]);
+  bindEvent(h, IDS.sfB1, 'cx5', r.cx5, '/work/beta');
+  const b = await boot(h);
+  const s = sse(b.socketPath, `/cmux/sessions/${idOf(IDS.sfB1)}/thread-stream`);
+  try {
+    await list(b);
+    await sleep(700);
+    fs.writeFileSync(r.cx5, line(meta('cx5', '/work/beta')));      // shorter than before: the file was rewritten
+    await s.waitFor((f) => f.type === 'reset', 12000);
+    await sleep(500);
+    fs.appendFileSync(r.cx5, line(agent(5, 'after-rewrite')));
+    await s.waitFor((f) => f.type === 'msg' && f.msg && f.msg.text === 'after-rewrite', 12000);
+    assert.equal(s.frames.filter((f) => f.type === 'reset').length, 1, JSON.stringify(s.frames));
+    const t = await thread(b, IDS.sfB1);
+    assert.deepEqual(texts(t), ['after-rewrite']);
+  } finally { s.close(); await b.stop(); }
+});
